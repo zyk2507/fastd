@@ -211,8 +211,8 @@ static inline bool is_data_packet(uint8_t packet_type) {
 	return !(packet_type & PACKET_L2TP_T) && !is_handshake_packet(packet_type);
 }
 
-/** Handles a packet read from a socket */
-static void handle_socket_receive(
+/** Handles a packet read from a socket or TURN relay */
+void fastd_receive_packet(
 	fastd_socket_t *sock, const fastd_peer_address_t *local_addr, const fastd_peer_address_t *remote_addr,
 	fastd_buffer_t *buffer) {
 	fastd_peer_t *peer = NULL;
@@ -335,7 +335,7 @@ void fastd_receive(fastd_socket_t *sock) {
 	fastd_peer_address_simplify(&local_addr);
 	fastd_peer_address_simplify(&recvaddr);
 
-	handle_socket_receive(sock, &local_addr, &recvaddr, buffer);
+	fastd_receive_packet(sock, &local_addr, &recvaddr, buffer);
 }
 
 /** Handles a received and decrypted payload packet */

@@ -95,6 +95,9 @@
 /** Defined if UPnP IGD port mapping support is enabled */
 #mesondefine WITH_UPNP_IGD
 
+/** Defined if TURN relay support is enabled */
+#mesondefine WITH_TURN
+
 
 /** Defined if L2TP offloading is enabled */
 #mesondefine WITH_OFFLOAD_L2TP

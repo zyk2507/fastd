@@ -44,6 +44,10 @@ The build can be configured using the command ``meson configure``; running it
 without any additional arguments will show all available variables. Settings can
 be passed to ``meson setup`` or ``meson configure`` using ``-DVARIABLE=VALUE``.
 
+Optional NAT traversal features can be controlled with ``-Dnatpmp=auto|enabled|disabled``,
+``-Dupnp=auto|enabled|disabled`` and ``-Dturn=auto|enabled|disabled``. TURN relay support uses
+libnice.
+
 * By default, fastd will build against libsodium. If you want to use NaCl instead, add ``-Duse_nacl=true``
 * If you have a recent enough toolchain (GCC 4.8 or higher recommended), you can enable link-time optimization by
   adding ``-Db_lto=true``

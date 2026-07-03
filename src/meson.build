@@ -69,6 +69,7 @@ src = [
 	'status.c',
 	'task.c',
 	'time.c',
+	'turn.c',
 	'vector.c',
 	'verify.c',
 ]
@@ -135,6 +136,15 @@ if not get_option('upnp').disabled()
 		deps += upnp_igd_dep
 	elif get_option('upnp').enabled()
 		error('UPnP IGD support requested, but miniupnpc was not found')
+	endif
+endif
+
+with_turn = false
+if not get_option('turn').disabled()
+	turn_dep = dependency('nice', required : get_option('turn'))
+	with_turn = turn_dep.found()
+	if with_turn
+		deps += turn_dep
 	endif
 endif
 
@@ -271,6 +281,7 @@ conf_data.set('WITH_SYSTEMD', with_systemd)
 conf_data.set('WITH_ZSTD', with_zstd)
 conf_data.set('WITH_NATPMP', with_natpmp)
 conf_data.set('WITH_UPNP_IGD', with_upnp_igd)
+conf_data.set('WITH_TURN', with_turn)
 
 conf_data.set('WITH_OFFLOAD_L2TP', with_offload_l2tp)
 

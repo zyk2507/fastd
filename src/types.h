@@ -110,6 +110,7 @@ typedef enum fastd_task_type {
 	TASK_TYPE_MAINTENANCE, /**< Scheduled maintenance */
 	TASK_TYPE_PEER,        /**< Peer maintenance (handshake, reset, keepalive) */
 	TASK_TYPE_NATPMP,      /**< NAT-PMP request retry or lease renewal */
+	TASK_TYPE_TURN,        /**< TURN relay maintenance */
 } fastd_task_type_t;
 
 
@@ -136,6 +137,8 @@ typedef struct fastd_bind_address fastd_bind_address_t;
 typedef struct fastd_iface fastd_iface_t;
 typedef struct fastd_socket fastd_socket_t;
 typedef struct fastd_port_mapping fastd_port_mapping_t;
+typedef struct fastd_turn_server fastd_turn_server_t;
+typedef struct fastd_turn_peer fastd_turn_peer_t;
 typedef struct fastd_peer_group fastd_peer_group_t;
 typedef struct fastd_eth_addr fastd_eth_addr_t;
 typedef struct fastd_eth_header fastd_eth_header_t;

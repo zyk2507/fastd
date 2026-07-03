@@ -37,6 +37,7 @@ fastd_port_mapping_mode_t fastd_config_port_mapping_mode(const char *name);
 void fastd_config_port_mapping(const char *name);
 bool fastd_config_port_mapping_supported(fastd_port_mapping_mode_t mode, const char **error);
 void fastd_config_natpmp(bool enabled);
+bool fastd_config_turn_supported(const char **error);
 void fastd_config_bind_address(const fastd_peer_address_t *address, const char *bindtodev, unsigned flags);
 void fastd_config_release(void);
 void fastd_config_handle_options(int argc, char *const argv[]);

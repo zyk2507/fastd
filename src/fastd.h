@@ -334,6 +334,8 @@ struct fastd_context {
 
 	fastd_port_mapping_t *port_mapping; /**< Global automatic port mapping state */
 
+	fastd_task_t turn_task; /**< Drives the TURN relay GLib main context */
+
 	bool has_floating; /**< Specifies if any of the configured peers have floating remotes */
 	uint16_t max_mtu;  /**< The maximum MTU of all peer-specific interfaces */
 	size_t max_buffer; /**< Maximum buffer size needed for any combination of peer MTU, method, or handshake */
@@ -400,6 +402,9 @@ void fastd_send_data(fastd_buffer_t *buffer, fastd_peer_t *source, fastd_peer_t 
 void fastd_receive_unknown_init(void);
 void fastd_receive_unknown_free(void);
 void fastd_receive_unknown_purge(fastd_peer_address_t addr);
+void fastd_receive_packet(
+	fastd_socket_t *sock, const fastd_peer_address_t *local_addr, const fastd_peer_address_t *remote_addr,
+	fastd_buffer_t *buffer);
 void fastd_receive(fastd_socket_t *sock);
 void fastd_handle_receive(fastd_peer_t *peer, fastd_buffer_t *buffer, bool reordered);
 
@@ -419,6 +424,10 @@ void fastd_port_mapping_refresh(void);
 void fastd_port_mapping_handle(void);
 void fastd_port_mapping_handle_task(void);
 void fastd_port_mapping_cleanup(void);
+
+bool fastd_turn_check(void);
+void fastd_turn_handle_task(void);
+void fastd_turn_cleanup(void);
 
 bool fastd_iface_format_name(char ifname[IFNAMSIZ], const fastd_peer_t *peer);
 fastd_iface_t *fastd_iface_open(fastd_peer_t *peer);

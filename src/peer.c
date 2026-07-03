@@ -16,6 +16,7 @@
 #include "peer_group.h"
 #include "peer_hashtable.h"
 #include "polling.h"
+#include "turn.h"
 
 #include <arpa/inet.h>
 #include <sys/wait.h>
@@ -297,6 +298,7 @@ static void reset_peer(fastd_peer_t *peer) {
 	}
 
 	free_socket(peer);
+	fastd_turn_reset_peer(peer);
 
 	conf.protocol->reset_peer_state(peer);
 
@@ -462,6 +464,7 @@ void fastd_peer_free(fastd_peer_t *peer) {
 	}
 
 	VECTOR_FREE(peer->remotes);
+	fastd_turn_server_free(peer->turn_servers);
 
 	free(peer->ifname);
 	free(peer->name);
@@ -711,6 +714,12 @@ static inline bool peer_configs_equal(const fastd_peer_t *peer1, const fastd_pee
 		return false;
 
 	if (peer1->port_mapping != peer2->port_mapping)
+		return false;
+
+	if (peer1->turn_relay.set != peer2->turn_relay.set || peer1->turn_relay.state != peer2->turn_relay.state)
+		return false;
+
+	if (!fastd_turn_server_list_equal(peer1->turn_servers, peer2->turn_servers))
 		return false;
 
 	size_t i;

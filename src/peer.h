@@ -58,6 +58,8 @@ struct fastd_peer {
 	char *ifname;                           /**< Peer-specific interface name */
 	uint16_t mtu;                           /**< Peer-specific interface MTU */
 	fastd_port_mapping_mode_t port_mapping; /**< Peer-specific automatic port mapping mode */
+	fastd_tristate_t turn_relay;            /**< Peer-specific TURN relay setting */
+	fastd_turn_server_t *turn_servers;      /**< Peer-specific TURN servers */
 
 	/* Starting here, more dynamic fields follow: */
 
@@ -91,6 +93,8 @@ struct fastd_peer {
 	fastd_timeout_t keepalive_timeout; /**< The timeout after which a keepalive is sent to the peer */
 
 	fastd_stats_t stats; /**< Traffic statistics */
+
+	fastd_turn_peer_t *turn_peer; /**< TURN relay state */
 
 #ifdef WITH_DYNAMIC_PEERS
 	fastd_timeout_t verify_timeout; /**< Specifies the minimum time after which on-verify may be run again */
@@ -275,6 +279,22 @@ static inline fastd_port_mapping_mode_t fastd_peer_get_port_mapping_mode(const f
 		return peer->port_mapping;
 
 	return fastd_peer_group_get_port_mapping_mode(peer ? peer->group : conf.peer_group);
+}
+
+/** Returns the effective TURN relay setting for a peer */
+static inline bool fastd_peer_get_turn_relay(const fastd_peer_t *peer) {
+	if (peer && peer->turn_relay.set)
+		return peer->turn_relay.state;
+
+	return fastd_peer_group_get_turn_relay(peer ? peer->group : conf.peer_group);
+}
+
+/** Returns the effective TURN server list for a peer */
+static inline const fastd_turn_server_t *fastd_peer_get_turn_servers(const fastd_peer_t *peer) {
+	if (peer && peer->turn_servers)
+		return peer->turn_servers;
+
+	return fastd_peer_group_get_turn_servers(peer ? peer->group : conf.peer_group);
 }
 
 /** Returns the MTU to use for a peer */

@@ -95,6 +95,7 @@
 %token TOK_OFFLOAD
 %token TOK_ON
 %token TOK_PACKET
+%token TOK_PASSWORD
 %token TOK_PEER
 %token TOK_PEERS
 %token TOK_PERSIST
@@ -104,9 +105,11 @@
 %token TOK_POST_DOWN
 %token TOK_PRE_UP
 %token TOK_PROTOCOL
+%token TOK_RELAY
 %token TOK_REMOTE
 %token TOK_SECRET
 %token TOK_SECURE
+%token TOK_SERVER
 %token TOK_SOCKET
 %token TOK_STATUS
 %token TOK_STDERR
@@ -115,6 +118,7 @@
 %token TOK_TAP
 %token TOK_TO
 %token TOK_TUN
+%token TOK_TURN
 %token TOK_UP
 %token TOK_UPNP_IGD
 %token TOK_USE
@@ -130,6 +134,7 @@
 	#include "config.h"
 	#include "peer.h"
 	#include "peer_group.h"
+	#include "turn.h"
 
 	#include <limits.h>
 
@@ -140,6 +145,8 @@
 	static bool fastd_config_set_port_mapping(
 		YYLTYPE *loc, fastd_parser_state_t *state, fastd_port_mapping_mode_t *dest,
 		fastd_port_mapping_mode_t mode);
+	static bool fastd_config_set_turn_relay(
+		YYLTYPE *loc, fastd_parser_state_t *state, fastd_tristate_t *dest, bool enabled);
 }
 
 
@@ -214,6 +221,11 @@ peer_group_statement:
 			if (!fastd_config_set_port_mapping(&@$, state, &state->peer_group->port_mapping, $2))
 				YYERROR;
 		}
+	|	TOK_TURN TOK_RELAY boolean ';' {
+			if (!fastd_config_set_turn_relay(&@$, state, &state->peer_group->turn_relay, $3))
+				YYERROR;
+		}
+	|	TOK_TURN TOK_SERVER turn_server ';'
 	|	TOK_METHOD method ';'
 	|	TOK_ON TOK_UP on_up ';'
 	|	TOK_ON TOK_DOWN on_down ';'
@@ -506,7 +518,24 @@ peer_statement: TOK_REMOTE peer_remote ';'
 			if (!fastd_config_set_port_mapping(&@$, state, &state->peer->port_mapping, $2))
 				YYERROR;
 		}
+	|	TOK_TURN TOK_RELAY boolean ';' {
+			if (!fastd_config_set_turn_relay(&@$, state, &state->peer->turn_relay, $3))
+				YYERROR;
+		}
+	|	TOK_TURN TOK_SERVER turn_server ';'
 	|	TOK_INCLUDE peer_include ';'
+	;
+
+turn_server:	TOK_STRING port TOK_USER TOK_STRING TOK_PASSWORD TOK_STRING {
+			fastd_turn_server_add(
+				state->peer ? &state->peer->turn_servers : &state->peer_group->turn_servers,
+				$1->str, $2, $4->str, $6->str);
+		}
+	|	TOK_STRING port {
+			fastd_turn_server_add(
+				state->peer ? &state->peer->turn_servers : &state->peer_group->turn_servers,
+				$1->str, $2, "", "");
+		}
 	;
 
 peer_remote:	maybe_ipv4 TOK_ADDR4 port {
@@ -784,5 +813,17 @@ static bool fastd_config_set_port_mapping(
 	}
 
 	*dest = mode;
+	return true;
+}
+
+static bool fastd_config_set_turn_relay(
+	YYLTYPE *loc, fastd_parser_state_t *state, fastd_tristate_t *dest, bool enabled) {
+	const char *error = NULL;
+	if (enabled && !fastd_config_turn_supported(&error)) {
+		fastd_config_error(loc, state, error);
+		return false;
+	}
+
+	*dest = enabled ? FASTD_TRISTATE_TRUE : FASTD_TRISTATE_FALSE;
 	return true;
 }

@@ -38,6 +38,10 @@ static void handle_task(void) {
 		fastd_port_mapping_handle_task();
 		break;
 
+	case TASK_TYPE_TURN:
+		fastd_turn_handle_task();
+		break;
+
 	default:
 		exit_bug("unknown task type");
 	}

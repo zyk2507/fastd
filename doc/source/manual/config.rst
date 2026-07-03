@@ -80,6 +80,20 @@ Example config:
   multiple peers share the same fixed bind socket, enabling port mapping for any of these peers maps the shared
   local UDP port.
 
+| ``turn relay yes|no;``
+| ``turn server "<address>" port <port> [user "<username>" password "<password>"];``
+
+  Configures use of external TURN servers for UDP relay. This is disabled by default. These options may be set
+  globally, in peer groups, or in peer sections; peer settings override peer group settings, and peer group
+  settings inherit from their parent group. Multiple ``turn server`` statements may be configured at the same
+  level. If a peer has its own server list, it uses that list instead of the inherited list.
+
+  When ``turn relay yes`` is enabled for a peer, fastd connects to the configured TURN server through libnice,
+  creates a relay allocation, and sends packets to the peer's normal ``remote`` address through that relay. This
+  mode is intended for non-ICE peers and does not exchange ICE candidates in the fastd handshake. The remote side
+  must accept packets from the TURN relay address, so this is typically used with floating peers or otherwise
+  permissive remote address handling.
+
 | ``cipher "<cipher>" use "<implementation>";``
 
   Chooses a specific impelemenation for a cipher. Normally, the default setting is already the best choice.

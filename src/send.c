@@ -17,6 +17,7 @@
 
 #include "fastd.h"
 #include "peer.h"
+#include "turn.h"
 
 #include <sys/uio.h>
 
@@ -71,6 +72,9 @@ void fastd_send(
 	fastd_peer_t *peer, const fastd_buffer_t *buffer, size_t stat_size) {
 	if (!sock)
 		exit_bug("send: sock == NULL");
+
+	if (fastd_turn_send(peer, sock, local_addr, remote_addr, buffer, stat_size))
+		return;
 
 	struct msghdr msg = {};
 	uint8_t cbuf[1024] __attribute__((aligned(8))) = {};

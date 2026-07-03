@@ -25,6 +25,7 @@
 #include "method.h"
 #include "peer.h"
 #include "peer_group.h"
+#include "turn.h"
 
 #include <dirent.h>
 #include <grp.h>
@@ -62,6 +63,7 @@ static void default_config(void) {
 	conf.peer_group->name = fastd_strdup("default");
 	conf.peer_group->max_connections = -1;
 	conf.peer_group->port_mapping = PORT_MAPPING_OFF;
+	conf.peer_group->turn_relay = FASTD_TRISTATE_FALSE;
 }
 
 /** Handles the configuration of a handshake protocol */
@@ -229,6 +231,17 @@ void fastd_config_natpmp(bool enabled) {
 	conf.peer_group->port_mapping = mode;
 }
 
+/** Returns true if TURN relay can be used with this build */
+bool fastd_config_turn_supported(UNUSED const char **error) {
+#ifdef WITH_TURN
+	return true;
+#else
+	if (error)
+		*error = "TURN relay is not supported by this build of fastd";
+	return false;
+#endif
+}
+
 /** Handles the configuration of a bind address */
 void fastd_config_bind_address(const fastd_peer_address_t *address, const char *bindtodev, unsigned flags) {
 #ifndef USE_BINDTODEVICE
@@ -294,6 +307,7 @@ static void free_peer_group(fastd_peer_group_t *group) {
 
 	fastd_string_stack_free(group->peer_dirs);
 	fastd_string_stack_free(group->methods);
+	fastd_turn_server_free(group->turn_servers);
 
 	fastd_shell_command_unset(&group->on_up);
 	fastd_shell_command_unset(&group->on_down);
@@ -680,6 +694,9 @@ static void config_check_base(void) {
 		exit(1);
 
 	if (!fastd_port_mapping_check())
+		exit(1);
+
+	if (!fastd_turn_check())
 		exit(1);
 }
 
