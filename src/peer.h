@@ -14,6 +14,7 @@
 #pragma once
 
 #include "fastd.h"
+#include "peer_group.h"
 
 
 /** The state of a peer */
@@ -54,8 +55,9 @@ struct fastd_peer {
 	fastd_protocol_key_t *key;                   /**< The peer's public key */
 	fastd_protocol_peer_state_t *protocol_state; /**< Protocol-specific peer state */
 
-	char *ifname; /**< Peer-specific interface name */
-	uint16_t mtu; /**< Peer-specific interface MTU */
+	char *ifname;                           /**< Peer-specific interface name */
+	uint16_t mtu;                           /**< Peer-specific interface MTU */
+	fastd_port_mapping_mode_t port_mapping; /**< Peer-specific automatic port mapping mode */
 
 	/* Starting here, more dynamic fields follow: */
 
@@ -265,6 +267,14 @@ static inline void fastd_peer_clear_keepalive(fastd_peer_t *peer) {
 /** Checks if a peer uses dynamic sockets (which means that each connection attempt uses a new socket) */
 static inline bool fastd_peer_is_socket_dynamic(const fastd_peer_t *peer) {
 	return (!peer->sock || !peer->sock->addr);
+}
+
+/** Returns the effective automatic port mapping mode for a peer */
+static inline fastd_port_mapping_mode_t fastd_peer_get_port_mapping_mode(const fastd_peer_t *peer) {
+	if (peer && peer->port_mapping)
+		return peer->port_mapping;
+
+	return fastd_peer_group_get_port_mapping_mode(peer ? peer->group : conf.peer_group);
 }
 
 /** Returns the MTU to use for a peer */

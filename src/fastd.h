@@ -239,8 +239,6 @@ struct fastd_config {
 		int level;                               /**< Configured compression level */
 	} compression;                                   /**< Payload compression configuration */
 
-	bool natpmp; /**< Enable NAT-PMP port mapping */
-
 #ifdef USE_USER
 	char *user;  /**< Specifies which user to switch to after initialization */
 	char *group; /**< Can specify an alternative group to switch to */
@@ -417,6 +415,7 @@ void fastd_resolve_peer(fastd_peer_t *peer, fastd_remote_t *remote);
 
 bool fastd_port_mapping_check(void);
 void fastd_port_mapping_init(void);
+void fastd_port_mapping_refresh(void);
 void fastd_port_mapping_handle(void);
 void fastd_port_mapping_handle_task(void);
 void fastd_port_mapping_cleanup(void);
@@ -635,13 +634,14 @@ static inline bool fastd_use_offload_l2tp(void) {
 #endif
 }
 
-/** Returns true if NAT-PMP port mapping is enabled */
-static inline bool fastd_use_natpmp(void) {
-#ifdef WITH_NATPMP
-	return conf.natpmp;
-#else
-	return false;
-#endif
+/** Returns true if a port mapping mode uses NAT-PMP */
+static inline bool fastd_port_mapping_uses_natpmp(fastd_port_mapping_mode_t mode) {
+	return mode == PORT_MAPPING_NATPMP || mode == PORT_MAPPING_AUTO;
+}
+
+/** Returns true if a port mapping mode uses UPnP IGD */
+static inline bool fastd_port_mapping_uses_upnp_igd(fastd_port_mapping_mode_t mode) {
+	return mode == PORT_MAPPING_UPNP_IGD || mode == PORT_MAPPING_AUTO;
 }
 
 /** Returns true if android integration is enabled */

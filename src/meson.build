@@ -123,6 +123,21 @@ if not get_option('natpmp').disabled()
 	endif
 endif
 
+with_upnp_igd = false
+if not get_option('upnp').disabled()
+	upnp_igd_dep = dependency('miniupnpc', required : false)
+	if not upnp_igd_dep.found() and cc.has_header('miniupnpc/miniupnpc.h')
+		upnp_igd_dep = cc.find_library('miniupnpc', required : get_option('upnp').enabled())
+	endif
+
+	with_upnp_igd = upnp_igd_dep.found()
+	if with_upnp_igd
+		deps += upnp_igd_dep
+	elif get_option('upnp').enabled()
+		error('UPnP IGD support requested, but miniupnpc was not found')
+	endif
+endif
+
 with_capabilities = get_option('capabilities').enabled() or (get_option('capabilities').auto() and is_linux)
 if with_capabilities
 	deps += dependency('libcap')
@@ -255,6 +270,7 @@ conf_data.set('WITH_STATUS_SOCKET', with_status_socket)
 conf_data.set('WITH_SYSTEMD', with_systemd)
 conf_data.set('WITH_ZSTD', with_zstd)
 conf_data.set('WITH_NATPMP', with_natpmp)
+conf_data.set('WITH_UPNP_IGD', with_upnp_igd)
 
 conf_data.set('WITH_OFFLOAD_L2TP', with_offload_l2tp)
 

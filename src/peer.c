@@ -710,6 +710,9 @@ static inline bool peer_configs_equal(const fastd_peer_t *peer1, const fastd_pee
 	if (!strequal(peer1->ifname, peer2->ifname))
 		return false;
 
+	if (peer1->port_mapping != peer2->port_mapping)
+		return false;
+
 	size_t i;
 	for (i = 0; i < VECTOR_LEN(peer1->remotes); i++) {
 		const fastd_remote_t *remote1 = &VECTOR_INDEX(peer1->remotes, i),

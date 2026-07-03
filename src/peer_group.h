@@ -31,6 +31,7 @@ struct fastd_peer_group {
 
 	int max_connections;           /**< The maximum number of connections to allow in this group; -1 for no limit */
 	fastd_string_stack_t *methods; /**< The list of configured method names */
+	fastd_port_mapping_mode_t port_mapping; /**< Automatic port mapping mode for peers in this group */
 
 	fastd_shell_command_t on_up;   /**< The command to execute after the initialization of the tunnel interface */
 	fastd_shell_command_t on_down; /**< The command to execute before the destruction of the tunnel interface */
@@ -94,3 +95,8 @@ struct fastd_peer_group {
  */
 #define fastd_peer_group_lookup_peer_shell_command(peer, attr) \
 	container_of(fastd_peer_group_lookup_peer(peer, attr.command), fastd_shell_command_t, command)
+
+/** Returns the inherited automatic port mapping mode for a peer group */
+static inline fastd_port_mapping_mode_t fastd_peer_group_get_port_mapping_mode(const fastd_peer_group_t *group) {
+	return *fastd_peer_group_lookup(group, port_mapping);
+}

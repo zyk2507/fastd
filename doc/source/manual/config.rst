@@ -64,13 +64,21 @@ Example config:
   will use a random port for each outgoing connection both for IPv4 and IPv6.
 
 
+| ``port-mapping off|nat-pmp|upnp-igd|auto;``
 | ``nat-pmp yes|no;``
 
-  Enables automatic NAT-PMP port mapping. This is disabled by default. When enabled, fastd asks the default
-  gateway to map the UDP ports of fixed IPv4-compatible bind sockets, renews these mappings periodically, and
-  removes them again during shutdown.
+  Configures automatic UDP port mapping. This is disabled by default. This option may be set globally, in
+  peer groups, or in peer sections; peer settings override peer group settings, and peer group settings inherit
+  from their parent group.
 
-  NAT-PMP does not apply to IPv6-only sockets or sockets created dynamically for individual peers.
+  ``nat-pmp`` asks the default gateway to map the UDP ports of fixed IPv4-compatible bind sockets, renews these
+  mappings periodically, and removes them again during shutdown. ``upnp-igd`` uses UPnP IGD to add permanent UDP
+  mappings and removes them during shutdown. ``auto`` uses all automatic port mapping backends compiled into
+  fastd. ``nat-pmp yes|no`` is kept as a compatibility alias for ``port-mapping nat-pmp|off``.
+
+  NAT-PMP and UPnP IGD do not apply to IPv6-only sockets or sockets created dynamically for individual peers. If
+  multiple peers share the same fixed bind socket, enabling port mapping for any of these peers maps the shared
+  local UDP port.
 
 | ``cipher "<cipher>" use "<implementation>";``
 

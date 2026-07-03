@@ -310,6 +310,11 @@ static void option_compression_level(const char *arg) {
 	fastd_config_compression_level(arg);
 }
 
+/** Handles the --port-mapping option */
+static void option_port_mapping(const char *arg) {
+	fastd_config_port_mapping(arg);
+}
+
 /** Handles the --nat-pmp option */
 static void option_natpmp(void) {
 	fastd_config_natpmp(true);

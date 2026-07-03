@@ -91,6 +91,7 @@
 %token TOK_NAT_PMP
 %token TOK_NO
 %token TOK_NONE
+%token TOK_OFF
 %token TOK_OFFLOAD
 %token TOK_ON
 %token TOK_PACKET
@@ -99,6 +100,7 @@
 %token TOK_PERSIST
 %token TOK_PMTU
 %token TOK_PORT
+%token TOK_PORT_MAPPING
 %token TOK_POST_DOWN
 %token TOK_PRE_UP
 %token TOK_PROTOCOL
@@ -114,6 +116,7 @@
 %token TOK_TO
 %token TOK_TUN
 %token TOK_UP
+%token TOK_UPNP_IGD
 %token TOK_USE
 %token TOK_USER
 %token TOK_VERBOSE
@@ -134,6 +137,9 @@
 		fastd_peer_address_t address, int64_t maybe_port, const char *bindtodevice, unsigned bind_default);
 
 	static void fastd_config_error(YYLTYPE *loc, fastd_parser_state_t *state, const char *s);
+	static bool fastd_config_set_port_mapping(
+		YYLTYPE *loc, fastd_parser_state_t *state, fastd_port_mapping_mode_t *dest,
+		fastd_port_mapping_mode_t mode);
 }
 
 
@@ -150,6 +156,7 @@
 %type <uint64> maybe_bind_default
 %type <uint64> bind_default
 %type <uint64> drop_capabilities_enabled
+%type <uint64> port_mapping
 %type <tristate> autobool
 %type <boolean> sync
 
@@ -176,9 +183,6 @@ statement:	peer_group_statement
 	|	TOK_CIPHER cipher ';'
 	|	TOK_MAC mac ';'
 	|	TOK_COMPRESSION compression ';'
-	|	TOK_NAT_PMP boolean ';' {
-			fastd_config_natpmp($2);
-		}
 	|	TOK_LOG log ';'
 	|	TOK_HIDE hide ';'
 	|	TOK_INTERFACE interface ';'
@@ -201,6 +205,15 @@ peer_group_statement:
 		TOK_PEER peer '{' peer_conf '}' peer_after
 	|	TOK_PEER TOK_GROUP peer_group '{' peer_group_config '}' peer_group_after
 	|	TOK_PEER TOK_LIMIT peer_limit ';'
+	|	TOK_NAT_PMP boolean ';' {
+			if (!fastd_config_set_port_mapping(&@$, state, &state->peer_group->port_mapping,
+			    $2 ? PORT_MAPPING_NATPMP : PORT_MAPPING_OFF))
+				YYERROR;
+		}
+	|	TOK_PORT_MAPPING port_mapping ';' {
+			if (!fastd_config_set_port_mapping(&@$, state, &state->peer_group->port_mapping, $2))
+				YYERROR;
+		}
 	|	TOK_METHOD method ';'
 	|	TOK_ON TOK_UP on_up ';'
 	|	TOK_ON TOK_DOWN on_down ';'
@@ -484,6 +497,15 @@ peer_statement: TOK_REMOTE peer_remote ';'
 	|	TOK_KEY peer_key ';'
 	|	TOK_INTERFACE peer_interface ';'
 	|	TOK_MTU peer_mtu ';'
+	|	TOK_NAT_PMP boolean ';' {
+			if (!fastd_config_set_port_mapping(&@$, state, &state->peer->port_mapping,
+			    $2 ? PORT_MAPPING_NATPMP : PORT_MAPPING_OFF))
+				YYERROR;
+		}
+	|	TOK_PORT_MAPPING port_mapping ';' {
+			if (!fastd_config_set_port_mapping(&@$, state, &state->peer->port_mapping, $2))
+				YYERROR;
+		}
 	|	TOK_INCLUDE peer_include ';'
 	;
 
@@ -637,6 +659,16 @@ on_verify:	sync TOK_STRING {
 forward:	boolean		{ conf.forward = $1; }
 	;
 
+port_mapping:
+		TOK_OFF		{ $$ = PORT_MAPPING_OFF; }
+	|	TOK_NO		{ $$ = PORT_MAPPING_OFF; }
+	|	TOK_NONE	{ $$ = PORT_MAPPING_OFF; }
+	|	TOK_NAT_PMP	{ $$ = PORT_MAPPING_NATPMP; }
+	|	TOK_UPNP_IGD	{ $$ = PORT_MAPPING_UPNP_IGD; }
+	|	TOK_AUTO	{ $$ = PORT_MAPPING_AUTO; }
+	|	TOK_STRING	{ $$ = fastd_config_port_mapping_mode($1->str); }
+	;
+
 
 include:	TOK_PEER TOK_STRING maybe_as {
 			fastd_peer_t *peer = fastd_new0(fastd_peer_t);
@@ -740,4 +772,17 @@ static void fastd_config_handle_bind_address(
 
 static void fastd_config_error(YYLTYPE *loc, fastd_parser_state_t *state, const char *s) {
 	pr_error("config error: %s at %s:%i:%i", s, state->filename, loc->first_line, loc->first_column);
+}
+
+static bool fastd_config_set_port_mapping(
+	YYLTYPE *loc, fastd_parser_state_t *state, fastd_port_mapping_mode_t *dest,
+	fastd_port_mapping_mode_t mode) {
+	const char *error = NULL;
+	if (!fastd_config_port_mapping_supported(mode, &error)) {
+		fastd_config_error(loc, state, error);
+		return false;
+	}
+
+	*dest = mode;
+	return true;
 }

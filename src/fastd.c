@@ -498,7 +498,6 @@ static inline void init(int argc, char *argv[]) {
 	fastd_async_init();
 
 	fastd_socket_bind_all();
-	fastd_port_mapping_init();
 
 	on_pre_up();
 
@@ -513,16 +512,6 @@ static inline void init(int argc, char *argv[]) {
 	write_pid();
 
 	fastd_peer_hashtable_init();
-
-	notify_systemd();
-
-	if (status_fd >= 0) {
-		static const uint8_t STATUS = 0;
-		if (write(status_fd, &STATUS, 1) < 0)
-			exit_errno("status: write");
-		if (close(status_fd))
-			exit_errno("status: close");
-	}
 
 	if (conf.drop_caps == DROP_CAPS_EARLY || conf.drop_caps == DROP_CAPS_FORCE)
 		drop_caps();
@@ -539,6 +528,17 @@ static inline void init(int argc, char *argv[]) {
 		set_user();
 
 	fastd_config_load_peer_dirs(true);
+	fastd_port_mapping_init();
+
+	notify_systemd();
+
+	if (status_fd >= 0) {
+		static const uint8_t STATUS = 0;
+		if (write(status_fd, &STATUS, 1) < 0)
+			exit_errno("status: write");
+		if (close(status_fd))
+			exit_errno("status: close");
+	}
 }
 
 
@@ -573,6 +573,7 @@ static inline void handle_signals(void) {
 		pr_info("reconfigure triggered");
 
 		fastd_config_load_peer_dirs(false);
+		fastd_port_mapping_refresh();
 	}
 
 	if (sig_reset) {

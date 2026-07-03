@@ -61,6 +61,7 @@ static void default_config(void) {
 	conf.peer_group = fastd_new0(fastd_peer_group_t);
 	conf.peer_group->name = fastd_strdup("default");
 	conf.peer_group->max_connections = -1;
+	conf.peer_group->port_mapping = PORT_MAPPING_OFF;
 }
 
 /** Handles the configuration of a handshake protocol */
@@ -147,9 +148,85 @@ void fastd_config_compression_level(const char *level) {
 	conf.compression.level = parsed;
 }
 
-/** Handles the configuration of NAT-PMP port mapping */
+/** Returns true if a port mapping mode can be used with this build */
+bool fastd_config_port_mapping_supported(fastd_port_mapping_mode_t mode, UNUSED const char **error) {
+	switch (mode) {
+	case PORT_MAPPING_UNSET:
+	case PORT_MAPPING_OFF:
+		return true;
+
+	case PORT_MAPPING_NATPMP:
+#ifdef WITH_NATPMP
+		return true;
+#else
+		if (error)
+			*error = "NAT-PMP port mapping is not supported by this build of fastd";
+		return false;
+#endif
+
+	case PORT_MAPPING_UPNP_IGD:
+#ifdef WITH_UPNP_IGD
+		return true;
+#else
+		if (error)
+			*error = "UPnP IGD port mapping is not supported by this build of fastd";
+		return false;
+#endif
+
+	case PORT_MAPPING_AUTO:
+#if defined(WITH_NATPMP) || defined(WITH_UPNP_IGD)
+		return true;
+#else
+		if (error)
+			*error = "automatic port mapping is not supported by this build of fastd";
+		return false;
+#endif
+	}
+
+	exit_bug("invalid port mapping mode");
+}
+
+/** Parses an automatic port mapping mode */
+fastd_port_mapping_mode_t fastd_config_port_mapping_mode(const char *name) {
+	if (!strcmp(name, "off") || !strcmp(name, "none") || !strcmp(name, "no")) {
+		return PORT_MAPPING_OFF;
+	}
+
+	if (!strcmp(name, "nat-pmp")) {
+		return PORT_MAPPING_NATPMP;
+	}
+
+	if (!strcmp(name, "upnp-igd")) {
+		return PORT_MAPPING_UPNP_IGD;
+	}
+
+	if (!strcmp(name, "auto")) {
+		return PORT_MAPPING_AUTO;
+	}
+
+	exit_error("config error: port mapping mode `%s' not supported", name);
+}
+
+/** Handles the configuration of automatic port mapping */
+void fastd_config_port_mapping(const char *name) {
+	fastd_port_mapping_mode_t mode = fastd_config_port_mapping_mode(name);
+	const char *error = NULL;
+
+	if (!fastd_config_port_mapping_supported(mode, &error))
+		exit_error("config error: %s", error);
+
+	conf.peer_group->port_mapping = mode;
+}
+
+/** Handles the legacy configuration of NAT-PMP port mapping */
 void fastd_config_natpmp(bool enabled) {
-	conf.natpmp = enabled;
+	fastd_port_mapping_mode_t mode = enabled ? PORT_MAPPING_NATPMP : PORT_MAPPING_OFF;
+	const char *error = NULL;
+
+	if (!fastd_config_port_mapping_supported(mode, &error))
+		exit_error("config error: %s", error);
+
+	conf.peer_group->port_mapping = mode;
 }
 
 /** Handles the configuration of a bind address */

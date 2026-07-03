@@ -85,6 +85,15 @@ typedef enum fastd_compression_algorithm {
 	COMPRESSION_ZSTD,     /**< Zstandard compression */
 } fastd_compression_algorithm_t;
 
+/** Automatic UDP port mapping mode */
+typedef enum fastd_port_mapping_mode {
+	PORT_MAPPING_UNSET = 0, /**< Inherit port mapping mode from the peer group */
+	PORT_MAPPING_OFF,       /**< Port mapping disabled */
+	PORT_MAPPING_NATPMP,    /**< Use NAT-PMP */
+	PORT_MAPPING_UPNP_IGD,  /**< Use UPnP IGD */
+	PORT_MAPPING_AUTO,      /**< Use all available port mapping backends */
+} fastd_port_mapping_mode_t;
+
 /** Types of file descriptors to poll on */
 typedef enum fastd_poll_type {
 	POLL_TYPE_UNSPEC = 0, /**< Unspecified file descriptor type */

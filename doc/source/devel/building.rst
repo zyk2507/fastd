@@ -15,6 +15,8 @@ Optional:
 * libmnl (for L2TP offload support; Linux only)
 * libjson-c (if ``status_socket`` is enabled)
 * libssl (if ``cipher_aes128-ctr`` is enabled)
+* libnatpmp (if ``natpmp`` is enabled)
+* miniupnpc (if ``upnp`` is enabled)
 
 Building
 ~~~~~~~~
