@@ -92,6 +92,7 @@ typedef enum fastd_poll_type {
 	POLL_TYPE_STATUS,     /**< The status socket */
 	POLL_TYPE_IFACE,      /**< A TUN/TAP interface */
 	POLL_TYPE_SOCKET,     /**< A network socket */
+	POLL_TYPE_NATPMP,     /**< A NAT-PMP control socket */
 } fastd_poll_type_t;
 
 /** Task types */
@@ -99,6 +100,7 @@ typedef enum fastd_task_type {
 	TASK_TYPE_UNSPEC = 0,  /**< Unspecified task type */
 	TASK_TYPE_MAINTENANCE, /**< Scheduled maintenance */
 	TASK_TYPE_PEER,        /**< Peer maintenance (handshake, reset, keepalive) */
+	TASK_TYPE_NATPMP,      /**< NAT-PMP request retry or lease renewal */
 } fastd_task_type_t;
 
 
@@ -124,6 +126,7 @@ typedef union fastd_peer_address fastd_peer_address_t;
 typedef struct fastd_bind_address fastd_bind_address_t;
 typedef struct fastd_iface fastd_iface_t;
 typedef struct fastd_socket fastd_socket_t;
+typedef struct fastd_port_mapping fastd_port_mapping_t;
 typedef struct fastd_peer_group fastd_peer_group_t;
 typedef struct fastd_eth_addr fastd_eth_addr_t;
 typedef struct fastd_eth_header fastd_eth_header_t;

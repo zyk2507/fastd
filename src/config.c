@@ -147,6 +147,11 @@ void fastd_config_compression_level(const char *level) {
 	conf.compression.level = parsed;
 }
 
+/** Handles the configuration of NAT-PMP port mapping */
+void fastd_config_natpmp(bool enabled) {
+	conf.natpmp = enabled;
+}
+
 /** Handles the configuration of a bind address */
 void fastd_config_bind_address(const fastd_peer_address_t *address, const char *bindtodev, unsigned flags) {
 #ifndef USE_BINDTODEVICE
@@ -595,6 +600,9 @@ static void config_check_base(void) {
 	}
 
 	if (!fastd_compression_check())
+		exit(1);
+
+	if (!fastd_port_mapping_check())
 		exit(1);
 }
 

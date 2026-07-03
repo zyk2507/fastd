@@ -239,6 +239,8 @@ struct fastd_config {
 		int level;                               /**< Configured compression level */
 	} compression;                                   /**< Payload compression configuration */
 
+	bool natpmp; /**< Enable NAT-PMP port mapping */
+
 #ifdef USE_USER
 	char *user;  /**< Specifies which user to switch to after initialization */
 	char *group; /**< Can specify an alternative group to switch to */
@@ -332,6 +334,8 @@ struct fastd_context {
 	fastd_offload_l2tp_t *offload_l2tp; /**< Global L2TP offload state */
 #endif
 
+	fastd_port_mapping_t *port_mapping; /**< Global automatic port mapping state */
+
 	bool has_floating; /**< Specifies if any of the configured peers have floating remotes */
 	uint16_t max_mtu;  /**< The maximum MTU of all peer-specific interfaces */
 	size_t max_buffer; /**< Maximum buffer size needed for any combination of peer MTU, method, or handshake */
@@ -410,6 +414,12 @@ void fastd_socket_close(fastd_socket_t *sock);
 void fastd_socket_error(const fastd_socket_t *sock);
 
 void fastd_resolve_peer(fastd_peer_t *peer, fastd_remote_t *remote);
+
+bool fastd_port_mapping_check(void);
+void fastd_port_mapping_init(void);
+void fastd_port_mapping_handle(void);
+void fastd_port_mapping_handle_task(void);
+void fastd_port_mapping_cleanup(void);
 
 bool fastd_iface_format_name(char ifname[IFNAMSIZ], const fastd_peer_t *peer);
 fastd_iface_t *fastd_iface_open(fastd_peer_t *peer);
@@ -620,6 +630,15 @@ static inline bool fastd_allow_verify(void) {
 static inline bool fastd_use_offload_l2tp(void) {
 #ifdef WITH_OFFLOAD_L2TP
 	return conf.offload_l2tp;
+#else
+	return false;
+#endif
+}
+
+/** Returns true if NAT-PMP port mapping is enabled */
+static inline bool fastd_use_natpmp(void) {
+#ifdef WITH_NATPMP
+	return conf.natpmp;
 #else
 	return false;
 #endif

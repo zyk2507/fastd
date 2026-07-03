@@ -498,6 +498,7 @@ static inline void init(int argc, char *argv[]) {
 	fastd_async_init();
 
 	fastd_socket_bind_all();
+	fastd_port_mapping_init();
 
 	on_pre_up();
 
@@ -623,6 +624,7 @@ static inline void cleanup(void) {
 	}
 
 	fastd_status_close();
+	fastd_port_mapping_cleanup();
 	close_sockets();
 	fastd_poll_free();
 

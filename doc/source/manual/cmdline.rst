@@ -66,6 +66,9 @@ Command line options and config files are parsed in order they are specified, so
 --compression-level 1-22
   Sets the zstd compression level; default is 3.
 
+--nat-pmp
+  Enables NAT-PMP port mapping for fixed IPv4 bind sockets.
+
 --forward
   Enables forwarding of packets between clients; read the paragraph about this option before use!
 

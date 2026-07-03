@@ -86,6 +86,7 @@ static const keyword_t keywords[] = {
 	{ "mode", TOK_MODE },
 	{ "mtu", TOK_MTU },
 	{ "multitap", TOK_MULTITAP },
+	{ "nat-pmp", TOK_NAT_PMP },
 	{ "no", TOK_NO },
 	{ "none", TOK_NONE },
 	{ "offload", TOK_OFFLOAD },

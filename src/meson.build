@@ -57,6 +57,7 @@ src = [
 	'peer.c',
 	'peer_hashtable.c',
 	'polling.c',
+	'port_mapping.c',
 	'pqueue.c',
 	'random.c',
 	'receive.c',
@@ -102,6 +103,24 @@ zstd_dep = dependency('libzstd', required : get_option('zstd'))
 with_zstd = zstd_dep.found()
 if with_zstd
 	deps += zstd_dep
+endif
+
+with_natpmp = false
+if not get_option('natpmp').disabled()
+	natpmp_dep = dependency('natpmp', required : false)
+	if not natpmp_dep.found()
+		natpmp_dep = dependency('libnatpmp', required : false)
+	endif
+	if not natpmp_dep.found() and cc.has_header('natpmp.h')
+		natpmp_dep = cc.find_library('natpmp', required : get_option('natpmp').enabled())
+	endif
+
+	with_natpmp = natpmp_dep.found()
+	if with_natpmp
+		deps += natpmp_dep
+	elif get_option('natpmp').enabled()
+		error('NAT-PMP support requested, but libnatpmp was not found')
+	endif
 endif
 
 with_capabilities = get_option('capabilities').enabled() or (get_option('capabilities').auto() and is_linux)
@@ -235,6 +254,7 @@ conf_data.set('WITH_DYNAMIC_PEERS', not get_option('dynamic_peers').disabled())
 conf_data.set('WITH_STATUS_SOCKET', with_status_socket)
 conf_data.set('WITH_SYSTEMD', with_systemd)
 conf_data.set('WITH_ZSTD', with_zstd)
+conf_data.set('WITH_NATPMP', with_natpmp)
 
 conf_data.set('WITH_OFFLOAD_L2TP', with_offload_l2tp)
 

@@ -82,6 +82,12 @@ static inline void handle_fd(fastd_poll_fd_t *fd, bool input, bool error) {
 		break;
 	}
 
+	case POLL_TYPE_NATPMP:
+		if (input || error)
+			fastd_port_mapping_handle();
+		error = false;
+		break;
+
 	default:
 		exit_bug("unknown FD type");
 	}

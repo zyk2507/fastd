@@ -88,6 +88,7 @@
 %token TOK_MODE
 %token TOK_MTU
 %token TOK_MULTITAP
+%token TOK_NAT_PMP
 %token TOK_NO
 %token TOK_NONE
 %token TOK_OFFLOAD
@@ -175,6 +176,9 @@ statement:	peer_group_statement
 	|	TOK_CIPHER cipher ';'
 	|	TOK_MAC mac ';'
 	|	TOK_COMPRESSION compression ';'
+	|	TOK_NAT_PMP boolean ';' {
+			fastd_config_natpmp($2);
+		}
 	|	TOK_LOG log ';'
 	|	TOK_HIDE hide ';'
 	|	TOK_INTERFACE interface ';'

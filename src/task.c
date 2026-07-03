@@ -34,6 +34,10 @@ static void handle_task(void) {
 		fastd_peer_handle_task(task);
 		break;
 
+	case TASK_TYPE_NATPMP:
+		fastd_port_mapping_handle_task();
+		break;
+
 	default:
 		exit_bug("unknown task type");
 	}

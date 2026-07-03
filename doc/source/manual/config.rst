@@ -64,6 +64,14 @@ Example config:
   will use a random port for each outgoing connection both for IPv4 and IPv6.
 
 
+| ``nat-pmp yes|no;``
+
+  Enables automatic NAT-PMP port mapping. This is disabled by default. When enabled, fastd asks the default
+  gateway to map the UDP ports of fixed IPv4-compatible bind sockets, renews these mappings periodically, and
+  removes them again during shutdown.
+
+  NAT-PMP does not apply to IPv6-only sockets or sockets created dynamically for individual peers.
+
 | ``cipher "<cipher>" use "<implementation>";``
 
   Chooses a specific impelemenation for a cipher. Normally, the default setting is already the best choice.

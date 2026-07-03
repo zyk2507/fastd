@@ -89,6 +89,9 @@
 /** Defined if zstd compression support is enabled */
 #mesondefine WITH_ZSTD
 
+/** Defined if NAT-PMP port mapping support is enabled */
+#mesondefine WITH_NATPMP
+
 
 /** Defined if L2TP offloading is enabled */
 #mesondefine WITH_OFFLOAD_L2TP
