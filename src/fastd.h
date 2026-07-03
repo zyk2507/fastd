@@ -234,6 +234,11 @@ struct fastd_config {
 
 	fastd_drop_caps_t drop_caps; /**< Specifies if and when to drop capabilities */
 
+	struct {
+		fastd_compression_algorithm_t algorithm; /**< Configured payload compression algorithm */
+		int level;                               /**< Configured compression level */
+	} compression;                                   /**< Payload compression configuration */
+
 #ifdef USE_USER
 	char *user;  /**< Specifies which user to switch to after initialization */
 	char *group; /**< Can specify an alternative group to switch to */

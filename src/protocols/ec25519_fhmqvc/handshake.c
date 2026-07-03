@@ -11,6 +11,7 @@
 */
 
 #include "handshake.h"
+#include "../../compression.h"
 #include "../../crypto.h"
 #include "../../handshake.h"
 #include "../../hkdf_sha256.h"
@@ -85,7 +86,7 @@ static inline void supersede_session(fastd_peer_t *peer, const fastd_method_info
 static inline bool new_session(
 	fastd_peer_t *peer, const fastd_method_info_t *method, unsigned session_flags, const aligned_int256_t *A,
 	const aligned_int256_t *B, const aligned_int256_t *X, const aligned_int256_t *Y, const aligned_int256_t *sigma,
-	const uint32_t *salt, uint64_t serial) {
+	const uint32_t *salt, uint64_t serial, fastd_compression_algorithm_t compression) {
 
 	supersede_session(peer, method);
 
@@ -102,6 +103,7 @@ static inline bool new_session(
 	peer->protocol_state->session.handshakes_cleaned = false;
 	peer->protocol_state->session.refreshing = false;
 	peer->protocol_state->session.method = method;
+	peer->protocol_state->session.compression = compression;
 	peer->protocol_state->last_serial = serial;
 
 	return true;
@@ -112,7 +114,8 @@ static bool establish(
 	fastd_peer_t *peer, const fastd_method_info_t *method, fastd_socket_t *sock,
 	const fastd_peer_address_t *local_addr, const fastd_peer_address_t *remote_addr, unsigned session_flags,
 	const aligned_int256_t *A, const aligned_int256_t *B, const aligned_int256_t *X, const aligned_int256_t *Y,
-	const aligned_int256_t *sigma, const uint32_t *salt, uint64_t serial) {
+	const aligned_int256_t *sigma, const uint32_t *salt, uint64_t serial,
+	fastd_compression_algorithm_t compression) {
 	if (serial <= peer->protocol_state->last_serial) {
 		pr_debug("ignoring handshake from %P[%I] because of handshake key reuse", peer, remote_addr);
 		return false;
@@ -127,7 +130,7 @@ static bool establish(
 		return false;
 	}
 
-	if (!new_session(peer, method, session_flags, A, B, X, Y, sigma, salt, serial)) {
+	if (!new_session(peer, method, session_flags, A, B, X, Y, sigma, salt, serial, compression)) {
 		pr_error("failed to initialize method session for %P (method `%s')", peer, method->name);
 		fastd_peer_reset(peer);
 		return false;
@@ -142,8 +145,11 @@ static bool establish(
 	peer->establish_handshake_timeout = ctx.now + MIN_HANDSHAKE_INTERVAL;
 
 	pr_verbose(
-		"new session with %P established using method `%s'%s.", peer, method->name,
-		(session_flags & FASTD_SESSION_COMPAT) ? " (compat mode)" : "");
+		"new session with %P established using method `%s'%s%s%s%s.", peer, method->name,
+		(session_flags & FASTD_SESSION_COMPAT) ? " (compat mode)" : "",
+		compression == COMPRESSION_NONE ? "" : ", compression `",
+		compression == COMPRESSION_NONE ? "" : fastd_compression_get_name(compression),
+		compression == COMPRESSION_NONE ? "" : "'");
 
 	if (session_flags & FASTD_SESSION_INITIATOR)
 		fastd_peer_schedule_handshake_default(peer);
@@ -342,7 +348,7 @@ static void finish_handshake(
 	if (!establish(
 		    peer, method, sock, local_addr, remote_addr, get_session_flags(true, handshake->flags),
 		    &handshake_key->key.public, peer_handshake_key, &conf.protocol_config->key.public, &peer->key->key,
-		    &sigma, shared_handshake_key.w, handshake_key->serial))
+		    &sigma, shared_handshake_key.w, handshake_key->serial, fastd_handshake_get_compression(handshake)))
 		return;
 
 	fastd_buffer_t *buffer = fastd_handshake_new_reply(
@@ -394,7 +400,8 @@ static void handle_finish_handshake(
 	establish(
 		peer, method, sock, local_addr, remote_addr, get_session_flags(false, handshake->flags),
 		peer_handshake_key, &handshake_key->key.public, &peer->key->key, &conf.protocol_config->key.public,
-		&peer->protocol_state->sigma, peer->protocol_state->shared_handshake_key.w, handshake_key->serial);
+		&peer->protocol_state->sigma, peer->protocol_state->shared_handshake_key.w, handshake_key->serial,
+		fastd_handshake_get_compression(handshake));
 
 	clear_shared_handshake_key(peer);
 }

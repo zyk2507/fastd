@@ -38,6 +38,8 @@ OPTION_ARG(option_mtu, "--mtu" OR "-M", "<mtu>", "Sets the MTU; must be at least
 OPTION_ARG(option_bind, "--bind" OR "-b", "<address>[:<port>]", "Sets the bind address");
 OPTION_ARG(option_protocol, "--protocol" OR "-p", "<protocol>", "Sets the protocol");
 OPTION_ARG(option_method, "--method", "<method>", "Sets the encryption method");
+OPTION_ARG(option_compression, "--compression", "none|zstd", "Sets the payload compression algorithm; default is none");
+OPTION_ARG(option_compression_level, "--compression-level", "1-22", "Sets the zstd compression level; default is 3");
 OPTION(option_forward, "--forward", "Enables forwarding of packets between peers; read the documentation before use!");
 SEPARATOR;
 #endif

@@ -12,6 +12,7 @@
 
 
 #include "ec25519_fhmqvc.h"
+#include "../../compression.h"
 
 
 /** Converts a private or public key from a hexadecimal string representation to a uint8 array */
@@ -111,13 +112,17 @@ static void protocol_handle_recv(fastd_peer_t *peer, fastd_buffer_t *buffer) {
 		goto fail;
 
 	fastd_buffer_t *recv_buffer = NULL;
+	protocol_session_t *recv_session = NULL;
 	bool reordered = false;
 
 	fastd_buffer_zero_pad(buffer);
 
-	if (is_session_valid(&peer->protocol_state->old_session))
+	if (is_session_valid(&peer->protocol_state->old_session)) {
 		recv_buffer = peer->protocol_state->old_session.method->provider->decrypt(
 			peer->protocol_state->old_session.method_state, buffer, &reordered);
+		if (recv_buffer)
+			recv_session = &peer->protocol_state->old_session;
+	}
 
 	if (!recv_buffer) {
 		recv_buffer = peer->protocol_state->session.method->provider->decrypt(
@@ -126,6 +131,7 @@ static void protocol_handle_recv(fastd_peer_t *peer, fastd_buffer_t *buffer) {
 			pr_debug2("verification failed for packet received from %P", peer);
 			goto fail;
 		}
+		recv_session = &peer->protocol_state->session;
 
 		if (peer->protocol_state->old_session.method) {
 			pr_debug("invalidating old session with %P", peer);
@@ -149,6 +155,12 @@ static void protocol_handle_recv(fastd_peer_t *peer, fastd_buffer_t *buffer) {
 
 	fastd_peer_seen(peer);
 
+	if (recv_buffer->len && recv_session->compression != COMPRESSION_NONE) {
+		recv_buffer = fastd_decompress_payload(recv_buffer, fastd_max_payload(fastd_peer_get_mtu(peer)));
+		if (!recv_buffer)
+			return;
+	}
+
 	if (recv_buffer->len)
 		fastd_handle_receive(peer, recv_buffer, reordered);
 	else
@@ -163,6 +175,9 @@ fail:
 /** Encrypts and sends a packet to a peer using a specified session */
 static void session_send(fastd_peer_t *peer, fastd_buffer_t *buffer, protocol_session_t *session) {
 	size_t stat_size = buffer->len;
+
+	if (buffer->len && session->compression != COMPRESSION_NONE)
+		buffer = fastd_compress_payload(buffer);
 
 	fastd_buffer_zero_pad(buffer);
 

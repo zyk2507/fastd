@@ -79,6 +79,12 @@ typedef enum fastd_drop_caps {
 			    even when TUN/TAP interfaces need to be opened */
 } fastd_drop_caps_t;
 
+/** Supported payload compression algorithms */
+typedef enum fastd_compression_algorithm {
+	COMPRESSION_NONE = 0, /**< Compression disabled */
+	COMPRESSION_ZSTD,     /**< Zstandard compression */
+} fastd_compression_algorithm_t;
+
 /** Types of file descriptors to poll on */
 typedef enum fastd_poll_type {
 	POLL_TYPE_UNSPEC = 0, /**< Unspecified file descriptor type */

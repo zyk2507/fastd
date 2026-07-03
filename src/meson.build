@@ -45,6 +45,7 @@ src = [
 	'async.c',
 	'buffer.c',
 	'capabilities.c',
+	'compression.c',
 	'config.c',
 	'fastd.c',
 	'handshake.c',
@@ -96,6 +97,12 @@ deps = []
 
 deps += dependency('threads')
 deps += dependency('libuecc', version : '>=6')
+
+zstd_dep = dependency('libzstd', required : get_option('zstd'))
+with_zstd = zstd_dep.found()
+if with_zstd
+	deps += zstd_dep
+endif
 
 with_capabilities = get_option('capabilities').enabled() or (get_option('capabilities').auto() and is_linux)
 if with_capabilities
@@ -227,6 +234,7 @@ conf_data.set('WITH_CMDLINE_COMMANDS', not get_option('cmdline_commands').disabl
 conf_data.set('WITH_DYNAMIC_PEERS', not get_option('dynamic_peers').disabled())
 conf_data.set('WITH_STATUS_SOCKET', with_status_socket)
 conf_data.set('WITH_SYSTEMD', with_systemd)
+conf_data.set('WITH_ZSTD', with_zstd)
 
 conf_data.set('WITH_OFFLOAD_L2TP', with_offload_l2tp)
 

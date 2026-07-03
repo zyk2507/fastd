@@ -16,6 +16,7 @@
 
 
 #include "config.h"
+#include "compression.h"
 #include "config.yy.h"
 #include "crypto.h"
 #include "fastd.h"
@@ -51,6 +52,7 @@ static void default_config(void) {
 	conf.mtu = 1500;
 	conf.mode = MODE_TAP;
 	conf.iface_persist = true;
+	conf.compression.level = 3;
 
 	conf.drop_caps = DROP_CAPS_ON;
 
@@ -117,6 +119,32 @@ void fastd_config_mac(const char *name, const char *impl) {
 		exit_error(
 			"config error: implementation `%s' is not supported for MAC `%s' (or MAC `%s' is not supported)",
 			impl, name, name);
+}
+
+/** Handles the configuration of a payload compression algorithm */
+void fastd_config_compression(const char *name) {
+	if (!strcmp(name, "none")) {
+		fastd_config_compression_none();
+		return;
+	}
+
+	if (!strcmp(name, "zstd")) {
+		fastd_config_compression_zstd(conf.compression.level);
+		return;
+	}
+
+	exit_error("config error: compression algorithm `%s' not supported", name);
+}
+
+/** Handles the configuration of a payload compression level */
+void fastd_config_compression_level(const char *level) {
+	char *endptr;
+	long parsed = strtol(level, &endptr, 10);
+
+	if (*endptr || parsed < 1 || parsed > 22)
+		exit_error("config error: invalid compression level `%s'", level);
+
+	conf.compression.level = parsed;
 }
 
 /** Handles the configuration of a bind address */
@@ -561,7 +589,13 @@ static void config_check_base(void) {
 
 		if (conf.iface_persist)
 			exit_error("`persist iface' must be set to `no' for L2TP offload");
+
+		if (conf.compression.algorithm != COMPRESSION_NONE)
+			exit_error("L2TP offload can't be used with payload compression");
 	}
+
+	if (!fastd_compression_check())
+		exit(1);
 }
 
 /** Performs more checks on the configuration */
@@ -674,7 +708,9 @@ static void configure_peers(bool dirs_only) {
 	size_t headroom =
 		max_size_t(conf.encrypt_headroom + sizeof(fastd_block128_t), conf.decrypt_headroom + conf.max_overhead);
 	ctx.max_buffer = alignto(
-		max_size_t(headroom + fastd_max_payload(ctx.max_mtu), MAX_HANDSHAKE_SIZE), sizeof(fastd_block128_t));
+		max_size_t(
+			headroom + fastd_max_payload(ctx.max_mtu) + FASTD_COMPRESSION_MAX_OVERHEAD, MAX_HANDSHAKE_SIZE),
+		sizeof(fastd_block128_t));
 }
 
 /** Initialized the peers not configured through peer directories */

@@ -60,6 +60,12 @@ Command line options and config files are parsed in order they are specified, so
   Sets the encryption/authentication method. See the page :doc:`methods` for more information about the supported methods. More than one method can be specified; the earlier you specify
   a method the higher is the preference for a method, so methods speficied later will only be used if a peer doesn't support the first methods.
 
+--compression none|zstd
+  Sets the payload compression algorithm. Compression is disabled by default. ``zstd`` requires zstd support in the build.
+
+--compression-level 1-22
+  Sets the zstd compression level; default is 3.
+
 --forward
   Enables forwarding of packets between clients; read the paragraph about this option before use!
 

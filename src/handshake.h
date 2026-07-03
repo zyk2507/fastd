@@ -47,6 +47,7 @@ typedef enum fastd_handshake_record_type {
 	RECORD_VERSION_NAME,            /**< The fastd version */
 	RECORD_METHOD_LIST,             /**< Zero-separated list of supported methods */
 	RECORD_TLV_MAC,                 /**< Message authentication code of the TLV records */
+	RECORD_COMPRESSION_NAME,        /**< The payload compression algorithm */
 	RECORD_MAX,                     /**< (Number of defined record types) */
 } fastd_handshake_record_type_t;
 
@@ -116,6 +117,7 @@ const fastd_method_info_t *
 fastd_handshake_get_method_by_name_list(const fastd_peer_t *peer, const fastd_handshake_t *handshake);
 const fastd_method_info_t *
 fastd_handshake_get_method_by_name(const fastd_peer_t *peer, const fastd_handshake_t *handshake);
+fastd_compression_algorithm_t fastd_handshake_get_compression(const fastd_handshake_t *handshake);
 
 void fastd_handshake_handle(
 	fastd_socket_t *sock, const fastd_peer_address_t *local_addr, const fastd_peer_address_t *remote_addr,

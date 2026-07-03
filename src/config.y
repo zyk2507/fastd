@@ -52,6 +52,7 @@
 %token TOK_BIND
 %token TOK_CAPABILITIES
 %token TOK_CIPHER
+%token TOK_COMPRESSION
 %token TOK_CONNECT
 %token TOK_DEBUG
 %token TOK_DEBUG2
@@ -88,6 +89,7 @@
 %token TOK_MTU
 %token TOK_MULTITAP
 %token TOK_NO
+%token TOK_NONE
 %token TOK_OFFLOAD
 %token TOK_ON
 %token TOK_PACKET
@@ -117,6 +119,7 @@
 %token TOK_VERIFY
 %token TOK_WARN
 %token TOK_YES
+%token TOK_ZSTD
 
 
 %code {
@@ -171,6 +174,7 @@ statement:	peer_group_statement
 	|	TOK_SECURE TOK_HANDSHAKES secure_handshakes ';'
 	|	TOK_CIPHER cipher ';'
 	|	TOK_MAC mac ';'
+	|	TOK_COMPRESSION compression ';'
 	|	TOK_LOG log ';'
 	|	TOK_HIDE hide ';'
 	|	TOK_INTERFACE interface ';'
@@ -251,6 +255,29 @@ cipher:		TOK_STRING TOK_USE TOK_STRING {
 
 mac:		TOK_STRING TOK_USE TOK_STRING {
 			fastd_config_mac($1->str, $3->str);
+		}
+
+compression:
+		TOK_NO {
+			fastd_config_compression("none");
+		}
+	|	TOK_NONE {
+			fastd_config_compression("none");
+		}
+	|	TOK_ZSTD maybe_compression_level {
+			fastd_config_compression("zstd");
+		}
+	|	TOK_STRING maybe_compression_level {
+			fastd_config_compression($1->str);
+		}
+
+maybe_compression_level:
+		TOK_LEVEL TOK_UINT {
+			char buf[32];
+			snprintf(buf, sizeof(buf), "%llu", (unsigned long long)$2);
+			fastd_config_compression_level(buf);
+		}
+	|	{
 		}
 
 log:		TOK_LEVEL log_level {

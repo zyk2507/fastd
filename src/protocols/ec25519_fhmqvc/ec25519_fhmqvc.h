@@ -66,6 +66,7 @@ typedef struct protocol_session {
 
 	const fastd_method_info_t *method;          /**< The used crypto method */
 	fastd_method_session_state_t *method_state; /**< The method-specific state */
+	fastd_compression_algorithm_t compression;  /**< The negotiated payload compression algorithm */
 } protocol_session_t;
 
 /** Protocol-specific peer state */

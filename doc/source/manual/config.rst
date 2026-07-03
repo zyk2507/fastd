@@ -88,6 +88,14 @@ Example config:
     - ``xmm``: Optimized implementation for x86/amd64 CPUs with SSE2 support
     - ``nacl``: Use implementation from NaCl or libsodium
 
+| ``compression none;``
+| ``compression zstd [ level <level> ];``
+
+  Configures payload compression. Compression is disabled by default. ``zstd`` enables Zstandard compression for
+  peers that also announce zstd support during the handshake. The compression level must be between 1 and 22 and
+  defaults to 3.
+
+  L2TP offloading cannot be used together with payload compression.
 
 | ``drop capabilities yes|no|early|force;``
 

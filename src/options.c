@@ -300,6 +300,16 @@ static void option_method(const char *arg) {
 	fastd_config_method(conf.peer_group, arg);
 }
 
+/** Handles the --compression option */
+static void option_compression(const char *arg) {
+	fastd_config_compression(arg);
+}
+
+/** Handles the --compression-level option */
+static void option_compression_level(const char *arg) {
+	fastd_config_compression_level(arg);
+}
+
 /** Handles the --forward option */
 static void option_forward(void) {
 	conf.forward = true;

@@ -12,6 +12,7 @@
 
 
 #include "handshake.h"
+#include "compression.h"
 #include "method.h"
 #include "peer.h"
 #include "peer_group.h"
@@ -36,6 +37,7 @@ static const char *const RECORD_TYPES[RECORD_MAX] = {
 	"version name",
 	"method list",
 	"TLV message authentication code",
+	"compression name",
 };
 
 
@@ -156,6 +158,13 @@ static fastd_buffer_t *new_handshake(
 	size_t version_len = strlen(FASTD_VERSION);
 	size_t protocol_len = strlen(conf.protocol->name);
 	size_t method_len = method ? strlen(method->name) : 0;
+	const char *compression_name = NULL;
+	size_t compression_len = 0;
+
+	if (conf.compression.algorithm != COMPRESSION_NONE) {
+		compression_name = fastd_compression_get_name(conf.compression.algorithm);
+		compression_len = strlen(compression_name);
+	}
 
 	size_t method_list_len = 0;
 	uint8_t *method_list = NULL;
@@ -170,7 +179,7 @@ static fastd_buffer_t *new_handshake(
 			      RECORD_LEN(protocol_len) +    /* protocol name */
 			      RECORD_LEN(method_len) +      /* method name */
 			      RECORD_LEN(method_list_len) + /* supported method name list */
-			      tail_space;
+			      (compression_name ? RECORD_LEN(compression_len) : 0) + tail_space;
 
 	/* TODO: Make this a soft error */
 	if (buffer_space > MAX_HANDSHAKE_SIZE)
@@ -203,6 +212,9 @@ static fastd_buffer_t *new_handshake(
 		fastd_handshake_add(buffer, RECORD_METHOD_LIST, method_list_len, method_list);
 		free(method_list);
 	}
+
+	if (compression_name)
+		fastd_handshake_add(buffer, RECORD_COMPRESSION_NAME, compression_len, compression_name);
 
 	return buffer;
 }
@@ -491,6 +503,24 @@ fastd_handshake_get_method_by_name(const fastd_peer_t *peer, const fastd_handsha
 	return get_method_by_name(
 		methods, (const char *)handshake->records[RECORD_METHOD_NAME].data,
 		handshake->records[RECORD_METHOD_NAME].length);
+}
+
+/** Returns the payload compression algorithm negotiated by a handshake */
+fastd_compression_algorithm_t fastd_handshake_get_compression(const fastd_handshake_t *handshake) {
+	if (conf.compression.algorithm == COMPRESSION_NONE)
+		return COMPRESSION_NONE;
+
+	if (!handshake->records[RECORD_COMPRESSION_NAME].data)
+		return COMPRESSION_NONE;
+
+	fastd_compression_algorithm_t algorithm = fastd_compression_get_by_name(
+		(const char *)handshake->records[RECORD_COMPRESSION_NAME].data,
+		handshake->records[RECORD_COMPRESSION_NAME].length);
+
+	if (algorithm != conf.compression.algorithm)
+		return COMPRESSION_NONE;
+
+	return algorithm;
 }
 
 /** Handles a handshake packet */

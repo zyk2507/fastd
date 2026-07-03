@@ -6,6 +6,7 @@ option('cmdline_commands', type : 'feature', value : 'enabled')
 option('dynamic_peers', type : 'feature', value : 'enabled')
 option('status_socket', type : 'feature', value : 'enabled')
 option('systemd', type : 'feature', value : 'auto')
+option('zstd', type : 'feature', value : 'auto')
 
 option('cipher_aes128-ctr', type : 'feature', value : 'enabled')
 option('cipher_null', type : 'feature', value : 'enabled')

@@ -86,6 +86,9 @@
 /** Defined if systemd support is enabled */
 #mesondefine WITH_SYSTEMD
 
+/** Defined if zstd compression support is enabled */
+#mesondefine WITH_ZSTD
+
 
 /** Defined if L2TP offloading is enabled */
 #mesondefine WITH_OFFLOAD_L2TP

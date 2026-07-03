@@ -75,6 +75,12 @@ Sets the handshake protocol. Currently the only protocol available is \fIec25519
 \fB\-\-method\fR <method>
 Sets the encryption method.
 .TP
+\fB\-\-compression\fR none|zstd
+Sets the payload compression algorithm; default is none.
+.TP
+\fB\-\-compression\-level\fR 1\-22
+Sets the zstd compression level; default is 3.
+.TP
 \fB\-\-forward\fR
 Enables forwarding of packets between peers; read the full documentation before use!
 .TP

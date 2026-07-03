@@ -50,6 +50,7 @@ static const keyword_t keywords[] = {
 	{ "bind", TOK_BIND },
 	{ "capabilities", TOK_CAPABILITIES },
 	{ "cipher", TOK_CIPHER },
+	{ "compression", TOK_COMPRESSION },
 	{ "connect", TOK_CONNECT },
 	{ "debug", TOK_DEBUG },
 	{ "debug2", TOK_DEBUG2 },
@@ -86,6 +87,7 @@ static const keyword_t keywords[] = {
 	{ "mtu", TOK_MTU },
 	{ "multitap", TOK_MULTITAP },
 	{ "no", TOK_NO },
+	{ "none", TOK_NONE },
 	{ "offload", TOK_OFFLOAD },
 	{ "on", TOK_ON },
 	{ "packet", TOK_PACKET },
@@ -115,6 +117,7 @@ static const keyword_t keywords[] = {
 	{ "verify", TOK_VERIFY },
 	{ "warn", TOK_WARN },
 	{ "yes", TOK_YES },
+	{ "zstd", TOK_ZSTD },
 };
 
 /** Compares two keyword_t instances by their keyword */
