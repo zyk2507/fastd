@@ -59,6 +59,7 @@ struct fastd_peer {
 	uint16_t mtu;                           /**< Peer-specific interface MTU */
 	fastd_port_mapping_mode_t port_mapping; /**< Peer-specific automatic port mapping mode */
 	fastd_peer_transport_t transport;       /**< Peer-specific transport protocol */
+	fastd_tristate_t tcp_punch;             /**< Peer-specific TCP hole punching setting */
 	fastd_tristate_t turn_relay;            /**< Peer-specific TURN relay setting */
 	fastd_turn_server_t *turn_servers;      /**< Peer-specific TURN servers */
 
@@ -295,6 +296,14 @@ static inline fastd_peer_transport_t fastd_peer_get_transport(const fastd_peer_t
 /** Returns true if a configured transport accepts a concrete transport */
 static inline bool fastd_peer_transport_allows(fastd_peer_transport_t configured, fastd_peer_transport_t concrete) {
 	return configured == TRANSPORT_AUTO || configured == concrete;
+}
+
+/** Returns whether TCP hole punching is enabled for a peer */
+static inline bool fastd_peer_get_tcp_punch(const fastd_peer_t *peer) {
+	if (peer && peer->tcp_punch.set)
+		return peer->tcp_punch.state;
+
+	return fastd_peer_group_get_tcp_punch(peer ? peer->group : conf.peer_group);
 }
 
 /** Returns the effective TURN relay setting for a peer */

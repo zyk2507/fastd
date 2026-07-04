@@ -115,6 +115,7 @@ static const keyword_t keywords[] = {
 	{ "syslog", TOK_SYSLOG },
 	{ "tap", TOK_TAP },
 	{ "tcp", TOK_TCP },
+	{ "tcp-punch", TOK_TCP_PUNCH },
 	{ "to", TOK_TO },
 	{ "transport", TOK_TRANSPORT },
 	{ "tun", TOK_TUN },

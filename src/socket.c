@@ -14,6 +14,7 @@
 #include "peer.h"
 #include "peer_group.h"
 #include "polling.h"
+#include "tcp_punch.h"
 
 #include <netinet/tcp.h>
 
@@ -29,6 +30,7 @@
 
 
 static void set_bound_address(fastd_socket_t *sock);
+static bool tcp_queue(fastd_socket_t *sock, fastd_peer_t *peer, const fastd_buffer_t *buffer, size_t stat_size);
 
 
 /** Returns true if a transport mode may use TCP */
@@ -143,6 +145,163 @@ static void close_tcp_connection(fastd_socket_t *sock, bool reset_peer) {
 
 	fastd_socket_close(sock);
 	free_dynamic_socket(sock);
+}
+
+/** Sets the port of an address from host byte order */
+static void set_address_port(fastd_peer_address_t *addr, uint16_t port) {
+	switch (addr->sa.sa_family) {
+	case AF_INET:
+		addr->in.sin_port = htons(port);
+		return;
+
+	case AF_INET6:
+		addr->in6.sin6_port = htons(port);
+		return;
+
+	default:
+		exit_bug("set_address_port: invalid address family");
+	}
+}
+
+/** Returns the default UDP socket matching an address family */
+static const fastd_socket_t *get_default_socket(int af) {
+	switch (af) {
+	case AF_INET:
+		return ctx.sock_default_v4;
+
+	case AF_INET6:
+		return ctx.sock_default_v6;
+
+	default:
+		return NULL;
+	}
+}
+
+/** Closes all unclaimed TCP punch sockets for a peer */
+void fastd_tcp_punch_close_peer(fastd_peer_t *peer) {
+	size_t i;
+	for (i = 0; i < VECTOR_LEN(ctx.tcp_socks);) {
+		fastd_socket_t *sock = VECTOR_INDEX(ctx.tcp_socks, i);
+
+		if (sock->tcp_punch_peer != peer) {
+			i++;
+			continue;
+		}
+
+		close_tcp_connection(sock, false);
+	}
+}
+
+/** Returns an existing TCP punch socket for a peer and remote candidate */
+static fastd_socket_t *find_tcp_punch_socket(fastd_peer_t *peer, const fastd_peer_address_t *remote_addr) {
+	size_t i;
+	for (i = 0; i < VECTOR_LEN(ctx.tcp_socks); i++) {
+		fastd_socket_t *sock = VECTOR_INDEX(ctx.tcp_socks, i);
+
+		if (sock->tcp_punch_peer == peer && fastd_peer_address_equal(&sock->peer_addr, remote_addr))
+			return sock;
+	}
+
+	return NULL;
+}
+
+/** Opens a TCP socket for active TCP hole punching */
+static fastd_socket_t *open_tcp_punch_socket(fastd_peer_t *peer, const fastd_peer_address_t *remote_addr) {
+	if (VECTOR_LEN(ctx.tcp_socks) >= TCP_MAX_CONNECTIONS) {
+		pr_debug("not opening TCP punch connection for %P because the connection limit has been reached", peer);
+		return NULL;
+	}
+
+	const fastd_socket_t *base_sock = get_default_socket(remote_addr->sa.sa_family);
+
+	int fd = socket(
+		remote_addr->sa.sa_family == AF_INET6 ? PF_INET6 : PF_INET, SOCK_STREAM | SOCK_NONBLOCK, IPPROTO_TCP);
+	if (fd < 0) {
+		pr_debug_errno("unable to create TCP punch socket");
+		return NULL;
+	}
+
+#ifdef NO_HAVE_SOCK_NONBLOCK
+	fastd_setnonblock(fd);
+#endif
+
+	const int one = 1;
+	if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)))
+		pr_debug_errno("setsockopt: unable to set SO_REUSEADDR on TCP punch socket");
+
+#ifdef SO_REUSEPORT
+	if (setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one)))
+		pr_debug_errno("setsockopt: unable to set SO_REUSEPORT on TCP punch socket");
+#endif
+
+	set_tcp_options(fd);
+
+#ifdef USE_BINDTODEVICE
+	if (base_sock && base_sock->addr && base_sock->addr->bindtodev
+	    && !fastd_peer_address_is_v6_ll(&base_sock->addr->addr)) {
+		if (setsockopt(
+			    fd, SOL_SOCKET, SO_BINDTODEVICE, base_sock->addr->bindtodev,
+			    strlen(base_sock->addr->bindtodev))) {
+			pr_debug_errno("setsockopt: unable to bind TCP punch socket to device");
+			goto error;
+		}
+	}
+#endif
+
+#ifdef USE_PACKET_MARK
+	if (conf.packet_mark) {
+		if (setsockopt(fd, SOL_SOCKET, SO_MARK, &conf.packet_mark, sizeof(conf.packet_mark))) {
+			pr_debug_errno("setsockopt: unable to set packet mark on TCP punch socket");
+			goto error;
+		}
+	}
+#endif
+
+	fastd_peer_address_t local_addr = { .sa.sa_family = remote_addr->sa.sa_family };
+	if (base_sock && base_sock->bound_addr && base_sock->bound_addr->sa.sa_family == remote_addr->sa.sa_family)
+		local_addr = *base_sock->bound_addr;
+
+	set_address_port(&local_addr, ntohs(fastd_peer_address_get_port(remote_addr)));
+
+	if (bind(fd, &local_addr.sa, address_len(&local_addr))) {
+		pr_debug2_errno("unable to bind TCP punch socket");
+		goto error;
+	}
+
+#ifdef __ANDROID__
+	if (!fastd_android_protect_socket(fd)) {
+		pr_error("error protecting TCP punch socket");
+		goto error;
+	}
+#endif
+
+	int ret = connect(fd, &remote_addr->sa, address_len(remote_addr));
+	if (ret < 0 && errno != EINPROGRESS && errno != EALREADY) {
+		pr_debug_errno("TCP punch connect");
+		goto error;
+	}
+
+	fastd_socket_t *sock = fastd_new0(fastd_socket_t);
+	sock->fd = FASTD_POLL_FD(POLL_TYPE_SOCKET, fd);
+	sock->type = SOCKET_TYPE_TCP_CONNECTION;
+	sock->addr = base_sock ? base_sock->addr : NULL;
+	sock->peer_addr = *remote_addr;
+	sock->tcp_punch_peer = peer;
+	sock->tcp_connecting = (ret < 0);
+	sock->tcp_timeout = ctx.now + FASTD_TCP_PUNCH_TIMEOUT;
+	set_bound_address(sock);
+
+	VECTOR_ADD(ctx.tcp_socks, sock);
+	fastd_poll_fd_register(&sock->fd);
+	fastd_poll_fd_set_write(&sock->fd, true);
+
+	pr_debug("opening TCP punch connection to %P[%I]", peer, remote_addr);
+	return sock;
+
+error:
+	if (close(fd))
+		pr_error_errno("close");
+	return NULL;
 }
 
 
@@ -775,13 +934,45 @@ static bool tcp_queue(fastd_socket_t *sock, fastd_peer_t *peer, const fastd_buff
 	return true;
 }
 
+/** Queues an initial handshake on deterministic TCP punch candidates */
+static void tcp_punch_queue(fastd_peer_t *peer, const fastd_peer_address_t *remote_addr, const fastd_buffer_t *buffer) {
+	if (!peer || fastd_peer_is_established(peer) || !fastd_peer_get_tcp_punch(peer))
+		return;
+
+	if (!fastd_peer_transport_allows(fastd_peer_get_transport(peer), TRANSPORT_TCP))
+		return;
+
+	if (remote_addr->sa.sa_family != AF_INET)
+		return;
+
+	uint16_t ports[FASTD_TCP_PUNCH_NUM_PORTS * FASTD_TCP_PUNCH_BUCKETS];
+	size_t n_ports = fastd_tcp_punch_generate_ports(ports, array_size(ports), time(NULL));
+
+	size_t i;
+	for (i = 0; i < n_ports; i++) {
+		fastd_peer_address_t punch_addr = *remote_addr;
+		set_address_port(&punch_addr, ports[i]);
+
+		fastd_socket_t *sock = find_tcp_punch_socket(peer, &punch_addr);
+		if (!sock)
+			sock = open_tcp_punch_socket(peer, &punch_addr);
+
+		if (sock)
+			tcp_queue(sock, peer, buffer, 0);
+	}
+}
+
 /** Sends a packet over TCP if the peer is configured for TCP transport */
 bool fastd_tcp_send(
 	fastd_peer_t *peer, fastd_socket_t *sock, UNUSED const fastd_peer_address_t *local_addr,
 	const fastd_peer_address_t *remote_addr, const fastd_buffer_t *buffer, size_t stat_size) {
 	if (sock && sock->type == SOCKET_TYPE_TCP_CONNECTION) {
-		if (fastd_peer_address_equal(&sock->peer_addr, remote_addr) && (!sock->peer || !peer || sock->peer == peer))
+		if (fastd_peer_address_equal(&sock->peer_addr, remote_addr) && (!sock->peer || !peer || sock->peer == peer)) {
+			if (!stat_size && sock->peer == peer)
+				tcp_punch_queue(peer, remote_addr, buffer);
+
 			return tcp_queue(sock, peer, buffer, stat_size);
+		}
 
 		fastd_stats_add(peer, STAT_TX_ERROR, stat_size);
 		return true;
@@ -829,6 +1020,9 @@ bool fastd_tcp_send(
 		fastd_stats_add(peer, STAT_TX_ERROR, stat_size);
 		return true;
 	}
+
+	if (!stat_size)
+		tcp_punch_queue(peer, remote_addr, buffer);
 
 	return tcp_queue(tcp_sock, peer, buffer, stat_size);
 }

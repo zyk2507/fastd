@@ -33,6 +33,7 @@ struct fastd_peer_group {
 	fastd_string_stack_t *methods; /**< The list of configured method names */
 	fastd_port_mapping_mode_t port_mapping; /**< Automatic port mapping mode for peers in this group */
 	fastd_peer_transport_t transport;       /**< Transport protocol for peers in this group */
+	fastd_tristate_t tcp_punch;             /**< Whether TCP hole punching is enabled for peers in this group */
 	fastd_tristate_t turn_relay;            /**< Whether peers in this group should use TURN relay */
 	fastd_turn_server_t *turn_servers;      /**< TURN servers for peers in this group */
 
@@ -107,6 +108,14 @@ static inline fastd_port_mapping_mode_t fastd_peer_group_get_port_mapping_mode(c
 /** Returns the inherited transport protocol for a peer group */
 static inline fastd_peer_transport_t fastd_peer_group_get_transport(const fastd_peer_group_t *group) {
 	return *fastd_peer_group_lookup(group, transport);
+}
+
+/** Returns the inherited TCP hole punching setting for a peer group */
+static inline bool fastd_peer_group_get_tcp_punch(const fastd_peer_group_t *group) {
+	while (group->parent && !group->tcp_punch.set)
+		group = group->parent;
+
+	return group->tcp_punch.state;
 }
 
 /** Returns the inherited TURN relay setting for a peer group */

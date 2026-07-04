@@ -16,6 +16,7 @@
 #include "peer_group.h"
 #include "peer_hashtable.h"
 #include "polling.h"
+#include "tcp_punch.h"
 #include "turn.h"
 
 #include <arpa/inet.h>
@@ -170,6 +171,8 @@ fastd_peer_t *fastd_peer_find_by_id(uint64_t id) {
 
 /** Closes and frees a peer's dynamic socket */
 static inline void free_socket(fastd_peer_t *peer) {
+	fastd_tcp_punch_close_peer(peer);
+
 	if (!peer->sock)
 		return;
 
@@ -565,6 +568,27 @@ bool fastd_peer_address_equal(const fastd_peer_address_t *addr1, const fastd_pee
 	return true;
 }
 
+/** Checks if two addresses have the same address family and IP address, ignoring the port */
+static bool fastd_peer_address_ip_equal(const fastd_peer_address_t *addr1, const fastd_peer_address_t *addr2) {
+	if (addr1->sa.sa_family != addr2->sa.sa_family)
+		return false;
+
+	switch (addr1->sa.sa_family) {
+	case AF_INET:
+		return addr1->in.sin_addr.s_addr == addr2->in.sin_addr.s_addr;
+
+	case AF_INET6:
+		if (!IN6_ARE_ADDR_EQUAL(&addr1->in6.sin6_addr, &addr2->in6.sin6_addr))
+			return false;
+
+		return !IN6_IS_ADDR_LINKLOCAL(&addr1->in6.sin6_addr)
+		       || addr1->in6.sin6_scope_id == addr2->in6.sin6_scope_id;
+
+	default:
+		return false;
+	}
+}
+
 /** If \e addr is a v4-mapped IPv6 address, it is converted to an IPv4 address */
 void fastd_peer_address_simplify(fastd_peer_address_t *addr) {
 	if (addr->sa.sa_family == AF_INET6 && IN6_IS_ADDR_V4MAPPED(&addr->in6.sin6_addr)) {
@@ -636,6 +660,19 @@ bool fastd_peer_matches_address(const fastd_peer_t *peer, const fastd_peer_addre
 		}
 	}
 
+	if (addr->sa.sa_family == AF_INET && fastd_peer_get_tcp_punch(peer)
+	    && fastd_peer_transport_allows(fastd_peer_get_transport(peer), TRANSPORT_TCP)
+	    && fastd_tcp_punch_port_valid(ntohs(fastd_peer_address_get_port(addr)), time(NULL))) {
+		for (i = 0; i < VECTOR_LEN(peer->remotes); i++) {
+			fastd_remote_t *remote = &VECTOR_INDEX(peer->remotes, i);
+
+			for (j = 0; j < remote->n_addresses; j++) {
+				if (fastd_peer_address_ip_equal(&remote->addresses[j], addr))
+					return true;
+			}
+		}
+	}
+
 	return false;
 }
 
@@ -703,6 +740,7 @@ bool fastd_peer_claim_address(
 		new_peer->transport_probe = actual_transport;
 
 	if (sock && sock->type == SOCKET_TYPE_TCP_CONNECTION && sock != new_peer->sock) {
+		sock->tcp_punch_peer = NULL;
 		free_socket(new_peer);
 		new_peer->sock = sock;
 		sock->peer = new_peer;
@@ -782,6 +820,9 @@ static inline bool peer_configs_equal(const fastd_peer_t *peer1, const fastd_pee
 		return false;
 
 	if (peer1->transport != peer2->transport)
+		return false;
+
+	if (peer1->tcp_punch.set != peer2->tcp_punch.set || peer1->tcp_punch.state != peer2->tcp_punch.state)
 		return false;
 
 	if (peer1->turn_relay.set != peer2->turn_relay.set || peer1->turn_relay.state != peer2->turn_relay.state)

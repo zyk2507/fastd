@@ -179,6 +179,7 @@ struct fastd_socket {
 	fastd_socket_t *parent;           /**< Original of L2TP offload socket */
 	fastd_socket_t *tcp_listener;     /**< TCP listener belonging to a UDP socket */
 	fastd_peer_address_t peer_addr;   /**< Remote address of a TCP connection */
+	fastd_peer_t *tcp_punch_peer;     /**< Peer this unclaimed TCP punch connection belongs to */
 
 	uint8_t tcp_header[4]; /**< Partial TCP frame length prefix */
 	size_t tcp_header_len; /**< Number of TCP frame prefix bytes read */
@@ -453,6 +454,7 @@ void fastd_socket_update_tcp_listeners(void);
 bool fastd_tcp_send(
 	fastd_peer_t *peer, fastd_socket_t *sock, const fastd_peer_address_t *local_addr,
 	const fastd_peer_address_t *remote_addr, const fastd_buffer_t *buffer, size_t stat_size);
+void fastd_tcp_punch_close_peer(fastd_peer_t *peer);
 void fastd_tcp_maintenance(void);
 void fastd_tcp_cleanup(void);
 

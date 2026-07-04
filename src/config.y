@@ -118,6 +118,7 @@
 %token TOK_TAP
 %token TOK_TO
 %token TOK_TCP
+%token TOK_TCP_PUNCH
 %token TOK_TUN
 %token TOK_TURN
 %token TOK_TRANSPORT
@@ -227,6 +228,9 @@ peer_group_statement:
 		}
 	|	TOK_TRANSPORT transport ';' {
 			state->peer_group->transport = $2;
+		}
+	|	TOK_TCP_PUNCH boolean ';' {
+			state->peer_group->tcp_punch = $2 ? FASTD_TRISTATE_TRUE : FASTD_TRISTATE_FALSE;
 		}
 	|	TOK_TURN TOK_RELAY boolean ';' {
 			if (!fastd_config_set_turn_relay(&@$, state, &state->peer_group->turn_relay, $3))
@@ -527,6 +531,9 @@ peer_statement: TOK_REMOTE peer_remote ';'
 		}
 	|	TOK_TRANSPORT transport ';' {
 			state->peer->transport = $2;
+		}
+	|	TOK_TCP_PUNCH boolean ';' {
+			state->peer->tcp_punch = $2 ? FASTD_TRISTATE_TRUE : FASTD_TRISTATE_FALSE;
 		}
 	|	TOK_TURN TOK_RELAY boolean ';' {
 			if (!fastd_config_set_turn_relay(&@$, state, &state->peer->turn_relay, $3))
