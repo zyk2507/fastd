@@ -94,6 +94,21 @@ typedef enum fastd_port_mapping_mode {
 	PORT_MAPPING_AUTO,      /**< Use all available port mapping backends */
 } fastd_port_mapping_mode_t;
 
+/** Peer transport protocol */
+typedef enum fastd_peer_transport {
+	TRANSPORT_UNSET = 0, /**< Inherit transport from the peer group */
+	TRANSPORT_UDP,       /**< Use UDP datagrams */
+	TRANSPORT_TCP,       /**< Use TCP streams with fastd packet framing */
+	TRANSPORT_AUTO,      /**< Probe TCP, then fall back to UDP */
+} fastd_peer_transport_t;
+
+/** Socket type */
+typedef enum fastd_socket_type {
+	SOCKET_TYPE_UDP = 0,        /**< UDP datagram socket */
+	SOCKET_TYPE_TCP_LISTENER,   /**< TCP listening socket */
+	SOCKET_TYPE_TCP_CONNECTION, /**< TCP connection */
+} fastd_socket_type_t;
+
 /** Types of file descriptors to poll on */
 typedef enum fastd_poll_type {
 	POLL_TYPE_UNSPEC = 0, /**< Unspecified file descriptor type */
@@ -136,6 +151,7 @@ typedef union fastd_peer_address fastd_peer_address_t;
 typedef struct fastd_bind_address fastd_bind_address_t;
 typedef struct fastd_iface fastd_iface_t;
 typedef struct fastd_socket fastd_socket_t;
+typedef struct fastd_tcp_frame fastd_tcp_frame_t;
 typedef struct fastd_port_mapping fastd_port_mapping_t;
 typedef struct fastd_turn_server fastd_turn_server_t;
 typedef struct fastd_turn_peer fastd_turn_peer_t;

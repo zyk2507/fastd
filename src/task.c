@@ -17,6 +17,7 @@
 /** Performs periodic maintenance tasks */
 static inline void maintenance(void) {
 	fastd_peer_eth_addr_cleanup();
+	fastd_tcp_maintenance();
 	fastd_task_reschedule_relative(&ctx.next_maintenance, MAINTENANCE_INTERVAL);
 }
 

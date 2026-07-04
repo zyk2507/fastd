@@ -296,8 +296,9 @@ static void respond_handshake(
 
 	fastd_buffer_t *buffer = fastd_handshake_new_reply(
 		2, fastd_peer_get_mtu(peer), NULL, *fastd_peer_group_lookup_peer(peer, methods),
-		4 * RECORD_LEN(PUBLICKEYBYTES) + RECORD_LEN(HASHBYTES));
+		RECORD_LEN(1) + 4 * RECORD_LEN(PUBLICKEYBYTES) + RECORD_LEN(HASHBYTES));
 
+	fastd_handshake_add_transport(buffer, sock);
 	fastd_handshake_add(buffer, RECORD_SENDER_KEY, PUBLICKEYBYTES, &conf.protocol_config->key.public);
 	fastd_handshake_add(buffer, RECORD_RECIPIENT_KEY, PUBLICKEYBYTES, &peer->key->key);
 	fastd_handshake_add(buffer, RECORD_SENDER_HANDSHAKE_KEY, PUBLICKEYBYTES, &handshake_key->key.public);
@@ -352,8 +353,10 @@ static void finish_handshake(
 		return;
 
 	fastd_buffer_t *buffer = fastd_handshake_new_reply(
-		3, fastd_peer_get_mtu(peer), method, NULL, 4 * RECORD_LEN(PUBLICKEYBYTES) + RECORD_LEN(HASHBYTES));
+		3, fastd_peer_get_mtu(peer), method, NULL,
+		RECORD_LEN(1) + 4 * RECORD_LEN(PUBLICKEYBYTES) + RECORD_LEN(HASHBYTES));
 
+	fastd_handshake_add_transport(buffer, sock);
 	fastd_handshake_add(buffer, RECORD_SENDER_KEY, PUBLICKEYBYTES, &conf.protocol_config->key.public);
 	fastd_handshake_add(buffer, RECORD_RECIPIENT_KEY, PUBLICKEYBYTES, &peer->key->key);
 	fastd_handshake_add(buffer, RECORD_SENDER_HANDSHAKE_KEY, PUBLICKEYBYTES, &handshake_key->key.public);
@@ -477,9 +480,10 @@ void fastd_protocol_ec25519_fhmqvc_handshake_init(
 	fastd_peer_t *peer, unsigned flags) {
 	fastd_protocol_ec25519_fhmqvc_maintenance();
 
-	fastd_buffer_t *buffer =
-		fastd_handshake_new_init(3 * RECORD_LEN(PUBLICKEYBYTES) /* sender key, recipient key, handshake key */);
+	fastd_buffer_t *buffer = fastd_handshake_new_init(
+		RECORD_LEN(1) + 3 * RECORD_LEN(PUBLICKEYBYTES) /* sender key, recipient key, handshake key */);
 
+	fastd_handshake_add_transport(buffer, sock);
 	fastd_handshake_add(buffer, RECORD_SENDER_KEY, PUBLICKEYBYTES, &conf.protocol_config->key.public);
 
 	if (peer) {
@@ -661,6 +665,9 @@ void fastd_protocol_ec25519_fhmqvc_handshake_handle(
 			exit_bug("match_sender_key: unknown error");
 		}
 	}
+
+	if (!fastd_handshake_check_transport(sock, remote_addr, peer, handshake))
+		return;
 
 	if (!fastd_handshake_check_mtu(sock, local_addr, remote_addr, peer, handshake))
 		return;

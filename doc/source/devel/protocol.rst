@@ -3,13 +3,18 @@ Protocol specification
 
 Basic protocol design
 ~~~~~~~~~~~~~~~~~~~~~
-fastd uses UDP as the transport protocol for its packets. UDP has been chosen
+fastd uses UDP as the default transport protocol for its packets. UDP has been chosen
 instead of raw IP packets (as they are used by IPIP and 6in4 tunnels or IPsec)
 to simplify the deployment of multiple fastd instances on the same host using different
 UDP ports and allow passing through common NAT routers without explicit configuration.
 
-The first byte of the UDP payload is used to discern the different packet types
-used by fastd. Since fastd v22, the following packet types are used:
+When TCP transport is configured, fastd uses the same packet formats over a TCP stream.
+Each fastd packet is prefixed by a 4-byte unsigned length in network byte order. The
+handshake contains a transport TLV so both peers can verify that the announced transport
+matches the socket a packet was received on.
+
+The first byte of each fastd packet is used to discern the different packet types used
+by fastd. Since fastd v22, the following packet types are used:
 
 - ``0x00`` Data packet (v22+)
 - ``0x01`` Handshake packet (pre-v22)
@@ -96,6 +101,8 @@ Record ID  Value description             Format                     Values
 ``0x000d`` Version name                  variable-length string
 ``0x000e`` Method list                   zero-separated string list
 ``0x000f`` TLV authentication tag        32-byte opaque value
+``0x0010`` Compression name              variable-length string
+``0x0011`` Transport                     1-byte unsigned integer    {1 (UDP), 2 (TCP)}
 ========== ============================= ========================== ===================================================================
 
 .. _handshake_protocol:
@@ -114,6 +121,7 @@ different parts of the handshake:
 * MTU
 * fastd version (e.g. ``v15``)
 * Protocol name (``ec25519-fhmqvc``)
+* Transport (UDP/TCP)
 
 Handshake request
 .................

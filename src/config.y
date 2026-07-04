@@ -117,10 +117,13 @@
 %token TOK_SYSLOG
 %token TOK_TAP
 %token TOK_TO
+%token TOK_TCP
 %token TOK_TUN
 %token TOK_TURN
+%token TOK_TRANSPORT
 %token TOK_UP
 %token TOK_UPNP_IGD
+%token TOK_UDP
 %token TOK_USE
 %token TOK_USER
 %token TOK_VERBOSE
@@ -164,6 +167,7 @@
 %type <uint64> bind_default
 %type <uint64> drop_capabilities_enabled
 %type <uint64> port_mapping
+%type <uint64> transport
 %type <tristate> autobool
 %type <boolean> sync
 
@@ -220,6 +224,9 @@ peer_group_statement:
 	|	TOK_PORT_MAPPING port_mapping ';' {
 			if (!fastd_config_set_port_mapping(&@$, state, &state->peer_group->port_mapping, $2))
 				YYERROR;
+		}
+	|	TOK_TRANSPORT transport ';' {
+			state->peer_group->transport = $2;
 		}
 	|	TOK_TURN TOK_RELAY boolean ';' {
 			if (!fastd_config_set_turn_relay(&@$, state, &state->peer_group->turn_relay, $3))
@@ -518,6 +525,9 @@ peer_statement: TOK_REMOTE peer_remote ';'
 			if (!fastd_config_set_port_mapping(&@$, state, &state->peer->port_mapping, $2))
 				YYERROR;
 		}
+	|	TOK_TRANSPORT transport ';' {
+			state->peer->transport = $2;
+		}
 	|	TOK_TURN TOK_RELAY boolean ';' {
 			if (!fastd_config_set_turn_relay(&@$, state, &state->peer->turn_relay, $3))
 				YYERROR;
@@ -698,6 +708,11 @@ port_mapping:
 	|	TOK_STRING	{ $$ = fastd_config_port_mapping_mode($1->str); }
 	;
 
+transport:
+		TOK_UDP		{ $$ = TRANSPORT_UDP; }
+	|	TOK_TCP		{ $$ = TRANSPORT_TCP; }
+	|	TOK_AUTO	{ $$ = TRANSPORT_AUTO; }
+	;
 
 include:	TOK_PEER TOK_STRING maybe_as {
 			fastd_peer_t *peer = fastd_new0(fastd_peer_t);

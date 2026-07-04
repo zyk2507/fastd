@@ -58,6 +58,7 @@ struct fastd_peer {
 	char *ifname;                           /**< Peer-specific interface name */
 	uint16_t mtu;                           /**< Peer-specific interface MTU */
 	fastd_port_mapping_mode_t port_mapping; /**< Peer-specific automatic port mapping mode */
+	fastd_peer_transport_t transport;       /**< Peer-specific transport protocol */
 	fastd_tristate_t turn_relay;            /**< Peer-specific TURN relay setting */
 	fastd_turn_server_t *turn_servers;      /**< Peer-specific TURN servers */
 
@@ -75,6 +76,7 @@ struct fastd_peer {
 	fastd_peer_address_t last_handshake_address;          /**< The address the last handshake was sent to */
 	fastd_peer_address_t last_handshake_response_address; /**< The address the last handshake was received from */
 	ssize_t next_remote;                                  /**< An index into the field remotes or -1 */
+	fastd_peer_transport_t transport_probe; /**< Transport currently probed for automatic transport mode */
 
 	fastd_peer_state_t state; /**< The peer's state */
 
@@ -143,6 +145,7 @@ bool fastd_peer_claim_address(
 	const fastd_peer_address_t *remote_addr, bool force);
 void fastd_peer_reset_socket(fastd_peer_t *peer);
 void fastd_peer_schedule_handshake(fastd_peer_t *peer, int delay);
+void fastd_peer_transport_failed(fastd_peer_t *peer, fastd_peer_transport_t transport);
 fastd_peer_t *fastd_peer_find_by_id(uint64_t id);
 
 void fastd_peer_set_shell_env(
@@ -270,7 +273,7 @@ static inline void fastd_peer_clear_keepalive(fastd_peer_t *peer) {
 
 /** Checks if a peer uses dynamic sockets (which means that each connection attempt uses a new socket) */
 static inline bool fastd_peer_is_socket_dynamic(const fastd_peer_t *peer) {
-	return (!peer->sock || !peer->sock->addr);
+	return (!peer->sock || !peer->sock->addr || peer->sock->type == SOCKET_TYPE_TCP_CONNECTION);
 }
 
 /** Returns the effective automatic port mapping mode for a peer */
@@ -279,6 +282,19 @@ static inline fastd_port_mapping_mode_t fastd_peer_get_port_mapping_mode(const f
 		return peer->port_mapping;
 
 	return fastd_peer_group_get_port_mapping_mode(peer ? peer->group : conf.peer_group);
+}
+
+/** Returns the effective transport protocol for a peer */
+static inline fastd_peer_transport_t fastd_peer_get_transport(const fastd_peer_t *peer) {
+	if (peer && peer->transport)
+		return peer->transport;
+
+	return fastd_peer_group_get_transport(peer ? peer->group : conf.peer_group);
+}
+
+/** Returns true if a configured transport accepts a concrete transport */
+static inline bool fastd_peer_transport_allows(fastd_peer_transport_t configured, fastd_peer_transport_t concrete) {
+	return configured == TRANSPORT_AUTO || configured == concrete;
 }
 
 /** Returns the effective TURN relay setting for a peer */

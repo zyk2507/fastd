@@ -80,6 +80,20 @@ Example config:
   multiple peers share the same fixed bind socket, enabling port mapping for any of these peers maps the shared
   local UDP port.
 
+| ``transport udp|tcp|auto;``
+
+  Configures the packet transport for peers. The default is ``udp``. This option may be set globally, in peer
+  groups, or in peer sections; peer settings override peer group settings, and peer group settings inherit from
+  their parent group.
+
+  ``udp`` uses the traditional fastd datagram transport. ``tcp`` uses TCP connections on the same configured bind
+  addresses and ports, with fastd packets framed inside the stream. ``auto`` probes TCP first and falls back to UDP
+  if the TCP connection attempt fails.
+
+  Both peers must use the same concrete transport for a session. New fastd versions announce the actual transport in
+  the handshake and ignore handshakes whose announced transport does not match the socket they arrived on. Peers that
+  do not announce a transport are treated as UDP peers for compatibility.
+
 | ``turn relay yes|no;``
 | ``turn server "<address>" port <port> [user "<username>" password "<password>"];``
 
@@ -380,6 +394,11 @@ Example config:
   Sets the MTU for a peer-specific interface; must be at least 576.
 
   Does have no effect in TAP mode.
+
+| ``transport udp|tcp|auto;``
+
+  Overrides the inherited transport for this peer. See the main configuration section for the transport modes and
+  handshake consistency checks.
 
 | ``remote <IPv4 address>:<port>;``
 | ``remote <IPv6 address>:<port>;``

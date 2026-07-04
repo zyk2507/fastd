@@ -73,6 +73,9 @@ void fastd_send(
 	if (!sock)
 		exit_bug("send: sock == NULL");
 
+	if (fastd_tcp_send(peer, (fastd_socket_t *)sock, local_addr, remote_addr, buffer, stat_size))
+		return;
+
 	if (fastd_turn_send(peer, sock, local_addr, remote_addr, buffer, stat_size))
 		return;
 

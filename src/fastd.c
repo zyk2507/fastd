@@ -530,6 +530,7 @@ static inline void init(int argc, char *argv[]) {
 	fastd_config_load_peer_dirs(true);
 	if (!fastd_turn_check())
 		exit(1);
+	fastd_socket_update_tcp_listeners();
 	fastd_port_mapping_init();
 
 	notify_systemd();
@@ -577,6 +578,7 @@ static inline void handle_signals(void) {
 		fastd_config_load_peer_dirs(false);
 		if (!fastd_turn_check())
 			exit(1);
+		fastd_socket_update_tcp_listeners();
 		fastd_port_mapping_refresh();
 	}
 
@@ -631,6 +633,7 @@ static inline void cleanup(void) {
 	fastd_status_close();
 	fastd_port_mapping_cleanup();
 	fastd_turn_cleanup();
+	fastd_tcp_cleanup();
 	close_sockets();
 	fastd_poll_free();
 

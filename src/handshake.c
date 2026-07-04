@@ -38,6 +38,7 @@ static const char *const RECORD_TYPES[RECORD_MAX] = {
 	"method list",
 	"TLV message authentication code",
 	"compression name",
+	"transport",
 };
 
 
@@ -77,6 +78,39 @@ static inline uint32_t as_uint(const fastd_handshake_record_t *record) {
 	default:
 		return UINT32_C(0xffffffff);
 	}
+}
+
+/** Returns the transport ID used in the handshake TLVs */
+static inline uint8_t get_transport_id(fastd_peer_transport_t transport) {
+	switch (transport) {
+	case TRANSPORT_UDP:
+		return 1;
+
+	case TRANSPORT_TCP:
+		return 2;
+
+	default:
+		exit_bug("get_transport_id: invalid transport");
+	}
+}
+
+/** Parses a transport ID from the handshake TLVs */
+static inline fastd_peer_transport_t get_transport_by_id(uint8_t id) {
+	switch (id) {
+	case 1:
+		return TRANSPORT_UDP;
+
+	case 2:
+		return TRANSPORT_TCP;
+
+	default:
+		return TRANSPORT_UNSET;
+	}
+}
+
+/** Returns the concrete transport protocol used by a socket */
+static inline fastd_peer_transport_t get_socket_transport(const fastd_socket_t *sock) {
+	return fastd_socket_is_tcp(sock) ? TRANSPORT_TCP : TRANSPORT_UDP;
 }
 
 
@@ -231,6 +265,49 @@ fastd_buffer_t *fastd_handshake_new_reply(
 	fastd_buffer_t *buffer = new_handshake(type, mtu, method, methods, tail_space);
 	fastd_handshake_add_uint8(buffer, RECORD_REPLY_CODE, 0);
 	return buffer;
+}
+
+/** Adds the transport protocol used by a socket to a handshake */
+void fastd_handshake_add_transport(fastd_buffer_t *buffer, const fastd_socket_t *sock) {
+	fastd_handshake_add_uint8(buffer, RECORD_TRANSPORT, get_transport_id(get_socket_transport(sock)));
+}
+
+/** Returns the transport protocol advertised in a handshake */
+static fastd_peer_transport_t get_handshake_transport(const fastd_handshake_t *handshake) {
+	const fastd_handshake_record_t *record = &handshake->records[RECORD_TRANSPORT];
+
+	if (!record->data)
+		return TRANSPORT_UDP;
+
+	if (record->length != 1)
+		return TRANSPORT_UNSET;
+
+	return get_transport_by_id(as_uint8(record));
+}
+
+/** Checks if the handshake transport is consistent with the socket and peer configuration */
+bool fastd_handshake_check_transport(
+	const fastd_socket_t *sock, const fastd_peer_address_t *remote_addr, const fastd_peer_t *peer,
+	const fastd_handshake_t *handshake) {
+	fastd_peer_transport_t actual = get_socket_transport(sock);
+	fastd_peer_transport_t advertised = get_handshake_transport(handshake);
+
+	if (advertised == TRANSPORT_UNSET) {
+		pr_debug("ignoring handshake from %P[%I] with invalid transport field", peer, remote_addr);
+		return false;
+	}
+
+	if (advertised != actual) {
+		pr_debug("ignoring handshake from %P[%I] with mismatching transport field", peer, remote_addr);
+		return false;
+	}
+
+	if (!fastd_peer_transport_allows(fastd_peer_get_transport(peer), actual)) {
+		pr_debug("ignoring handshake from %P[%I] on disallowed transport", peer, remote_addr);
+		return false;
+	}
+
+	return true;
 }
 
 /** Prints the error corresponding to the given reply code and error detail */

@@ -47,7 +47,7 @@ static inline int task_timeout(void) {
 
 
 /** Handles a file descriptor that was selected on */
-static inline void handle_fd(fastd_poll_fd_t *fd, bool input, bool error) {
+static inline void handle_fd(fastd_poll_fd_t *fd, bool input, bool output, bool error) {
 	switch (fd->type) {
 	case POLL_TYPE_ASYNC:
 		if (input)
@@ -71,13 +71,8 @@ static inline void handle_fd(fastd_poll_fd_t *fd, bool input, bool error) {
 	case POLL_TYPE_SOCKET: {
 		fastd_socket_t *sock = container_of(fd, fastd_socket_t, fd);
 
-		if (error) {
-			fastd_socket_error(sock);
-			error = false;
-		}
-
-		if (input)
-			fastd_receive(sock);
+		fastd_socket_handle(sock, input, output, error);
+		error = false;
 
 		break;
 	}
@@ -128,11 +123,26 @@ void fastd_poll_fd_register(fastd_poll_fd_t *fd) {
 		exit_bug("fastd_poll_fd_register: invalid FD");
 
 	struct epoll_event event = {
-		.events = EPOLLIN,
+		.events = EPOLLIN | (fd->write ? EPOLLOUT : 0),
 		.data.ptr = fd,
 	};
 
 	if (epoll_ctl(ctx.epoll_fd, EPOLL_CTL_ADD, fd->fd, &event) < 0)
+		exit_errno("epoll_ctl");
+}
+
+void fastd_poll_fd_set_write(fastd_poll_fd_t *fd, bool write) {
+	if (fd->write == write)
+		return;
+
+	fd->write = write;
+
+	struct epoll_event event = {
+		.events = EPOLLIN | (fd->write ? EPOLLOUT : 0),
+		.data.ptr = fd,
+	};
+
+	if (epoll_ctl(ctx.epoll_fd, EPOLL_CTL_MOD, fd->fd, &event) < 0)
 		exit_errno("epoll_ctl");
 }
 
@@ -159,7 +169,9 @@ void fastd_poll_handle(void) {
 
 	size_t i;
 	for (i = 0; i < (size_t)ret; i++)
-		handle_fd(events[i].data.ptr, events[i].events & EPOLLIN, events[i].events & (EPOLLERR | EPOLLHUP));
+		handle_fd(
+			events[i].data.ptr, events[i].events & EPOLLIN, events[i].events & EPOLLOUT,
+			events[i].events & (EPOLLERR | EPOLLHUP));
 }
 
 #else
@@ -181,6 +193,14 @@ void fastd_poll_fd_register(fastd_poll_fd_t *fd) {
 
 	VECTOR_INDEX(ctx.fds, fd->fd) = fd;
 
+	VECTOR_RESIZE(ctx.pollfds, 0);
+}
+
+void fastd_poll_fd_set_write(fastd_poll_fd_t *fd, bool write) {
+	if (fd->write == write)
+		return;
+
+	fd->write = write;
 	VECTOR_RESIZE(ctx.pollfds, 0);
 }
 
@@ -209,7 +229,7 @@ void fastd_poll_handle(void) {
 
 			struct pollfd pollfd = {
 				.fd = fd->fd,
-				.events = POLLIN,
+				.events = POLLIN | (fd->write ? POLLOUT : 0),
 				.revents = 0,
 			};
 			VECTOR_ADD(ctx.pollfds, pollfd);
@@ -225,13 +245,17 @@ void fastd_poll_handle(void) {
 #ifdef USE_SELECT
 	/* Inefficient implementation for OSX... */
 	fd_set readfds;
+	fd_set writefds;
 	FD_ZERO(&readfds);
+	FD_ZERO(&writefds);
 	int maxfd = -1;
 
 	for (i = 0; i < VECTOR_LEN(ctx.pollfds); i++) {
 		struct pollfd *pollfd = &VECTOR_INDEX(ctx.pollfds, i);
 		if (pollfd->fd >= 0) {
 			FD_SET(pollfd->fd, &readfds);
+			if (pollfd->events & POLLOUT)
+				FD_SET(pollfd->fd, &writefds);
 
 			if (pollfd->fd > maxfd)
 				maxfd = pollfd->fd;
@@ -247,7 +271,7 @@ void fastd_poll_handle(void) {
 			tv.tv_sec = timeout / 1000;
 			tv.tv_usec = (timeout % 1000) * 1000;
 		}
-		ret = select(maxfd + 1, &readfds, NULL, &errfds, tvp);
+		ret = select(maxfd + 1, &readfds, &writefds, &errfds, tvp);
 		if (ret < 0 && errno != EINTR)
 			exit_errno("select");
 	}
@@ -264,6 +288,8 @@ void fastd_poll_handle(void) {
 
 			if (FD_ISSET(pollfd->fd, &readfds))
 				pollfd->revents |= POLLIN;
+			if (FD_ISSET(pollfd->fd, &writefds))
+				pollfd->revents |= POLLOUT;
 			if (FD_ISSET(pollfd->fd, &errfds))
 				pollfd->revents |= POLLERR;
 
@@ -291,7 +317,7 @@ void fastd_poll_handle(void) {
 			ret--;
 
 		handle_fd(
-			VECTOR_INDEX(ctx.fds, pollfd->fd), pollfd->revents & POLLIN,
+			VECTOR_INDEX(ctx.fds, pollfd->fd), pollfd->revents & POLLIN, pollfd->revents & POLLOUT,
 			pollfd->revents & (POLLERR | POLLHUP | POLLNVAL));
 	}
 }

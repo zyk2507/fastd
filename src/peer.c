@@ -213,6 +213,36 @@ void fastd_peer_reset_socket(fastd_peer_t *peer) {
 
 	free_socket(peer);
 
+	fastd_peer_transport_t transport = fastd_peer_get_transport(peer);
+	if (transport == TRANSPORT_AUTO) {
+		if (!peer->transport_probe)
+			peer->transport_probe = TRANSPORT_TCP;
+
+		transport = peer->transport_probe;
+	}
+
+	if (transport == TRANSPORT_TCP) {
+		const fastd_socket_t *base_sock = NULL;
+
+		switch (peer->address.sa.sa_family) {
+		case AF_INET:
+			base_sock = ctx.sock_default_v4;
+			break;
+
+		case AF_INET6:
+			base_sock = ctx.sock_default_v6;
+			break;
+		}
+
+		peer->sock = fastd_socket_open_tcp(peer, base_sock, &peer->address);
+		if (peer->sock)
+			return;
+
+		fastd_peer_transport_failed(peer, TRANSPORT_TCP);
+		if (fastd_peer_get_transport(peer) != TRANSPORT_AUTO)
+			return;
+	}
+
 	switch (peer->address.sa.sa_family) {
 	case AF_INET:
 		if (ctx.sock_default_v4)
@@ -265,6 +295,20 @@ static void set_next_handshake_default(fastd_peer_t *peer) {
 void fastd_peer_schedule_handshake(fastd_peer_t *peer, int delay) {
 	set_next_handshake(peer, delay);
 	schedule_peer_task(peer);
+}
+
+/** Handles a failed transport probe */
+void fastd_peer_transport_failed(fastd_peer_t *peer, fastd_peer_transport_t transport) {
+	if (!peer || fastd_peer_get_transport(peer) != TRANSPORT_AUTO || fastd_peer_is_established(peer))
+		return;
+
+	if (transport != TRANSPORT_TCP || peer->transport_probe != TRANSPORT_TCP)
+		return;
+
+	peer->transport_probe = TRANSPORT_UDP;
+	peer->last_handshake_timeout = ctx.now;
+	peer->last_handshake_address.sa.sa_family = AF_UNSPEC;
+	fastd_peer_schedule_handshake(peer, 0);
 }
 
 /** Checks if the peer group \e group1 lies in \e group2 */
@@ -321,6 +365,7 @@ static void reset_peer(fastd_peer_t *peer) {
 
 	peer->address.sa.sa_family = AF_UNSPEC;
 	peer->local_address.sa.sa_family = AF_UNSPEC;
+	peer->transport_probe = TRANSPORT_UNSET;
 	peer->state = STATE_INACTIVE;
 
 	if (peer->offload) {
@@ -606,6 +651,16 @@ bool fastd_peer_matches_address(const fastd_peer_t *peer, const fastd_peer_addre
 bool fastd_peer_claim_address(
 	fastd_peer_t *new_peer, fastd_socket_t *sock, const fastd_peer_address_t *local_addr,
 	const fastd_peer_address_t *remote_addr, bool force) {
+	bool address_changed = !fastd_peer_address_equal(&new_peer->address, remote_addr);
+	bool has_actual_transport = sock != NULL;
+	fastd_peer_transport_t actual_transport = fastd_socket_is_tcp(sock) ? TRANSPORT_TCP : TRANSPORT_UDP;
+
+	if (has_actual_transport &&
+	    !fastd_peer_transport_allows(fastd_peer_get_transport(new_peer), actual_transport)) {
+		reset_peer_address(new_peer);
+		return false;
+	}
+
 	if (remote_addr->sa.sa_family == AF_UNSPEC) {
 		if (fastd_peer_is_established(new_peer))
 			fastd_peer_reset(new_peer);
@@ -641,7 +696,17 @@ bool fastd_peer_claim_address(
 	new_peer->address = *remote_addr;
 	fastd_peer_hashtable_insert(new_peer);
 
-	if (sock && sock->addr && sock != new_peer->sock) {
+	if (address_changed && fastd_peer_get_transport(new_peer) == TRANSPORT_AUTO)
+		new_peer->transport_probe = TRANSPORT_UNSET;
+
+	if (has_actual_transport && fastd_peer_get_transport(new_peer) == TRANSPORT_AUTO)
+		new_peer->transport_probe = actual_transport;
+
+	if (sock && sock->type == SOCKET_TYPE_TCP_CONNECTION && sock != new_peer->sock) {
+		free_socket(new_peer);
+		new_peer->sock = sock;
+		sock->peer = new_peer;
+	} else if (sock && sock->addr && sock != new_peer->sock) {
 		free_socket(new_peer);
 		new_peer->sock = sock;
 	}
@@ -714,6 +779,9 @@ static inline bool peer_configs_equal(const fastd_peer_t *peer1, const fastd_pee
 		return false;
 
 	if (peer1->port_mapping != peer2->port_mapping)
+		return false;
+
+	if (peer1->transport != peer2->transport)
 		return false;
 
 	if (peer1->turn_relay.set != peer2->turn_relay.set || peer1->turn_relay.state != peer2->turn_relay.state)

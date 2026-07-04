@@ -182,9 +182,29 @@ static bool backoff_unknown(fastd_peer_address_t addr) {
 	return false;
 }
 
+/** Returns the concrete transport protocol of a socket */
+static inline fastd_peer_transport_t get_socket_transport(const fastd_socket_t *sock) {
+	return fastd_socket_is_tcp(sock) ? TRANSPORT_TCP : TRANSPORT_UDP;
+}
+
+/** Returns true if data packets from a peer may use a socket's concrete transport */
+static inline bool can_receive_data_transport(const fastd_peer_t *peer, const fastd_socket_t *sock) {
+	fastd_peer_transport_t actual = get_socket_transport(sock);
+	fastd_peer_transport_t configured = fastd_peer_get_transport(peer);
+
+	if (configured == TRANSPORT_AUTO && peer->transport_probe)
+		return actual == peer->transport_probe;
+
+	return fastd_peer_transport_allows(configured, actual);
+}
+
 /** Returns true the peer is non-null and has an established connection with the correct local address */
-static inline bool can_receive_data(const fastd_peer_t *peer, const fastd_peer_address_t *local_addr) {
+static inline bool
+can_receive_data(const fastd_peer_t *peer, const fastd_socket_t *sock, const fastd_peer_address_t *local_addr) {
 	if (!peer || !fastd_peer_is_established(peer))
+		return false;
+
+	if (!can_receive_data_transport(peer, sock))
 		return false;
 
 	return fastd_peer_address_equal(&peer->local_address, local_addr);
@@ -233,6 +253,11 @@ void fastd_receive_packet(
 		peer = fastd_peer_hashtable_lookup(remote_addr);
 	}
 
+	if (peer && !fastd_peer_transport_allows(fastd_peer_get_transport(peer), get_socket_transport(sock))) {
+		pr_debug("ignoring packet from %P[%I] on disallowed transport", peer, remote_addr);
+		goto end_free;
+	}
+
 	uint8_t packet_type = *(const uint8_t *)buffer->data;
 	bool has_control_header = false;
 
@@ -254,10 +279,17 @@ void fastd_receive_packet(
 		has_control_header = true;
 	}
 
-	if (is_data_packet(packet_type) && can_receive_data(peer, local_addr)) {
-		/* Consumes the buffer */
-		conf.protocol->handle_recv(peer, buffer);
-		return;
+	if (is_data_packet(packet_type)) {
+		if (can_receive_data(peer, sock, local_addr)) {
+			/* Consumes the buffer */
+			conf.protocol->handle_recv(peer, buffer);
+			return;
+		}
+
+		if (peer && fastd_peer_is_established(peer)) {
+			pr_debug("ignoring payload data from %P[%I] on inactive address or transport", peer, remote_addr);
+			goto end_free;
+		}
 	}
 
 	if (!peer && !allow_unknown_peers()) {

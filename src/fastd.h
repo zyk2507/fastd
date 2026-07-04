@@ -148,6 +148,16 @@ struct fastd_bind_address {
 	char *bindtodev;            /**< May contain an interface name to limit the bind to */
 };
 
+/** A queued TCP output frame */
+struct fastd_tcp_frame {
+	fastd_tcp_frame_t *next; /**< The next queued frame */
+	size_t len;              /**< The length of the frame including the length prefix */
+	size_t written;          /**< The number of bytes already written */
+	size_t stat_size;        /**< The payload size to account in traffic statistics */
+	fastd_peer_t *peer;      /**< The peer used for traffic statistics */
+	uint8_t data[];          /**< The frame data */
+};
+
 /**
  * A socket descriptor
  *
@@ -162,10 +172,27 @@ struct fastd_bind_address {
  */
 struct fastd_socket {
 	fastd_poll_fd_t fd;               /**< The file descriptor for the socket */
+	fastd_socket_type_t type;         /**< The socket type */
 	const fastd_bind_address_t *addr; /**< The address this socket is supposed to be bound to (or NULL) */
 	fastd_peer_address_t *bound_addr; /**< Address that was bound to (differs from addr when it has random port) */
 	fastd_peer_t *peer;               /**< If the socket belongs to a single peer, contains that peer */
 	fastd_socket_t *parent;           /**< Original of L2TP offload socket */
+	fastd_socket_t *tcp_listener;     /**< TCP listener belonging to a UDP socket */
+	fastd_peer_address_t peer_addr;   /**< Remote address of a TCP connection */
+
+	uint8_t tcp_header[4]; /**< Partial TCP frame length prefix */
+	size_t tcp_header_len; /**< Number of TCP frame prefix bytes read */
+	size_t tcp_packet_len; /**< Current TCP frame packet length */
+	size_t tcp_packet_pos; /**< Number of TCP frame packet bytes read */
+	uint8_t *tcp_packet;   /**< Current partial TCP frame packet */
+
+	fastd_tcp_frame_t *tcp_output_head; /**< First queued TCP output frame */
+	fastd_tcp_frame_t *tcp_output_tail; /**< Last queued TCP output frame */
+	size_t tcp_output_len;              /**< Number of queued TCP output bytes */
+	bool tcp_connecting;                /**< Whether a non-blocking TCP connect is in progress */
+	bool tcp_handling;                  /**< Whether this TCP connection is currently being handled */
+	bool tcp_closed;                    /**< Whether this TCP connection has been closed while being handled */
+	fastd_timeout_t tcp_timeout;        /**< Timeout for unauthenticated TCP connections */
 };
 
 /** A TUN/TAP interface */
@@ -362,8 +389,9 @@ struct fastd_context {
 	FILE *urandom;  /**< /dev/urandom FILE */
 	int ioctl_sock; /**< The global ioctl socket */
 
-	size_t n_socks;        /**< The number of sockets in socks */
-	fastd_socket_t *socks; /**< Array of all sockets */
+	size_t n_socks;                     /**< The number of sockets in socks */
+	fastd_socket_t *socks;              /**< Array of all sockets */
+	VECTOR(fastd_socket_t *) tcp_socks; /**< Allocated TCP connection sockets */
 
 	fastd_socket_t *sock_default_v4; /**< Points to the socket that is used for new outgoing IPv4 connections */
 	fastd_socket_t *sock_default_v6; /**< Points to the socket that is used for new outgoing IPv6 connections */
@@ -412,9 +440,19 @@ void fastd_close_all_fds(void);
 
 void fastd_socket_bind_all(void);
 fastd_socket_t *fastd_socket_open(fastd_peer_t *peer, int af);
+fastd_socket_t *
+fastd_socket_open_tcp(fastd_peer_t *peer, const fastd_socket_t *base_sock, const fastd_peer_address_t *remote_addr);
 fastd_socket_t *fastd_socket_open_offload(fastd_socket_t *sock, const fastd_peer_address_t *local_addr);
 void fastd_socket_close(fastd_socket_t *sock);
 void fastd_socket_error(const fastd_socket_t *sock);
+void fastd_socket_handle(fastd_socket_t *sock, bool input, bool output, bool error);
+bool fastd_socket_is_tcp(const fastd_socket_t *sock);
+void fastd_socket_update_tcp_listeners(void);
+bool fastd_tcp_send(
+	fastd_peer_t *peer, fastd_socket_t *sock, const fastd_peer_address_t *local_addr,
+	const fastd_peer_address_t *remote_addr, const fastd_buffer_t *buffer, size_t stat_size);
+void fastd_tcp_maintenance(void);
+void fastd_tcp_cleanup(void);
 
 void fastd_resolve_peer(fastd_peer_t *peer, fastd_remote_t *remote);
 
