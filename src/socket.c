@@ -287,6 +287,7 @@ static fastd_socket_t *open_tcp_punch_socket(fastd_peer_t *peer, const fastd_pee
 	sock->addr = base_sock ? base_sock->addr : NULL;
 	sock->peer_addr = *remote_addr;
 	sock->tcp_punch_peer = peer;
+	sock->tcp_punch = true;
 	sock->tcp_connecting = (ret < 0);
 	sock->tcp_timeout = ctx.now + FASTD_TCP_PUNCH_TIMEOUT;
 	set_bound_address(sock);
@@ -815,6 +816,11 @@ void fastd_socket_error(const fastd_socket_t *sock) {
 /** Returns true if the socket is a TCP connection */
 bool fastd_socket_is_tcp(const fastd_socket_t *sock) {
 	return sock && sock->type == SOCKET_TYPE_TCP_CONNECTION;
+}
+
+/** Returns true if the socket is a TCP connection established through TCP hole punching */
+bool fastd_socket_is_tcp_punch(const fastd_socket_t *sock) {
+	return fastd_socket_is_tcp(sock) && sock->tcp_punch;
 }
 
 /** Updates write readiness polling for a TCP connection */

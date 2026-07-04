@@ -376,7 +376,9 @@ Example config:
   Configures a UNIX socket which can be used to retrieve the current state of fastd. The status can be queried with
   ``fastd --config <config> --status`` or ``fastd --status-socket <socket> --status``. The default output is
   human-readable; add ``--json`` to print the raw JSON status dump. An example script to get the status can be found
-  at ``doc/examples/status.pl`` in the fastd repository.
+  at ``doc/examples/status.pl`` in the fastd repository. Established peer connections include their active
+  ``transport`` and a ``tcp_punch`` object that reports whether TCP punching is enabled and whether the current
+  connection was established through TCP punching.
 
 | ``user "<user>";``
 

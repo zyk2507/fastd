@@ -162,6 +162,15 @@ static int64_t get_int_member(json_object *object, const char *key) {
 	return json_object_get_int64(ret);
 }
 
+/** Returns a boolean member or false if it is missing */
+static bool get_bool_member(json_object *object, const char *key) {
+	json_object *ret;
+	if (!object || !json_object_object_get_ex(object, key, &ret) || json_object_get_type(ret) != json_type_boolean)
+		return false;
+
+	return json_object_get_boolean(ret);
+}
+
 /** Returns a counter from a statistics object */
 static int64_t get_stat_counter(json_object *stats, const char *name, const char *counter) {
 	return get_int_member(get_object_member(stats, name), counter);
@@ -253,9 +262,27 @@ static void print_peer_status(const char *key, json_object *peer) {
 	format_duration(duration, get_int_member(connection, "established"));
 	printf("       connected: %s\n", duration);
 
+	json_object *tcp_punch = get_object_member(connection, "tcp_punch");
+	bool tcp_punch_established = get_bool_member(tcp_punch, "established");
+
+	const char *transport = get_string_member(connection, "transport");
+	if (transport)
+		printf("       transport: %s%s\n", transport, tcp_punch_established ? " (tcp-punch)" : "");
+
 	const char *method = get_string_member(connection, "method");
 	if (method)
 		printf("       method:    %s\n", method);
+
+	if (tcp_punch && (get_bool_member(tcp_punch, "enabled") || tcp_punch_established)) {
+		printf("       tcp punch: %s", tcp_punch_established ? "established" : "enabled");
+
+		int64_t local_port = get_int_member(tcp_punch, "local_port");
+		int64_t remote_port = get_int_member(tcp_punch, "remote_port");
+		if (tcp_punch_established && local_port && remote_port)
+			printf(" (local %lld, remote %lld)", (long long)local_port, (long long)remote_port);
+
+		putchar('\n');
+	}
 
 	json_object *stats = get_object_member(connection, "statistics");
 	if (stats) {
@@ -386,6 +413,9 @@ static json_object *dump_peer(const fastd_peer_t *peer) {
 		connection = json_object_new_object();
 
 		json_object_object_add(connection, "established", json_object_new_int64(ctx.now - peer->established));
+		json_object_object_add(
+			connection, "transport",
+			json_object_new_string(fastd_socket_is_tcp(peer->sock) ? "tcp" : "udp"));
 
 		struct json_object *method = NULL;
 
@@ -395,6 +425,22 @@ static json_object *dump_peer(const fastd_peer_t *peer) {
 			method = json_object_new_string(method_info->name);
 
 		json_object_object_add(connection, "method", method);
+
+		struct json_object *tcp_punch = json_object_new_object();
+		bool tcp_punch_established = fastd_socket_is_tcp_punch(peer->sock);
+		json_object_object_add(tcp_punch, "enabled", json_object_new_boolean(fastd_peer_get_tcp_punch(peer)));
+		json_object_object_add(tcp_punch, "established", json_object_new_boolean(tcp_punch_established));
+
+		if (tcp_punch_established) {
+			json_object_object_add(
+				tcp_punch, "local_port",
+				json_object_new_int(ntohs(fastd_peer_address_get_port(peer->sock->bound_addr))));
+			json_object_object_add(
+				tcp_punch, "remote_port",
+				json_object_new_int(ntohs(fastd_peer_address_get_port(&peer->address))));
+		}
+
+		json_object_object_add(connection, "tcp_punch", tcp_punch);
 
 		json_object_object_add(connection, "statistics", dump_stats(&peer->stats));
 

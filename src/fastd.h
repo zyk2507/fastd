@@ -180,6 +180,7 @@ struct fastd_socket {
 	fastd_socket_t *tcp_listener;     /**< TCP listener belonging to a UDP socket */
 	fastd_peer_address_t peer_addr;   /**< Remote address of a TCP connection */
 	fastd_peer_t *tcp_punch_peer;     /**< Peer this unclaimed TCP punch connection belongs to */
+	bool tcp_punch;                   /**< Whether this TCP connection was created by active TCP hole punching */
 
 	uint8_t tcp_header[4]; /**< Partial TCP frame length prefix */
 	size_t tcp_header_len; /**< Number of TCP frame prefix bytes read */
@@ -450,6 +451,7 @@ void fastd_socket_close(fastd_socket_t *sock);
 void fastd_socket_error(const fastd_socket_t *sock);
 void fastd_socket_handle(fastd_socket_t *sock, bool input, bool output, bool error);
 bool fastd_socket_is_tcp(const fastd_socket_t *sock);
+bool fastd_socket_is_tcp_punch(const fastd_socket_t *sock);
 void fastd_socket_update_tcp_listeners(void);
 bool fastd_tcp_send(
 	fastd_peer_t *peer, fastd_socket_t *sock, const fastd_peer_address_t *local_addr,
