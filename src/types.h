@@ -102,6 +102,15 @@ typedef enum fastd_peer_transport {
 	TRANSPORT_AUTO,      /**< Probe TCP, then fall back to UDP */
 } fastd_peer_transport_t;
 
+/** Automatic hole punching mode */
+typedef enum fastd_hole_punch_mode {
+	HOLE_PUNCH_UNSET = 0, /**< Inherit hole punching mode from the peer group */
+	HOLE_PUNCH_OFF,       /**< Hole punching disabled */
+	HOLE_PUNCH_TCP,       /**< Try deterministic TCP hole punching */
+	HOLE_PUNCH_UDP,       /**< Try deterministic UDP hole punching */
+	HOLE_PUNCH_AUTO,      /**< Try all applicable hole punching modes */
+} fastd_hole_punch_mode_t;
+
 /** Socket type */
 typedef enum fastd_socket_type {
 	SOCKET_TYPE_UDP = 0,        /**< UDP datagram socket */

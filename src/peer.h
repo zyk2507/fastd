@@ -59,7 +59,7 @@ struct fastd_peer {
 	uint16_t mtu;                           /**< Peer-specific interface MTU */
 	fastd_port_mapping_mode_t port_mapping; /**< Peer-specific automatic port mapping mode */
 	fastd_peer_transport_t transport;       /**< Peer-specific transport protocol */
-	fastd_tristate_t tcp_punch;             /**< Peer-specific TCP hole punching setting */
+	fastd_hole_punch_mode_t hole_punch;     /**< Peer-specific hole punching mode */
 	fastd_tristate_t turn_relay;            /**< Peer-specific TURN relay setting */
 	fastd_turn_server_t *turn_servers;      /**< Peer-specific TURN servers */
 
@@ -78,6 +78,7 @@ struct fastd_peer {
 	fastd_peer_address_t last_handshake_response_address; /**< The address the last handshake was received from */
 	ssize_t next_remote;                                  /**< An index into the field remotes or -1 */
 	fastd_peer_transport_t transport_probe; /**< Transport currently probed for automatic transport mode */
+	fastd_timeout_t turn_fallback_timeout;  /**< Timeout before automatic TURN fallback is used */
 
 	fastd_peer_state_t state; /**< The peer's state */
 
@@ -298,12 +299,31 @@ static inline bool fastd_peer_transport_allows(fastd_peer_transport_t configured
 	return configured == TRANSPORT_AUTO || configured == concrete;
 }
 
-/** Returns whether TCP hole punching is enabled for a peer */
-static inline bool fastd_peer_get_tcp_punch(const fastd_peer_t *peer) {
-	if (peer && peer->tcp_punch.set)
-		return peer->tcp_punch.state;
+/** Returns the effective hole punching mode for a peer */
+static inline fastd_hole_punch_mode_t fastd_peer_get_hole_punch(const fastd_peer_t *peer) {
+	if (peer && peer->hole_punch)
+		return peer->hole_punch;
 
-	return fastd_peer_group_get_tcp_punch(peer ? peer->group : conf.peer_group);
+	return fastd_peer_group_get_hole_punch(peer ? peer->group : conf.peer_group);
+}
+
+/** Returns whether a peer may use deterministic hole punching for a transport */
+static inline bool fastd_peer_hole_punch_allows(const fastd_peer_t *peer, fastd_peer_transport_t transport) {
+	fastd_hole_punch_mode_t mode = fastd_peer_get_hole_punch(peer);
+
+	switch (mode) {
+	case HOLE_PUNCH_TCP:
+		return transport == TRANSPORT_TCP;
+
+	case HOLE_PUNCH_UDP:
+		return transport == TRANSPORT_UDP;
+
+	case HOLE_PUNCH_AUTO:
+		return transport == TRANSPORT_TCP || transport == TRANSPORT_UDP;
+
+	default:
+		return false;
+	}
 }
 
 /** Returns the effective TURN relay setting for a peer */

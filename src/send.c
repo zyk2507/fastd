@@ -76,6 +76,9 @@ void fastd_send(
 	if (fastd_tcp_send(peer, (fastd_socket_t *)sock, local_addr, remote_addr, buffer, stat_size))
 		return;
 
+	if (!stat_size)
+		fastd_udp_punch_send(peer, sock, remote_addr, buffer);
+
 	if (fastd_turn_send(peer, sock, local_addr, remote_addr, buffer, stat_size))
 		return;
 

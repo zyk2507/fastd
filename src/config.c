@@ -64,7 +64,7 @@ static void default_config(void) {
 	conf.peer_group->max_connections = -1;
 	conf.peer_group->port_mapping = PORT_MAPPING_OFF;
 	conf.peer_group->transport = TRANSPORT_UDP;
-	conf.peer_group->tcp_punch = FASTD_TRISTATE_FALSE;
+	conf.peer_group->hole_punch = HOLE_PUNCH_OFF;
 	conf.peer_group->turn_relay = FASTD_TRISTATE_FALSE;
 }
 

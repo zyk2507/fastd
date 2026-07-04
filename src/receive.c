@@ -249,6 +249,14 @@ void fastd_receive_packet(
 		}
 
 		peer = sock->peer;
+	} else if (sock->hole_punch_peer) {
+		if (!fastd_peer_address_equal(&sock->peer_addr, remote_addr)) {
+			pr_debug2("ignoring packet from %I on hole punching socket of %P", remote_addr, sock->hole_punch_peer);
+			fastd_buffer_free(buffer);
+			return;
+		}
+
+		peer = sock->hole_punch_peer;
 	} else {
 		peer = fastd_peer_hashtable_lookup(remote_addr);
 	}

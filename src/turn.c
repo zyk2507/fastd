@@ -12,6 +12,7 @@
 
 
 #include "turn.h"
+#include "hole_punch.h"
 #include "peer.h"
 
 #ifdef WITH_TURN
@@ -372,6 +373,20 @@ static bool ensure_turn_peer(
 	return create_turn_peer(peer, sock, local_addr, remote_addr);
 }
 
+/** Returns true if TURN should be used for this send attempt */
+static bool should_use_turn(fastd_peer_t *peer) {
+	if (!peer || !fastd_peer_get_turn_relay(peer))
+		return false;
+
+	if (fastd_peer_get_hole_punch(peer) != HOLE_PUNCH_AUTO || fastd_peer_is_established(peer))
+		return true;
+
+	if (peer->turn_fallback_timeout == FASTD_TIMEOUT_INV)
+		peer->turn_fallback_timeout = ctx.now + FASTD_HOLE_PUNCH_TIMEOUT;
+
+	return fastd_timed_out(peer->turn_fallback_timeout);
+}
+
 bool fastd_turn_check(void) {
 #ifdef WITH_DYNAMIC_PEERS
 	const fastd_peer_group_t *dynamic_group = conf.on_verify_group ?: conf.peer_group;
@@ -418,7 +433,7 @@ void fastd_turn_handle_task(void) {
 bool fastd_turn_send(
 	fastd_peer_t *peer, const fastd_socket_t *sock, const fastd_peer_address_t *local_addr,
 	const fastd_peer_address_t *remote_addr, const fastd_buffer_t *buffer, size_t stat_size) {
-	if (!peer || !fastd_peer_get_turn_relay(peer))
+	if (!should_use_turn(peer))
 		return false;
 
 	schedule_turn_task();

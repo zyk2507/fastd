@@ -71,6 +71,7 @@
 %token TOK_GROUP
 %token TOK_HANDSHAKES
 %token TOK_HIDE
+%token TOK_HOLE_PUNCH
 %token TOK_INCLUDE
 %token TOK_INFO
 %token TOK_INTERFACE
@@ -118,7 +119,6 @@
 %token TOK_TAP
 %token TOK_TO
 %token TOK_TCP
-%token TOK_TCP_PUNCH
 %token TOK_TUN
 %token TOK_TURN
 %token TOK_TRANSPORT
@@ -169,6 +169,7 @@
 %type <uint64> drop_capabilities_enabled
 %type <uint64> port_mapping
 %type <uint64> transport
+%type <uint64> hole_punch
 %type <tristate> autobool
 %type <boolean> sync
 
@@ -229,8 +230,8 @@ peer_group_statement:
 	|	TOK_TRANSPORT transport ';' {
 			state->peer_group->transport = $2;
 		}
-	|	TOK_TCP_PUNCH boolean ';' {
-			state->peer_group->tcp_punch = $2 ? FASTD_TRISTATE_TRUE : FASTD_TRISTATE_FALSE;
+	|	TOK_HOLE_PUNCH hole_punch ';' {
+			state->peer_group->hole_punch = $2;
 		}
 	|	TOK_TURN TOK_RELAY boolean ';' {
 			if (!fastd_config_set_turn_relay(&@$, state, &state->peer_group->turn_relay, $3))
@@ -532,8 +533,8 @@ peer_statement: TOK_REMOTE peer_remote ';'
 	|	TOK_TRANSPORT transport ';' {
 			state->peer->transport = $2;
 		}
-	|	TOK_TCP_PUNCH boolean ';' {
-			state->peer->tcp_punch = $2 ? FASTD_TRISTATE_TRUE : FASTD_TRISTATE_FALSE;
+	|	TOK_HOLE_PUNCH hole_punch ';' {
+			state->peer->hole_punch = $2;
 		}
 	|	TOK_TURN TOK_RELAY boolean ';' {
 			if (!fastd_config_set_turn_relay(&@$, state, &state->peer->turn_relay, $3))
@@ -719,6 +720,15 @@ transport:
 		TOK_UDP		{ $$ = TRANSPORT_UDP; }
 	|	TOK_TCP		{ $$ = TRANSPORT_TCP; }
 	|	TOK_AUTO	{ $$ = TRANSPORT_AUTO; }
+	;
+
+hole_punch:
+		TOK_OFF		{ $$ = HOLE_PUNCH_OFF; }
+	|	TOK_NO		{ $$ = HOLE_PUNCH_OFF; }
+	|	TOK_NONE	{ $$ = HOLE_PUNCH_OFF; }
+	|	TOK_TCP		{ $$ = HOLE_PUNCH_TCP; }
+	|	TOK_UDP		{ $$ = HOLE_PUNCH_UDP; }
+	|	TOK_AUTO	{ $$ = HOLE_PUNCH_AUTO; }
 	;
 
 include:	TOK_PEER TOK_STRING maybe_as {

@@ -179,8 +179,8 @@ struct fastd_socket {
 	fastd_socket_t *parent;           /**< Original of L2TP offload socket */
 	fastd_socket_t *tcp_listener;     /**< TCP listener belonging to a UDP socket */
 	fastd_peer_address_t peer_addr;   /**< Remote address of a TCP connection */
-	fastd_peer_t *tcp_punch_peer;     /**< Peer this unclaimed TCP punch connection belongs to */
-	bool tcp_punch;                   /**< Whether this TCP connection was created by active TCP hole punching */
+	fastd_peer_t *hole_punch_peer;    /**< Peer this unclaimed hole punching socket belongs to */
+	bool hole_punch;                  /**< Whether this socket was created by active hole punching */
 
 	uint8_t tcp_header[4]; /**< Partial TCP frame length prefix */
 	size_t tcp_header_len; /**< Number of TCP frame prefix bytes read */
@@ -195,6 +195,7 @@ struct fastd_socket {
 	bool tcp_handling;                  /**< Whether this TCP connection is currently being handled */
 	bool tcp_closed;                    /**< Whether this TCP connection has been closed while being handled */
 	fastd_timeout_t tcp_timeout;        /**< Timeout for unauthenticated TCP connections */
+	fastd_timeout_t hole_punch_timeout; /**< Timeout for unclaimed UDP hole punching sockets */
 };
 
 /** A TUN/TAP interface */
@@ -396,6 +397,7 @@ struct fastd_context {
 	size_t n_socks;                     /**< The number of sockets in socks */
 	fastd_socket_t *socks;              /**< Array of all sockets */
 	VECTOR(fastd_socket_t *) tcp_socks; /**< Allocated TCP connection sockets */
+	VECTOR(fastd_socket_t *) udp_punch_socks; /**< Allocated unclaimed UDP hole punching sockets */
 
 	fastd_socket_t *sock_default_v4; /**< Points to the socket that is used for new outgoing IPv4 connections */
 	fastd_socket_t *sock_default_v6; /**< Points to the socket that is used for new outgoing IPv6 connections */
@@ -451,12 +453,18 @@ void fastd_socket_close(fastd_socket_t *sock);
 void fastd_socket_error(const fastd_socket_t *sock);
 void fastd_socket_handle(fastd_socket_t *sock, bool input, bool output, bool error);
 bool fastd_socket_is_tcp(const fastd_socket_t *sock);
-bool fastd_socket_is_tcp_punch(const fastd_socket_t *sock);
+bool fastd_socket_is_hole_punch(const fastd_socket_t *sock);
 void fastd_socket_update_tcp_listeners(void);
 bool fastd_tcp_send(
 	fastd_peer_t *peer, fastd_socket_t *sock, const fastd_peer_address_t *local_addr,
 	const fastd_peer_address_t *remote_addr, const fastd_buffer_t *buffer, size_t stat_size);
-void fastd_tcp_punch_close_peer(fastd_peer_t *peer);
+bool fastd_udp_punch_send(
+	fastd_peer_t *peer, const fastd_socket_t *sock, const fastd_peer_address_t *remote_addr,
+	const fastd_buffer_t *buffer);
+void fastd_hole_punch_claim_socket(fastd_socket_t *sock);
+void fastd_hole_punch_close_peer(fastd_peer_t *peer);
+void fastd_udp_punch_maintenance(void);
+void fastd_udp_punch_cleanup(void);
 void fastd_tcp_maintenance(void);
 void fastd_tcp_cleanup(void);
 

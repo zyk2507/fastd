@@ -232,6 +232,33 @@ static void print_traffic_summary(json_object *stats) {
 	print_stat_line("TX error", stats, "tx_error");
 }
 
+/** Prints a peer's hole punching status line */
+static void print_hole_punch_status(json_object *hole_punch) {
+	if (!hole_punch)
+		return;
+
+	bool enabled = get_bool_member(hole_punch, "enabled");
+	bool established = get_bool_member(hole_punch, "established");
+	if (!enabled && !established)
+		return;
+
+	const char *mode = get_string_member(hole_punch, "mode");
+	const char *transport = get_string_member(hole_punch, "transport");
+
+	printf("       hole punch: %s", established ? "established" : "enabled");
+	if (established && transport)
+		printf(" via %s", transport);
+	if (mode)
+		printf(" (%s)", mode);
+
+	int64_t local_port = get_int_member(hole_punch, "local_port");
+	int64_t remote_port = get_int_member(hole_punch, "remote_port");
+	if (established && local_port && remote_port)
+		printf(" (local %lld, remote %lld)", (long long)local_port, (long long)remote_port);
+
+	putchar('\n');
+}
+
 /** Prints a human-readable peer status */
 static void print_peer_status(const char *key, json_object *peer) {
 	const char *name = get_string_member(peer, "name");
@@ -253,7 +280,11 @@ static void print_peer_status(const char *key, json_object *peer) {
 	if (mtu)
 		printf("       mtu:       %lld\n", (long long)mtu);
 
+	json_object *hole_punch = get_object_member(peer, "hole_punch");
+	bool hole_punch_established = get_bool_member(hole_punch, "established");
+
 	if (!established) {
+		print_hole_punch_status(hole_punch);
 		putchar('\n');
 		return;
 	}
@@ -262,27 +293,15 @@ static void print_peer_status(const char *key, json_object *peer) {
 	format_duration(duration, get_int_member(connection, "established"));
 	printf("       connected: %s\n", duration);
 
-	json_object *tcp_punch = get_object_member(connection, "tcp_punch");
-	bool tcp_punch_established = get_bool_member(tcp_punch, "established");
-
 	const char *transport = get_string_member(connection, "transport");
 	if (transport)
-		printf("       transport: %s%s\n", transport, tcp_punch_established ? " (tcp-punch)" : "");
+		printf("       transport: %s%s\n", transport, hole_punch_established ? " (hole-punch)" : "");
 
 	const char *method = get_string_member(connection, "method");
 	if (method)
 		printf("       method:    %s\n", method);
 
-	if (tcp_punch && (get_bool_member(tcp_punch, "enabled") || tcp_punch_established)) {
-		printf("       tcp punch: %s", tcp_punch_established ? "established" : "enabled");
-
-		int64_t local_port = get_int_member(tcp_punch, "local_port");
-		int64_t remote_port = get_int_member(tcp_punch, "remote_port");
-		if (tcp_punch_established && local_port && remote_port)
-			printf(" (local %lld, remote %lld)", (long long)local_port, (long long)remote_port);
-
-		putchar('\n');
-	}
+	print_hole_punch_status(hole_punch);
 
 	json_object *stats = get_object_member(connection, "statistics");
 	if (stats) {
@@ -379,6 +398,52 @@ static json_object *wrap_string_or_null(const char *str) {
 	return str ? json_object_new_string(str) : NULL;
 }
 
+/** Returns a string for a hole punching mode */
+static const char *hole_punch_mode_name(fastd_hole_punch_mode_t mode) {
+	switch (mode) {
+	case HOLE_PUNCH_OFF:
+		return "off";
+
+	case HOLE_PUNCH_TCP:
+		return "tcp";
+
+	case HOLE_PUNCH_UDP:
+		return "udp";
+
+	case HOLE_PUNCH_AUTO:
+		return "auto";
+
+	default:
+		return "unset";
+	}
+}
+
+/** Dumps a peer's hole punching status as a JSON object */
+static json_object *dump_hole_punch(const fastd_peer_t *peer) {
+	fastd_hole_punch_mode_t mode = fastd_peer_get_hole_punch(peer);
+	bool established = fastd_peer_is_established(peer) && fastd_socket_is_hole_punch(peer->sock);
+
+	struct json_object *ret = json_object_new_object();
+	json_object_object_add(ret, "mode", json_object_new_string(hole_punch_mode_name(mode)));
+	json_object_object_add(ret, "enabled", json_object_new_boolean(mode != HOLE_PUNCH_OFF));
+	json_object_object_add(ret, "established", json_object_new_boolean(established));
+
+	if (established) {
+		json_object_object_add(
+			ret, "transport", json_object_new_string(fastd_socket_is_tcp(peer->sock) ? "tcp" : "udp"));
+		json_object_object_add(
+			ret, "local_port", json_object_new_int(ntohs(fastd_peer_address_get_port(peer->sock->bound_addr))));
+		json_object_object_add(
+			ret, "remote_port", json_object_new_int(ntohs(fastd_peer_address_get_port(&peer->address))));
+	} else {
+		json_object_object_add(ret, "transport", NULL);
+		json_object_object_add(ret, "local_port", NULL);
+		json_object_object_add(ret, "remote_port", NULL);
+	}
+
+	return ret;
+}
+
 /** Dumps a peer's status as a JSON object */
 static json_object *dump_peer(const fastd_peer_t *peer) {
 	struct json_object *ret = json_object_new_object();
@@ -389,6 +454,9 @@ static json_object *dump_peer(const fastd_peer_t *peer) {
 
 	json_object_object_add(ret, "name", wrap_string_or_null(peer->name));
 	json_object_object_add(ret, "address", json_object_new_string(addr_buf));
+
+	struct json_object *hole_punch = dump_hole_punch(peer);
+	json_object_object_add(ret, "hole_punch", hole_punch);
 
 	if (!ctx.iface) {
 		const char *ifname = NULL;
@@ -425,22 +493,7 @@ static json_object *dump_peer(const fastd_peer_t *peer) {
 			method = json_object_new_string(method_info->name);
 
 		json_object_object_add(connection, "method", method);
-
-		struct json_object *tcp_punch = json_object_new_object();
-		bool tcp_punch_established = fastd_socket_is_tcp_punch(peer->sock);
-		json_object_object_add(tcp_punch, "enabled", json_object_new_boolean(fastd_peer_get_tcp_punch(peer)));
-		json_object_object_add(tcp_punch, "established", json_object_new_boolean(tcp_punch_established));
-
-		if (tcp_punch_established) {
-			json_object_object_add(
-				tcp_punch, "local_port",
-				json_object_new_int(ntohs(fastd_peer_address_get_port(peer->sock->bound_addr))));
-			json_object_object_add(
-				tcp_punch, "remote_port",
-				json_object_new_int(ntohs(fastd_peer_address_get_port(&peer->address))));
-		}
-
-		json_object_object_add(connection, "tcp_punch", tcp_punch);
+		json_object_object_add(connection, "hole_punch", json_object_get(hole_punch));
 
 		json_object_object_add(connection, "statistics", dump_stats(&peer->stats));
 

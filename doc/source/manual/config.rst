@@ -94,22 +94,26 @@ Example config:
   the handshake and ignore handshakes whose announced transport does not match the socket they arrived on. Peers that
   do not announce a transport are treated as UDP peers for compatibility.
 
-| ``tcp-punch yes|no;``
+| ``hole-punch off|tcp|udp|auto;``
 
-  Enables deterministic active TCP hole punching for IPv4 peers using ``transport tcp`` or ``transport auto``. The
-  default is ``no``. This option may be set globally, in peer groups, or in peer sections; peer settings override
-  peer group settings, and peer group settings inherit from their parent group.
+  Configures deterministic active hole punching for IPv4 peers. The default is ``off``. This option may be set
+  globally, in peer groups, or in peer sections; peer settings override peer group settings, and peer group settings
+  inherit from their parent group.
 
-  When enabled for an unestablished TCP peer, fastd sends the initial handshake over the normal configured TCP remote
-  and over a deterministic set of candidate ports derived from the current time bucket. For each candidate, the local
-  TCP source port is set to the same value as the remote destination port, using ``SO_REUSEADDR`` and ``SO_REUSEPORT``
-  when available. fastd generates 16 candidate ports for each of the previous, current, and next time buckets, and
-  skips ports that cannot be bound locally. This matches routers that preserve TCP source ports for outbound NAT
-  mappings.
+  ``tcp`` sends the initial handshake over the normal configured TCP remote and over a deterministic set of candidate
+  ports when the peer uses ``transport tcp`` or ``transport auto``. ``udp`` sends additional initial handshakes to the
+  same candidate ports over UDP when the peer uses ``transport udp`` or ``transport auto``. ``auto`` enables both
+  applicable modes for the peer's configured transport.
 
-  This mode requires both peers to know each other's public IPv4 address, enable compatible TCP transport, and keep
-  clocks reasonably synchronized, for example with NTP. It is an opportunistic traversal aid and does not replace
-  TURN relay for NATs that rewrite ports unpredictably or block simultaneous TCP opens.
+  For each candidate, the local source port is set to the same value as the remote destination port, using
+  ``SO_REUSEADDR`` and ``SO_REUSEPORT`` when available. fastd generates 16 candidate ports for each of the previous,
+  current, and next time buckets, and skips ports that cannot be bound locally. This matches routers that preserve
+  source ports for outbound NAT mappings.
+
+  This mode requires both peers to know each other's public IPv4 address, enable compatible transport, and keep clocks
+  reasonably synchronized, for example with NTP. It is an opportunistic traversal aid. When ``hole-punch auto`` is used
+  together with ``turn relay yes``, fastd first tries direct hole punching and starts the TURN relay only after the
+  punching window has elapsed.
 
 | ``turn relay yes|no;``
 | ``turn server "<address>" port <port> [user "<username>" password "<password>"];``
@@ -376,9 +380,9 @@ Example config:
   Configures a UNIX socket which can be used to retrieve the current state of fastd. The status can be queried with
   ``fastd --config <config> --status`` or ``fastd --status-socket <socket> --status``. The default output is
   human-readable; add ``--json`` to print the raw JSON status dump. An example script to get the status can be found
-  at ``doc/examples/status.pl`` in the fastd repository. Established peer connections include their active
-  ``transport`` and a ``tcp_punch`` object that reports whether TCP punching is enabled and whether the current
-  connection was established through TCP punching.
+  at ``doc/examples/status.pl`` in the fastd repository. Peer status includes a ``hole_punch`` object that reports the
+  configured mode, whether hole punching is enabled, and whether the current connection was established through hole
+  punching. Established peer connections include their active ``transport`` and the same ``hole_punch`` object.
 
 | ``user "<user>";``
 
@@ -421,10 +425,10 @@ Example config:
   Overrides the inherited transport for this peer. See the main configuration section for the transport modes and
   handshake consistency checks.
 
-| ``tcp-punch yes|no;``
+| ``hole-punch off|tcp|udp|auto;``
 
-  Overrides the inherited TCP hole punching setting for this peer. See the main configuration section for the
-  requirements and limitations.
+  Overrides the inherited hole punching mode for this peer. See the main configuration section for the requirements
+  and limitations.
 
 | ``remote <IPv4 address>:<port>;``
 | ``remote <IPv6 address>:<port>;``

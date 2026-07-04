@@ -12,11 +12,11 @@
 
 #include "peer.h"
 #include "handshake.h"
+#include "hole_punch.h"
 #include "offload/offload.h"
 #include "peer_group.h"
 #include "peer_hashtable.h"
 #include "polling.h"
-#include "tcp_punch.h"
 #include "turn.h"
 
 #include <arpa/inet.h>
@@ -171,7 +171,7 @@ fastd_peer_t *fastd_peer_find_by_id(uint64_t id) {
 
 /** Closes and frees a peer's dynamic socket */
 static inline void free_socket(fastd_peer_t *peer) {
-	fastd_tcp_punch_close_peer(peer);
+	fastd_hole_punch_close_peer(peer);
 
 	if (!peer->sock)
 		return;
@@ -369,6 +369,7 @@ static void reset_peer(fastd_peer_t *peer) {
 	peer->address.sa.sa_family = AF_UNSPEC;
 	peer->local_address.sa.sa_family = AF_UNSPEC;
 	peer->transport_probe = TRANSPORT_UNSET;
+	peer->turn_fallback_timeout = FASTD_TIMEOUT_INV;
 	peer->state = STATE_INACTIVE;
 
 	if (peer->offload) {
@@ -445,6 +446,7 @@ static void setup_peer(fastd_peer_t *peer) {
 	peer->last_handshake_response_address.sa.sa_family = AF_UNSPEC;
 
 	peer->establish_handshake_timeout = ctx.now;
+	peer->turn_fallback_timeout = FASTD_TIMEOUT_INV;
 
 #ifdef WITH_DYNAMIC_PEERS
 	peer->verify_timeout = ctx.now;
@@ -660,9 +662,15 @@ bool fastd_peer_matches_address(const fastd_peer_t *peer, const fastd_peer_addre
 		}
 	}
 
-	if (addr->sa.sa_family == AF_INET && fastd_peer_get_tcp_punch(peer)
-	    && fastd_peer_transport_allows(fastd_peer_get_transport(peer), TRANSPORT_TCP)
-	    && fastd_tcp_punch_port_valid(ntohs(fastd_peer_address_get_port(addr)), time(NULL))) {
+	fastd_peer_transport_t transport = fastd_peer_get_transport(peer);
+	bool can_hole_punch =
+		(fastd_peer_hole_punch_allows(peer, TRANSPORT_UDP)
+		 && fastd_peer_transport_allows(transport, TRANSPORT_UDP))
+		|| (fastd_peer_hole_punch_allows(peer, TRANSPORT_TCP)
+		    && fastd_peer_transport_allows(transport, TRANSPORT_TCP));
+
+	if (addr->sa.sa_family == AF_INET && can_hole_punch
+	    && fastd_hole_punch_port_valid(ntohs(fastd_peer_address_get_port(addr)), time(NULL))) {
 		for (i = 0; i < VECTOR_LEN(peer->remotes); i++) {
 			fastd_remote_t *remote = &VECTOR_INDEX(peer->remotes, i);
 
@@ -739,8 +747,13 @@ bool fastd_peer_claim_address(
 	if (has_actual_transport && fastd_peer_get_transport(new_peer) == TRANSPORT_AUTO)
 		new_peer->transport_probe = actual_transport;
 
-	if (sock && sock->type == SOCKET_TYPE_TCP_CONNECTION && sock != new_peer->sock) {
-		sock->tcp_punch_peer = NULL;
+	if (sock && sock->hole_punch && sock != new_peer->sock) {
+		fastd_hole_punch_claim_socket(sock);
+		free_socket(new_peer);
+		new_peer->sock = sock;
+		sock->peer = new_peer;
+	} else if (sock && sock->type == SOCKET_TYPE_TCP_CONNECTION && sock != new_peer->sock) {
+		fastd_hole_punch_claim_socket(sock);
 		free_socket(new_peer);
 		new_peer->sock = sock;
 		sock->peer = new_peer;
@@ -822,7 +835,7 @@ static inline bool peer_configs_equal(const fastd_peer_t *peer1, const fastd_pee
 	if (peer1->transport != peer2->transport)
 		return false;
 
-	if (peer1->tcp_punch.set != peer2->tcp_punch.set || peer1->tcp_punch.state != peer2->tcp_punch.state)
+	if (peer1->hole_punch != peer2->hole_punch)
 		return false;
 
 	if (peer1->turn_relay.set != peer2->turn_relay.set || peer1->turn_relay.state != peer2->turn_relay.state)

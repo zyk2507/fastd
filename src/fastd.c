@@ -646,6 +646,7 @@ static inline void cleanup(void) {
 	fastd_status_close();
 	fastd_port_mapping_cleanup();
 	fastd_turn_cleanup();
+	fastd_udp_punch_cleanup();
 	fastd_tcp_cleanup();
 	close_sockets();
 	fastd_poll_free();
