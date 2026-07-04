@@ -22,6 +22,7 @@
 
 #include <json-c/json.h>
 #include <sys/file.h>
+#include <sys/socket.h>
 #include <sys/un.h>
 
 
@@ -80,6 +81,270 @@ static json_object *dump_stats(const fastd_stats_t *stats) {
 	json_object_object_add(statistics, "tx_error", dump_stat(stats, STAT_TX_ERROR));
 
 	return statistics;
+}
+
+/** Reads all status data from a connected UNIX socket */
+static char *read_status_json(const char *socket_path) {
+	int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+	if (fd < 0)
+		exit_errno("status query: socket");
+
+	struct sockaddr_un sa = {};
+	size_t socket_path_len = strlen(socket_path);
+	if (socket_path_len >= sizeof(sa.sun_path))
+		exit_error("status query: socket path is too long");
+
+	sa.sun_family = AF_UNIX;
+	memcpy(sa.sun_path, socket_path, socket_path_len + 1);
+
+	if (connect(fd, (struct sockaddr *)&sa, offsetof(struct sockaddr_un, sun_path) + socket_path_len + 1))
+		exit_errno("status query: connect");
+
+	size_t len = 0, alloc = 4096;
+	char *ret = fastd_alloc(alloc);
+
+	while (true) {
+		if (len + 4096 + 1 > alloc) {
+			alloc *= 2;
+			ret = fastd_realloc(ret, alloc);
+		}
+
+		ssize_t read_len = read(fd, ret + len, alloc - len - 1);
+		if (read_len < 0)
+			exit_errno("status query: read");
+
+		if (read_len == 0)
+			break;
+
+		len += read_len;
+	}
+
+	if (close(fd))
+		pr_warn_errno("status query: close");
+
+	ret[len] = 0;
+	return ret;
+}
+
+/** Returns an object member or NULL if it is missing or of the wrong type */
+static json_object *get_object_member(json_object *object, const char *key) {
+	json_object *ret;
+	if (!object || !json_object_object_get_ex(object, key, &ret) || json_object_get_type(ret) != json_type_object)
+		return NULL;
+
+	return ret;
+}
+
+/** Returns an array member or NULL if it is missing or of the wrong type */
+static json_object *get_array_member(json_object *object, const char *key) {
+	json_object *ret;
+	if (!object || !json_object_object_get_ex(object, key, &ret) || json_object_get_type(ret) != json_type_array)
+		return NULL;
+
+	return ret;
+}
+
+/** Returns a string member or NULL if it is missing or null */
+static const char *get_string_member(json_object *object, const char *key) {
+	json_object *ret;
+	if (!object || !json_object_object_get_ex(object, key, &ret) || json_object_get_type(ret) == json_type_null)
+		return NULL;
+
+	return json_object_get_string(ret);
+}
+
+/** Returns an integer member or 0 if it is missing */
+static int64_t get_int_member(json_object *object, const char *key) {
+	json_object *ret;
+	if (!object || !json_object_object_get_ex(object, key, &ret))
+		return 0;
+
+	return json_object_get_int64(ret);
+}
+
+/** Returns a counter from a statistics object */
+static int64_t get_stat_counter(json_object *stats, const char *name, const char *counter) {
+	return get_int_member(get_object_member(stats, name), counter);
+}
+
+/** Formats a millisecond duration */
+static void format_duration(char buf[64], int64_t msec) {
+	if (msec < 0)
+		msec = 0;
+
+	int64_t sec = msec / 1000;
+	int64_t days = sec / 86400;
+	sec %= 86400;
+	int64_t hours = sec / 3600;
+	sec %= 3600;
+	int64_t minutes = sec / 60;
+	sec %= 60;
+
+	if (days)
+		snprintf(buf, 64, "%lldd %02lld:%02lld:%02lld", (long long)days, (long long)hours,
+			 (long long)minutes, (long long)sec);
+	else if (hours)
+		snprintf(buf, 64, "%lld:%02lld:%02lld", (long long)hours, (long long)minutes, (long long)sec);
+	else
+		snprintf(buf, 64, "%lld:%02lld", (long long)minutes, (long long)sec);
+}
+
+/** Formats a byte counter */
+static void format_bytes(char buf[32], int64_t bytes) {
+	static const char *const units[] = { "B", "KiB", "MiB", "GiB", "TiB" };
+	double value = bytes;
+	size_t unit = 0;
+
+	while (value >= 1024 && unit < array_size(units) - 1) {
+		value /= 1024;
+		unit++;
+	}
+
+	if (unit == 0)
+		snprintf(buf, 32, "%lld %s", (long long)bytes, units[unit]);
+	else
+		snprintf(buf, 32, "%.1f %s", value, units[unit]);
+}
+
+/** Prints a statistics line */
+static void print_stat_line(const char *label, json_object *stats, const char *name) {
+	char bytes[32];
+	format_bytes(bytes, get_stat_counter(stats, name, "bytes"));
+
+	printf("  %-12s %12s  %8lld packets\n", label, bytes, (long long)get_stat_counter(stats, name, "packets"));
+}
+
+/** Prints a compact traffic summary */
+static void print_traffic_summary(json_object *stats) {
+	print_stat_line("RX", stats, "rx");
+	print_stat_line("TX", stats, "tx");
+	print_stat_line("RX reorder", stats, "rx_reordered");
+	print_stat_line("TX dropped", stats, "tx_dropped");
+	print_stat_line("TX error", stats, "tx_error");
+}
+
+/** Prints a human-readable peer status */
+static void print_peer_status(const char *key, json_object *peer) {
+	const char *name = get_string_member(peer, "name");
+	const char *address = get_string_member(peer, "address");
+	json_object *connection = get_object_member(peer, "connection");
+	bool established = connection != NULL;
+
+	printf("  [%s] %s\n", established ? "up" : "down", name ? name : key);
+
+	if (name)
+		printf("       key:       %s\n", key);
+	printf("       address:   %s\n", (address && *address) ? address : "-");
+
+	const char *interface = get_string_member(peer, "interface");
+	if (interface)
+		printf("       interface: %s\n", interface);
+
+	int64_t mtu = get_int_member(peer, "mtu");
+	if (mtu)
+		printf("       mtu:       %lld\n", (long long)mtu);
+
+	if (!established) {
+		putchar('\n');
+		return;
+	}
+
+	char duration[64];
+	format_duration(duration, get_int_member(connection, "established"));
+	printf("       connected: %s\n", duration);
+
+	const char *method = get_string_member(connection, "method");
+	if (method)
+		printf("       method:    %s\n", method);
+
+	json_object *stats = get_object_member(connection, "statistics");
+	if (stats) {
+		char rx[32], tx[32];
+		format_bytes(rx, get_stat_counter(stats, "rx", "bytes"));
+		format_bytes(tx, get_stat_counter(stats, "tx", "bytes"));
+		printf("       traffic:   RX %s / TX %s\n", rx, tx);
+	}
+
+	json_object *macs = get_array_member(connection, "mac_addresses");
+	if (macs && json_object_array_length(macs)) {
+		printf("       macs:      ");
+
+		size_t i;
+		for (i = 0; i < json_object_array_length(macs); i++) {
+			if (i)
+				printf(", ");
+			printf("%s", json_object_get_string(json_object_array_get_idx(macs, i)));
+		}
+
+		putchar('\n');
+	}
+
+	putchar('\n');
+}
+
+/** Prints a human-readable status dump */
+static void print_status_human(json_object *json) {
+	char duration[64];
+	format_duration(duration, get_int_member(json, "uptime"));
+
+	json_object *peers = get_object_member(json, "peers");
+	size_t peer_count = 0, established_count = 0;
+
+	if (peers) {
+		json_object_object_foreach(peers, key, peer) {
+			(void)key;
+			peer_count++;
+			if (get_object_member(peer, "connection"))
+				established_count++;
+		}
+	}
+
+	printf("fastd status\n");
+	printf("============\n\n");
+	printf("Uptime:    %s\n", duration);
+
+	const char *interface = get_string_member(json, "interface");
+	if (interface)
+		printf("Interface: %s\n", interface);
+
+	printf("Peers:     %zu total, %zu established\n\n", peer_count, established_count);
+
+	json_object *stats = get_object_member(json, "statistics");
+	if (stats) {
+		printf("Traffic\n");
+		print_traffic_summary(stats);
+		putchar('\n');
+	}
+
+	if (!peers || !peer_count)
+		return;
+
+	printf("Peers\n");
+	json_object_object_foreach(peers, key, peer) {
+		print_peer_status(key, peer);
+	}
+}
+
+/** Queries a status socket and prints its result */
+void fastd_status_query(const char *socket_path, bool json_output) {
+	char *status = read_status_json(socket_path);
+
+	if (json_output) {
+		fputs(status, stdout);
+		if (!strlen(status) || status[strlen(status) - 1] != '\n')
+			putchar('\n');
+		free(status);
+		return;
+	}
+
+	json_object *json = json_tokener_parse(status);
+	if (!json || json_object_get_type(json) != json_type_object)
+		exit_error("status query: daemon returned invalid JSON");
+
+	print_status_human(json);
+
+	json_object_put(json);
+	free(status);
 }
 
 /** Returns a string as a json_object *, allows NULL to be passed */

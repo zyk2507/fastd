@@ -304,6 +304,8 @@ struct fastd_config {
 
 #ifdef WITH_STATUS_SOCKET
 	char *status_socket; /**< The path of the status socket */
+	bool show_status;    /**< Makes fastd query the configured status socket and exit */
+	bool status_json;    /**< Makes --status print raw JSON instead of human-readable output */
 #endif
 
 #ifdef WITH_OFFLOAD_L2TP
@@ -510,6 +512,7 @@ static inline void fastd_cap_reacquire_drop(void) {}
 void fastd_status_init(void);
 void fastd_status_close(void);
 void fastd_status_handle(void);
+void fastd_status_query(const char *socket_path, bool json);
 
 #else /* WITH_STATUS_SOCKET */
 

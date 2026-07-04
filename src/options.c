@@ -99,6 +99,16 @@ static void option_status_socket(const char *arg) {
 	conf.status_socket = fastd_strdup(arg);
 }
 
+/** Handles the --status option */
+static void option_status(void) {
+	conf.show_status = true;
+}
+
+/** Handles the --json option */
+static void option_status_json(void) {
+	conf.status_json = true;
+}
+
 #endif
 
 /** Handles the --config option */

@@ -356,8 +356,10 @@ Example config:
 
 | ``status socket "<socket>";``
 
-  Configures a UNIX socket which can be used to retrieve the current state of fastd. An example script
-  to get the status can be found at ``doc/examples/status.pl`` in the fastd repository.
+  Configures a UNIX socket which can be used to retrieve the current state of fastd. The status can be queried with
+  ``fastd --config <config> --status`` or ``fastd --status-socket <socket> --status``. The default output is
+  human-readable; add ``--json`` to print the raw JSON status dump. An example script to get the status can be found
+  at ``doc/examples/status.pl`` in the fastd repository.
 
 | ``user "<user>";``
 

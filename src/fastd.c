@@ -417,6 +417,19 @@ static inline void init_early(void) {
    This also handles special run modes like \em generate-key and \em verify-config.
 */
 static inline void init_config(int *status_fd) {
+#ifdef WITH_STATUS_SOCKET
+	if (conf.show_status) {
+		if (!conf.status_socket)
+			exit_error("status query requires a configured status socket");
+
+		fastd_status_query(conf.status_socket, conf.status_json);
+		exit(0);
+	}
+
+	if (conf.status_json)
+		exit_error("--json can only be used together with --status");
+#endif
+
 	if (conf.verify_config) {
 		fastd_config_verify();
 		exit(0);

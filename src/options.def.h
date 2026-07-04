@@ -4,6 +4,8 @@ OPTION(option_daemon, "--daemon" OR "-d", "Runs fastd in the background");
 OPTION_ARG(option_pid_file, "--pid-file", "<filename>", "Writes fastd's PID to the specified file");
 #ifdef WITH_STATUS_SOCKET
 OPTION_ARG(option_status_socket, "--status-socket", "<socket>", "Configure a socket to get fastd's status");
+OPTION(option_status, "--status", "Queries the configured status socket and exits");
+OPTION(option_status_json, "--json", "Prints --status output as JSON");
 #endif
 SEPARATOR;
 
