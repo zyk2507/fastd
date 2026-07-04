@@ -26,6 +26,23 @@
 #include <miniupnpc/upnperrors.h>
 #endif
 
+#ifdef WITH_UPNP_IGD
+/* Some miniupnpc development packages expose UPNP_GetValidIGD() but not the
+ * named return constants. Keep the local fallback in sync with miniupnpc.h. */
+#ifndef UPNP_NO_IGD
+#define UPNP_NO_IGD 0
+#endif
+#ifndef UPNP_CONNECTED_IGD
+#define UPNP_CONNECTED_IGD 1
+#endif
+#ifndef UPNP_PRIVATEIP_IGD
+#define UPNP_PRIVATEIP_IGD 2
+#endif
+#ifndef UPNP_DISCONNECTED_IGD
+#define UPNP_DISCONNECTED_IGD 3
+#endif
+#endif
+
 
 #define FASTD_NATPMP_RETRY_INTERVAL 300000
 #define FASTD_UPNP_DISCOVER_DELAY 2000
