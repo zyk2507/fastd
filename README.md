@@ -8,5 +8,7 @@ fastd runs on Linux, FreeBSD, OpenBSD and macOS. Android support exists in the
 code, but is currently unmaintained. Binary packages are provided by many major
 Linux distributions.
 
+For build instructions, see [BUILDING.md](BUILDING.md).
+
 For more information, see the [documentation](https://fastd.readthedocs.io/) and
 the [project wiki](https://github.com/neocturne/fastd/wiki).
