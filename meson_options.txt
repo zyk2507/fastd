@@ -10,6 +10,7 @@ option('zstd', type : 'feature', value : 'auto')
 option('natpmp', type : 'feature', value : 'auto')
 option('upnp', type : 'feature', value : 'auto')
 option('turn', type : 'feature', value : 'auto')
+option('realm', type : 'feature', value : 'auto')
 
 option('cipher_aes128-ctr', type : 'feature', value : 'enabled')
 option('cipher_null', type : 'feature', value : 'enabled')

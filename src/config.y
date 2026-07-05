@@ -73,6 +73,7 @@
 %token TOK_HANDSHAKES
 %token TOK_HIDE
 %token TOK_HOLE_PUNCH
+%token TOK_ID
 %token TOK_INCLUDE
 %token TOK_INFO
 %token TOK_INTERFACE
@@ -107,6 +108,7 @@
 %token TOK_POST_DOWN
 %token TOK_PRE_UP
 %token TOK_PROTOCOL
+%token TOK_REALM
 %token TOK_RELAY
 %token TOK_REMOTE
 %token TOK_SECRET
@@ -115,10 +117,12 @@
 %token TOK_SOCKET
 %token TOK_STATUS
 %token TOK_STDERR
+%token TOK_STUN
 %token TOK_SYNC
 %token TOK_SYSLOG
 %token TOK_TAP
 %token TOK_TO
+%token TOK_TOKEN
 %token TOK_TCP
 %token TOK_TUN
 %token TOK_TURN
@@ -173,6 +177,7 @@
 %type <uint64> hole_punch
 %type <tristate> autobool
 %type <boolean> sync
+%type <boolean> maybe_stun_server
 
 %%
 start:		START_CONFIG config
@@ -214,6 +219,7 @@ statement:	peer_group_statement
 	|	TOK_STATUS TOK_SOCKET status_socket ';'
 	|	TOK_FORWARD forward ';'
 	|	TOK_PEER TOK_DISCOVERY peer_discovery ';'
+	|	TOK_REALM TOK_SERVER realm_server ';'
 	;
 
 peer_group_statement:
@@ -520,6 +526,7 @@ peer_conf:	peer_conf peer_statement
 
 peer_statement: TOK_REMOTE peer_remote ';'
 	|	TOK_FLOAT peer_float ';'
+	|	TOK_REALM peer_realm ';'
 	|	TOK_KEY peer_key ';'
 	|	TOK_INTERFACE peer_interface ';'
 	|	TOK_MTU peer_mtu ';'
@@ -544,6 +551,29 @@ peer_statement: TOK_REMOTE peer_remote ';'
 		}
 	|	TOK_TURN TOK_SERVER turn_server ';'
 	|	TOK_INCLUDE peer_include ';'
+	;
+
+realm_server:	TOK_STRING TOK_TOKEN TOK_STRING TOK_ID TOK_STRING maybe_stun_server {
+			free(conf.realm.server);
+			free(conf.realm.token);
+			free(conf.realm.id);
+
+			conf.realm.server = fastd_strdup($1->str);
+			conf.realm.token = fastd_strdup($3->str);
+			conf.realm.id = fastd_strdup($5->str);
+		}
+	;
+
+maybe_stun_server:
+		TOK_STUN TOK_SERVER TOK_STRING port {
+			free(conf.realm.stun_host);
+			conf.realm.stun_host = fastd_strdup($3->str);
+			conf.realm.stun_port = $4;
+			$$ = true;
+		}
+	|	{
+			$$ = false;
+		}
 	;
 
 turn_server:	TOK_STRING port TOK_USER TOK_STRING TOK_PASSWORD TOK_STRING {
@@ -610,6 +640,12 @@ peer_remote:	maybe_ipv4 TOK_ADDR4 port {
 
 peer_float:	boolean {
 			state->peer->floating = $1;
+		}
+	;
+
+peer_realm:	TOK_STRING {
+			free(state->peer->realm);
+			state->peer->realm = fastd_strdup($1->str);
 		}
 	;
 

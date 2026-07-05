@@ -520,6 +520,7 @@ void fastd_peer_free(fastd_peer_t *peer) {
 	VECTOR_FREE(peer->direct_macs);
 	fastd_turn_server_free(peer->turn_servers);
 
+	free(peer->realm);
 	free(peer->ifname);
 	free(peer->name);
 	free(peer);
@@ -731,10 +732,10 @@ static void add_direct_mac(fastd_peer_t *peer, fastd_eth_addr_t mac) {
 void fastd_peer_add_direct_candidate(
 	fastd_peer_t *peer, fastd_peer_t *relay, const fastd_peer_address_t *remote_addr, const fastd_eth_addr_t *macs,
 	size_t n_macs) {
-	if (!conf.peer_discovery)
+	if (relay && !conf.peer_discovery)
 		return;
 
-	if (peer == relay || !fastd_peer_is_enabled(peer))
+	if ((relay && peer == relay) || !fastd_peer_is_enabled(peer))
 		return;
 
 	if (remote_addr->sa.sa_family != AF_INET && remote_addr->sa.sa_family != AF_INET6)
@@ -896,6 +897,9 @@ static inline bool peer_configs_equal(const fastd_peer_t *peer1, const fastd_pee
 		return false;
 
 	if (peer1->floating != peer2->floating)
+		return false;
+
+	if (!strequal(peer1->realm, peer2->realm))
 		return false;
 
 	if (VECTOR_LEN(peer1->remotes) != VECTOR_LEN(peer2->remotes))

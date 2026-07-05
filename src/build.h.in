@@ -98,6 +98,9 @@
 /** Defined if TURN relay support is enabled */
 #mesondefine WITH_TURN
 
+/** Defined if realm rendezvous support is enabled */
+#mesondefine WITH_REALM
+
 
 /** Defined if L2TP offloading is enabled */
 #mesondefine WITH_OFFLOAD_L2TP

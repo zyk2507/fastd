@@ -170,6 +170,7 @@ persist interface yes|no;
 offload l2tp yes|no;
 forward yes|no;
 peer discovery yes|no;
+realm server "<url>" token "<token>" id "<local-id>" [stun server "<host>" port <port>];
 ```
 
 - `interface`：设置 TUN/TAP 接口名。名称不能包含 `/`。可使用 `%n`（peer 名称）或 `%k`（peer key 前 16 位）为多接口模式生成唯一名称。
@@ -185,6 +186,7 @@ peer discovery yes|no;
 - `offload l2tp yes`：启用 Linux L2TP offload。要求 `mode multitap`、`persist interface no`，且不能与 payload compression 同时使用。
 - `forward yes`：允许 peer 间转发，注意避免环路。
 - `peer discovery yes`：启用基于可信 relay 的 endpoint discovery。TAP relay 在同时开启 `forward yes` 时，会把已连接 peer 的公网 endpoint 和已学习 MAC 通过认证控制包介绍给其他 peer；接收端把该 endpoint 作为额外直连握手目标，可配合 `hole-punch auto`。直连建立前或失败后，相关 MAC 的流量继续回退到 relay；直连建立后切换二层转发表，不重置隧道内已有 TCP 连接。协商出的 method 需要支持认证控制包；`null` / `null@l2tp` 不承载 discovery 消息。
+- `realm server`：配置外部 rendezvous server。fastd 使用它注册本机 realm、保持 SSE 事件流、周期性向 peer 的 realm 发起 `/connect`，并把返回或推送的 endpoint 作为临时直连握手目标。realm server 只处理控制面，不中转隧道流量。原版 Hysteria realm server 的 SSE punch 事件不包含来源 peer 身份，fastd 会把这类匿名 endpoint 试探性地用于已配置 `realm` 的 peer，并由 fastd 的认证握手过滤不匹配的 peer。配置 `stun server` 后，fastd 会从实际使用的 IPv4 UDP socket 发送 STUN binding request，并优先通告 STUN 得到的公网 UDP endpoint；未配置 STUN 时只能通告本地 bind 地址，通常只适合公网或已有端口映射的 socket。
 
 ### 状态 socket
 
@@ -355,6 +357,7 @@ remote [ipv4|ipv6] "<hostname>":<port>;
 remote <IPv4> port <port>;
 remote <IPv6> port <port>;
 remote [ipv4|ipv6] "<hostname>" port <port>;
+realm "<remote-id>";
 float yes|no;
 include "<file>";
 ```
@@ -362,6 +365,7 @@ include "<file>";
 - `key`：peer 公钥，必填。
 - `remote`：主动连接的对端地址，可配置多条。hostname 前可加 `ipv4` 或 `ipv6` 限制解析地址族。
 - 未配置 `remote` 的 peer 总是 floating，只接受入站连接，不主动连接。
+- `realm`：该 peer 在外部 rendezvous server 上的 realm ID。全局配置了 `realm server` 后，即使该 peer 未配置 `remote`，fastd 也会通过 realm 控制面获取临时 endpoint 并主动试探 UDP handshake；匿名 punch 事件会先投递给本机配置了 `realm` 的 peer，由认证握手消歧。通常配合 `transport udp` 和 `hole-punch udp|auto` 使用；它是机会式 NAT traversal，不能保证穿透 symmetric NAT 或严格防火墙。
 - `float yes`：允许该 peer 从任意地址/端口建立连接。
 - `float no`：只接受配置的 `remote` 地址/端口。
 - `include`：在当前 peer 配置中包含另一个文件。
@@ -472,7 +476,29 @@ peer group "nat" {
 }
 ```
 
-### 4. L2TP offload 示例
+### 4. 使用 realm rendezvous 连接两个 passive peer
+
+```conf
+mode multitap;
+forward no;
+
+bind 0.0.0.0:10000 default ipv4;
+method "salsa2012+umac";
+secret "本机私钥";
+
+realm server "https://realm.example.net:8443" token "shared-token" id "node-a" stun server "stun.example.net" port 3478;
+
+peer "node-b" {
+	key "node-b 公钥";
+	realm "node-b";
+	transport udp;
+	hole-punch udp;
+}
+```
+
+这个模式下 `node-b` 不需要配置 `remote`，仍然是 floating peer。fastd 通过 realm server 交换公网 UDP endpoint，并直接向对方发送 fastd handshake；成功后数据面直接走 A/B 之间的 UDP 流，不经过 realm server。该模式不能替代 TURN relay，遇到无法 UDP 打洞的 NAT 组合仍可能失败。
+
+### 5. L2TP offload 示例
 
 ```conf
 mode multitap;

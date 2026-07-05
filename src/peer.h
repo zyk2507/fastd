@@ -49,6 +49,7 @@ struct fastd_peer {
 
 	VECTOR(fastd_remote_t) remotes; /**< The vector of the peer's remotes */
 	bool floating;                  /**< Specifies if the peer has any floating remotes */
+	char *realm;                    /**< Optional realm ID used for rendezvous-assisted direct attempts */
 
 	fastd_peer_config_state_t config_state; /**< Specifies the way this peer was configured and if it is enabled */
 

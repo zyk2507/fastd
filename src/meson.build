@@ -62,6 +62,7 @@ src = [
 	'pqueue.c',
 	'random.c',
 	'receive.c',
+	'realm.c',
 	'resolve.c',
 	'send.c',
 	'sha256.c',
@@ -146,6 +147,17 @@ if not get_option('turn').disabled()
 	with_turn = turn_dep.found()
 	if with_turn
 		deps += turn_dep
+	endif
+endif
+
+with_realm = false
+if not get_option('realm').disabled()
+	curl_dep = dependency('libcurl', required : get_option('realm'))
+	json_c_dep = dependency('json-c', required : get_option('realm'))
+	realm_nice_dep = dependency('nice', required : get_option('realm'))
+	with_realm = curl_dep.found() and json_c_dep.found() and realm_nice_dep.found()
+	if with_realm
+		deps += [ curl_dep, json_c_dep, realm_nice_dep ]
 	endif
 endif
 
@@ -283,6 +295,7 @@ conf_data.set('WITH_ZSTD', with_zstd)
 conf_data.set('WITH_NATPMP', with_natpmp)
 conf_data.set('WITH_UPNP_IGD', with_upnp_igd)
 conf_data.set('WITH_TURN', with_turn)
+conf_data.set('WITH_REALM', with_realm)
 
 conf_data.set('WITH_OFFLOAD_L2TP', with_offload_l2tp)
 

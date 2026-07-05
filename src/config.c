@@ -700,6 +700,9 @@ static void config_check_base(void) {
 
 	if (!fastd_turn_check())
 		exit(1);
+
+	if (!fastd_realm_check())
+		exit(1);
 }
 
 /** Performs more checks on the configuration */
@@ -873,6 +876,10 @@ void fastd_config_release(void) {
 #endif
 
 	free(conf.ifname);
+	free(conf.realm.server);
+	free(conf.realm.token);
+	free(conf.realm.id);
+	free(conf.realm.stun_host);
 	free(conf.secret);
 	free(conf.protocol_config);
 	free(conf.log_syslog_ident);

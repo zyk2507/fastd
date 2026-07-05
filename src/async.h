@@ -22,6 +22,7 @@ typedef enum fastd_async_type {
 	ASYNC_TYPE_NOP, /**< Does nothing (is used to ensure poll returns quickly after a signal has occurred) */
 	ASYNC_TYPE_RESOLVE_RETURN, /**< A DNS resolver response */
 	ASYNC_TYPE_VERIFY_RETURN,  /**< A on-verify return */
+	ASYNC_TYPE_REALM_CANDIDATE, /**< A realm-discovered direct peer endpoint */
 } fastd_async_type_t;
 
 
@@ -47,6 +48,17 @@ typedef struct fastd_async_verify_return {
 
 	uint8_t protocol_data[] __attribute__((aligned(8))); /**< Protocol-specific data */
 } fastd_async_verify_return_t;
+
+#define FASTD_REALM_MAX_ADDRESSES 8
+#define FASTD_REALM_MAX_FIELD 256
+
+/** A realm-discovered peer endpoint */
+typedef struct fastd_async_realm_candidate {
+	char source_id[FASTD_REALM_MAX_FIELD + 1];  /**< Optional source realm ID */
+	char source_key[FASTD_REALM_MAX_FIELD + 1]; /**< Optional source fastd public key */
+	size_t n_addr;                              /**< The number of discovered addresses */
+	fastd_peer_address_t addr[FASTD_REALM_MAX_ADDRESSES]; /**< The discovered addresses */
+} fastd_async_realm_candidate_t;
 
 
 void fastd_async_init(void);

@@ -13,6 +13,7 @@
 
 #include "async.h"
 #include "fastd.h"
+#include "realm.h"
 
 #include <sys/uio.h>
 
@@ -76,6 +77,14 @@ static void handle_verify_return(const fastd_async_verify_return_t *verify_retur
 
 #endif
 
+/** Handles a realm-discovered peer endpoint */
+static void handle_realm_candidate(const fastd_async_realm_candidate_t *candidate) {
+	if (candidate->n_addr > FASTD_REALM_MAX_ADDRESSES)
+		return;
+
+	fastd_realm_add_candidate(candidate->source_id, candidate->source_key, candidate->addr, candidate->n_addr);
+}
+
 
 /** Reads and handles a single notification from the async notification socket */
 void fastd_async_handle(void) {
@@ -112,6 +121,10 @@ void fastd_async_handle(void) {
 		handle_verify_return((const fastd_async_verify_return_t *)buf);
 		break;
 #endif
+
+	case ASYNC_TYPE_REALM_CANDIDATE:
+		handle_realm_candidate((const fastd_async_realm_candidate_t *)buf);
+		break;
 
 	default:
 		exit_bug("fastd_async_handle: unknown type");

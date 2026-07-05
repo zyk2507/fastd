@@ -545,6 +545,7 @@ static inline void init(int argc, char *argv[]) {
 		exit(1);
 	fastd_socket_update_tcp_listeners();
 	fastd_port_mapping_init();
+	fastd_realm_init();
 
 	notify_systemd();
 
@@ -633,6 +634,8 @@ static void delete_peers(void) {
 */
 static inline void cleanup(void) {
 	pr_info("terminating fastd");
+
+	fastd_realm_cleanup();
 
 	delete_peers();
 

@@ -227,6 +227,15 @@ struct fastd_iface {
 	bool cleanup;       /**< Determines if the interface should be deleted after use; not used on all platforms */
 };
 
+/** Realm rendezvous configuration */
+struct fastd_realm_config {
+	char *server;    /**< Base URL of the rendezvous server */
+	char *token;     /**< Bearer token used for realm registration and connection requests */
+	char *id;        /**< Realm ID advertised by this fastd instance */
+	char *stun_host; /**< Optional STUN server host used for UDP reflection */
+	uint16_t stun_port; /**< Optional STUN server port */
+};
+
 
 /** Type of a traffic stat counter */
 typedef enum fastd_stat_type {
@@ -282,6 +291,7 @@ struct fastd_config {
 #endif
 	bool forward;        /**< Specifies if packet forwarding is enable */
 	bool peer_discovery; /**< Enables relay-assisted endpoint discovery for direct peer connections */
+	fastd_realm_config_t realm; /**< External rendezvous configuration for peer hole punching */
 
 	fastd_drop_caps_t drop_caps; /**< Specifies if and when to drop capabilities */
 
@@ -388,6 +398,7 @@ struct fastd_context {
 	fastd_port_mapping_t *port_mapping; /**< Global automatic port mapping state */
 
 	fastd_task_t turn_task; /**< Drives the TURN relay GLib main context */
+	fastd_realm_state_t *realm; /**< External rendezvous runtime state */
 
 	bool has_floating; /**< Specifies if any of the configured peers have floating remotes */
 	uint16_t max_mtu;  /**< The maximum MTU of all peer-specific interfaces */
@@ -501,6 +512,11 @@ void fastd_port_mapping_cleanup(void);
 bool fastd_turn_check(void);
 void fastd_turn_handle_task(void);
 void fastd_turn_cleanup(void);
+
+bool fastd_realm_check(void);
+void fastd_realm_init(void);
+void fastd_realm_handle_task(void);
+void fastd_realm_cleanup(void);
 
 bool fastd_iface_format_name(char ifname[IFNAMSIZ], const fastd_peer_t *peer);
 fastd_iface_t *fastd_iface_open(fastd_peer_t *peer);

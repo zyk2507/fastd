@@ -206,6 +206,27 @@ Example config:
   * Relay fallback: leave the relay connection established. The relay continues to carry traffic while direct
     punching is pending or unavailable.
 
+| ``realm server "<url>" token "<token>" id "<local-id>" [stun server "<host>" port <port>];``
+
+  Configures an external realm rendezvous server for peer hole punching. This is intended for deployments where
+  peers should remain passive in the fastd configuration, for example without normal ``remote`` entries, but should
+  still try direct UDP handshakes after a rendezvous server has introduced their currently observed endpoints.
+
+  The rendezvous server is used as a control plane only. It receives registrations, forwards punch events over an
+  SSE stream, and returns endpoint candidates for ``connect`` requests. Tunnel payload packets are not sent through
+  the realm server. The Hysteria realm server API does not identify the source peer in SSE punch events; fastd
+  therefore treats such events as anonymous candidates for configured realm peers and relies on the authenticated
+  fastd handshake to select the matching peer.
+
+  When a STUN server is configured, fastd sends STUN binding requests from its normal IPv4 UDP socket and advertises
+  the discovered server-reflexive endpoint. The STUN message handling uses libnice's STUN implementation. Without a
+  STUN server, fastd can only advertise the local bound address, which is useful for public or explicitly forwarded
+  sockets but usually not sufficient behind NAT.
+
+  Peers that should be reached through this control plane need a peer-specific ``realm`` setting. ``transport udp``
+  and ``hole-punch udp`` or ``hole-punch auto`` are normally required. Realm rendezvous is opportunistic and cannot
+  guarantee traversal through all NAT types, especially symmetric NATs or restrictive firewalls.
+
 | ``group "<group>";``
 
   Sets the group to run fastd as.
@@ -474,6 +495,14 @@ Example config:
   to are taken into account, not only the first one. This can be use to specify alternative hostname,
   addresses and/or ports for the same host; all remotes must still refer to the same peer as the public
   key must be unique.
+
+| ``realm "<remote-id>";``
+
+  Sets the remote realm ID for this peer. If a global ``realm server`` is configured, fastd periodically asks the
+  rendezvous server to connect to this realm, keeps its own realm registered, and listens for SSE punch events from
+  other participants. Candidates returned by the realm server are used as temporary direct handshake targets; the
+  peer can still omit ``remote`` and remain floating. If an incoming punch event has no source identity, fastd tries
+  its addresses against configured realm peers and lets peer authentication reject non-matching handshakes.
 
 | ``float yes|no;``
 

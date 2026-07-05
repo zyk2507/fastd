@@ -18,6 +18,7 @@
 #include "hash.h"
 #include "peer.h"
 #include "peer_hashtable.h"
+#include "realm.h"
 
 #include <sys/uio.h>
 
@@ -237,6 +238,11 @@ void fastd_receive_packet(
 	fastd_socket_t *sock, const fastd_peer_address_t *local_addr, const fastd_peer_address_t *remote_addr,
 	fastd_buffer_t *buffer) {
 	fastd_peer_t *peer = NULL;
+
+	if (fastd_realm_handle_stun_response(remote_addr, buffer->data, buffer->len)) {
+		fastd_buffer_free(buffer);
+		return;
+	}
 
 	/* Most of fastd's code should never have to deal with L2TP offload sockets */
 	if (sock->parent)

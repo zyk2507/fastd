@@ -44,6 +44,10 @@ static void handle_task(void) {
 		fastd_turn_handle_task();
 		break;
 
+	case TASK_TYPE_REALM:
+		fastd_realm_handle_task();
+		break;
+
 	default:
 		exit_bug("unknown task type");
 	}
