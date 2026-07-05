@@ -55,6 +55,7 @@ static const keyword_t keywords[] = {
 	{ "debug", TOK_DEBUG },
 	{ "debug2", TOK_DEBUG2 },
 	{ "default", TOK_DEFAULT },
+	{ "discovery", TOK_DISCOVERY },
 	{ "disestablish", TOK_DISESTABLISH },
 	{ "down", TOK_DOWN },
 	{ "drop", TOK_DROP },

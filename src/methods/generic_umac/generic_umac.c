@@ -127,7 +127,7 @@ static void method_session_free(fastd_method_session_state_t *session) {
 }
 
 /** Encrypts and authenticates a packet */
-static fastd_buffer_t *method_encrypt(fastd_method_session_state_t *session, fastd_buffer_t *in) {
+static fastd_buffer_t *method_encrypt(fastd_method_session_state_t *session, fastd_buffer_t *in, uint8_t flags) {
 	fastd_buffer_push_zero(in, sizeof(fastd_block128_t));
 
 	fastd_buffer_t *out = fastd_buffer_alloc(in->len, COMMON_HEADROOM);
@@ -154,7 +154,7 @@ static fastd_buffer_t *method_encrypt(fastd_method_session_state_t *session, fas
 
 	fastd_buffer_free(in);
 
-	fastd_method_put_common_header(&session->common, out, 0);
+	fastd_method_put_common_header(&session->common, out, flags);
 
 	return out;
 
@@ -164,7 +164,8 @@ fail:
 }
 
 /** Verifies and decrypts a packet */
-static fastd_buffer_t *method_decrypt(fastd_method_session_state_t *session, fastd_buffer_t *in, bool *reordered) {
+static fastd_buffer_t *
+method_decrypt(fastd_method_session_state_t *session, fastd_buffer_t *in, bool *reordered, uint8_t *out_flags) {
 	if (in->len < COMMON_HEADBYTES + sizeof(fastd_block128_t))
 		return NULL;
 
@@ -179,8 +180,7 @@ static fastd_buffer_t *method_decrypt(fastd_method_session_state_t *session, fas
 	if (!fastd_method_handle_common_header(&session->common, &in_view, in_nonce, &flags, &age))
 		return NULL;
 
-	if (flags)
-		return NULL;
+	*out_flags = flags;
 
 	uint8_t nonce[session->method->cipher_info->iv_length] __attribute__((aligned(8)));
 	fastd_method_expand_nonce(nonce, in_nonce, sizeof(nonce));
@@ -224,6 +224,8 @@ fail:
 
 /** The generic-umac method provider */
 const fastd_method_provider_t fastd_method_generic_umac = {
+	.flags = METHOD_SUPPORTS_CONTROL,
+
 	.overhead = COMMON_HEADBYTES + sizeof(fastd_block128_t),
 	.encrypt_headroom = sizeof(fastd_block128_t),
 	.decrypt_headroom = 0,

@@ -27,6 +27,7 @@
 | `port-mapping` | `off` |
 | `hole-punch` | `off` |
 | `turn relay` | `no` |
+| `peer discovery` | `no` |
 | `peer limit` | unlimited |
 | `method` | 未配置时回退到 `null` 并打印警告 |
 
@@ -168,6 +169,7 @@ mode tap|multitap|tun;
 persist interface yes|no;
 offload l2tp yes|no;
 forward yes|no;
+peer discovery yes|no;
 ```
 
 - `interface`：设置 TUN/TAP 接口名。名称不能包含 `/`。可使用 `%n`（peer 名称）或 `%k`（peer key 前 16 位）为多接口模式生成唯一名称。
@@ -182,6 +184,7 @@ forward yes|no;
 - `persist interface no`：仅在有活跃 session 时创建 peer 专属接口；TAP 模式无实际影响。
 - `offload l2tp yes`：启用 Linux L2TP offload。要求 `mode multitap`、`persist interface no`，且不能与 payload compression 同时使用。
 - `forward yes`：允许 peer 间转发，注意避免环路。
+- `peer discovery yes`：启用基于可信 relay 的 endpoint discovery。TAP relay 在同时开启 `forward yes` 时，会把已连接 peer 的公网 endpoint 和已学习 MAC 通过认证控制包介绍给其他 peer；接收端把该 endpoint 作为额外直连握手目标，可配合 `hole-punch auto`。直连建立前或失败后，相关 MAC 的流量继续回退到 relay；直连建立后切换二层转发表，不重置隧道内已有 TCP 连接。协商出的 method 需要支持认证控制包；`null` / `null@l2tp` 不承载 discovery 消息。
 
 ### 状态 socket
 
@@ -261,7 +264,7 @@ turn server "<address>" port <port> user "<username>" password "<password>";
 - `transport auto`：先探测 TCP，失败后回退 UDP。握手中会校验双方实际 transport 一致。
 - `port-mapping`：自动映射固定 IPv4 UDP bind 端口。
 - `nat-pmp yes|no`：兼容别名，等价于 `port-mapping nat-pmp|off`。
-- `hole-punch tcp|udp|auto`：启用确定性 IPv4 打洞；默认关闭。
+- `hole-punch tcp|udp|auto`：启用确定性 IPv4 打洞；默认关闭。双方需要知道彼此公网 IPv4 endpoint；在 TAP relay 转发网络中，`peer discovery yes` 可以由可信 relay 提供这个 endpoint。
 - `turn relay yes`：使用外部 TURN server 进行 UDP relay；需要编译时启用 libnice。
 - `turn server`：可配置多条；peer 自己配置 server 后使用 peer 的列表，不再继承 group 列表。
 
@@ -276,6 +279,30 @@ hole-punch auto;
 turn relay yes;
 turn server "turn.example.net" port 3478 user "fastd" password "secret";
 ```
+
+Relay-assisted direct peering 示例：
+
+```conf
+# relay C
+mode tap;
+forward yes;
+peer discovery yes;
+transport auto;
+hole-punch auto;
+
+# 节点 A/B
+mode tap;
+peer discovery yes;
+transport auto;
+hole-punch auto;
+```
+
+- relay C 必须与 A/B 都保持普通 fastd 连接，通常由 A/B 配置 C 的 `remote`。
+- C 开启 `forward yes` 后可在直连失败或打洞尚未完成时继续中继内网流量。
+- `peer discovery yes` 让 C 把它观察到的 A/B 公网 endpoint 和 MAC 通过认证控制包介绍给另一侧。
+- A/B 收到介绍后尝试直连；直连成功后相关 MAC 切到 direct peer，隧道内已有 TCP 连接不需要重建。
+- 若打洞失败，转发表仍可回退到 C；如果存在 symmetric NAT、CGNAT 或严格防火墙，通常仍需要 relay/TURN。
+- 协商出的 method 需要支持认证控制包；`null` / `null@l2tp` 不承载 discovery 消息。
 
 ### 方法和 hook
 

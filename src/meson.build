@@ -47,6 +47,7 @@ src = [
 	'capabilities.c',
 	'compression.c',
 	'config.c',
+	'discovery.c',
 	'fastd.c',
 	'handshake.c',
 	'hkdf_sha256.c',

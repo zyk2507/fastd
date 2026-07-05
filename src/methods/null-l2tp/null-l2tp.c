@@ -95,7 +95,8 @@ static void method_session_free(fastd_method_session_state_t *session) {
 }
 
 /** Just returns the input buffer as the output */
-static fastd_buffer_t *method_encrypt(UNUSED fastd_method_session_state_t *session, fastd_buffer_t *in) {
+static fastd_buffer_t *
+method_encrypt(UNUSED fastd_method_session_state_t *session, fastd_buffer_t *in, UNUSED uint8_t flags) {
 	method_l2tp_header_t header = {
 		.packet_type = PACKET_DATA,
 		.flags_ver = 3,
@@ -124,8 +125,10 @@ static fastd_buffer_t *method_encrypt(UNUSED fastd_method_session_state_t *sessi
 }
 
 /** Just returns the input buffer as the output */
-static fastd_buffer_t *
-method_decrypt(UNUSED fastd_method_session_state_t *session, fastd_buffer_t *in, UNUSED bool *reordered) {
+static fastd_buffer_t *method_decrypt(
+	UNUSED fastd_method_session_state_t *session, fastd_buffer_t *in, UNUSED bool *reordered, uint8_t *flags) {
+	*flags = 0;
+
 	method_l2tp_header_t header;
 	if (in->len < sizeof(header))
 		return NULL;

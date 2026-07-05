@@ -111,9 +111,10 @@ Example config:
   source ports for outbound NAT mappings.
 
   This mode requires both peers to know each other's public IPv4 address, enable compatible transport, and keep clocks
-  reasonably synchronized, for example with NTP. It is an opportunistic traversal aid. When ``hole-punch auto`` is used
-  together with ``turn relay yes``, fastd first tries direct hole punching and starts the TURN relay only after the
-  punching window has elapsed.
+  reasonably synchronized, for example with NTP. It is an opportunistic traversal aid. ``peer discovery`` can provide
+  the peer address through a trusted relay in TAP forwarding deployments. When ``hole-punch auto`` is used together
+  with ``turn relay yes``, fastd first tries direct hole punching and starts the TURN relay only after the punching
+  window has elapsed.
 
 | ``turn relay yes|no;``
 | ``turn server "<address>" port <port> [user "<username>" password "<password>"];``
@@ -179,6 +180,31 @@ Example config:
 | ``forward yes|no;``
 
   Enables or disabled forwarding packets between peers. Care must be taken not to create forwarding loops.
+
+| ``peer discovery yes|no;``
+
+  Enables relay-assisted endpoint discovery for direct peer connections. This is disabled by default. In TAP mode,
+  a relay that also has ``forward yes`` announces the observed public endpoint and learned MAC addresses of one
+  established peer to the other established peers over authenticated fastd control packets. Receivers use the
+  announced endpoint as an additional direct handshake target and may combine it with ``hole-punch auto``.
+
+  While the direct handshake is still in progress or has failed, unicast traffic for the discovered MAC addresses
+  continues to use the relay peer. After the direct peer session is established, the MAC entries are moved to the
+  direct peer; existing TCP connections inside the tunnel are not reset because the virtual interface and inner
+  packet stream remain unchanged.
+
+  All participating nodes that should send or accept endpoint announcements must enable ``peer discovery``. The
+  feature is intended for trusted relay nodes: a relay that can already forward traffic can also introduce dynamic
+  direct peers when discovery is enabled on the receiver. The negotiated method must support authenticated fastd
+  control packets; the ``null`` methods do not carry discovery announcements.
+
+  A typical relay-assisted topology uses the following roles:
+
+  * Relay node: ``mode tap;``, ``forward yes;``, ``peer discovery yes;`` and normal peer definitions for the clients.
+  * Client nodes: ``mode tap;``, ``peer discovery yes;`` and a normal ``remote`` for the relay node.
+  * Direct traversal: enable compatible ``transport`` and usually ``hole-punch auto`` on the participating peers.
+  * Relay fallback: leave the relay connection established. The relay continues to carry traffic while direct
+    punching is pending or unavailable.
 
 | ``group "<group>";``
 

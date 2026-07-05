@@ -57,6 +57,7 @@
 %token TOK_DEBUG
 %token TOK_DEBUG2
 %token TOK_DEFAULT
+%token TOK_DISCOVERY
 %token TOK_DISESTABLISH
 %token TOK_DOWN
 %token TOK_DROP
@@ -212,6 +213,7 @@ statement:	peer_group_statement
 	|	TOK_ON TOK_POST_DOWN on_post_down ';'
 	|	TOK_STATUS TOK_SOCKET status_socket ';'
 	|	TOK_FORWARD forward ';'
+	|	TOK_PEER TOK_DISCOVERY peer_discovery ';'
 	;
 
 peer_group_statement:
@@ -704,6 +706,12 @@ on_verify:	sync TOK_STRING {
 	;
 
 forward:	boolean		{ conf.forward = $1; }
+	;
+
+peer_discovery:
+		boolean {
+			conf.peer_discovery = $1;
+		}
 	;
 
 port_mapping:

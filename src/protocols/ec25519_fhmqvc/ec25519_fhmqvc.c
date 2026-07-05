@@ -13,6 +13,7 @@
 
 #include "ec25519_fhmqvc.h"
 #include "../../compression.h"
+#include "../../discovery.h"
 
 
 /** Converts a private or public key from a hexadecimal string representation to a uint8 array */
@@ -114,19 +115,20 @@ static void protocol_handle_recv(fastd_peer_t *peer, fastd_buffer_t *buffer) {
 	fastd_buffer_t *recv_buffer = NULL;
 	protocol_session_t *recv_session = NULL;
 	bool reordered = false;
+	uint8_t flags = 0;
 
 	fastd_buffer_zero_pad(buffer);
 
 	if (is_session_valid(&peer->protocol_state->old_session)) {
 		recv_buffer = peer->protocol_state->old_session.method->provider->decrypt(
-			peer->protocol_state->old_session.method_state, buffer, &reordered);
+			peer->protocol_state->old_session.method_state, buffer, &reordered, &flags);
 		if (recv_buffer)
 			recv_session = &peer->protocol_state->old_session;
 	}
 
 	if (!recv_buffer) {
 		recv_buffer = peer->protocol_state->session.method->provider->decrypt(
-			peer->protocol_state->session.method_state, buffer, &reordered);
+			peer->protocol_state->session.method_state, buffer, &reordered, &flags);
 		if (!recv_buffer) {
 			pr_debug2("verification failed for packet received from %P", peer);
 			goto fail;
@@ -155,6 +157,17 @@ static void protocol_handle_recv(fastd_peer_t *peer, fastd_buffer_t *buffer) {
 
 	fastd_peer_seen(peer);
 
+	if (flags & ~FASTD_METHOD_FLAG_CONTROL) {
+		pr_debug("ignoring packet with unknown method flags from %P", peer);
+		fastd_buffer_free(recv_buffer);
+		return;
+	}
+
+	if (flags & FASTD_METHOD_FLAG_CONTROL) {
+		fastd_discovery_handle_control(peer, recv_buffer);
+		return;
+	}
+
 	if (recv_buffer->len && recv_session->compression != COMPRESSION_NONE) {
 		recv_buffer = fastd_decompress_payload(recv_buffer, fastd_max_payload(fastd_peer_get_mtu(peer)));
 		if (!recv_buffer)
@@ -173,15 +186,19 @@ fail:
 }
 
 /** Encrypts and sends a packet to a peer using a specified session */
-static void session_send(fastd_peer_t *peer, fastd_buffer_t *buffer, protocol_session_t *session) {
-	size_t stat_size = buffer->len;
+static void session_send_flags(
+	fastd_peer_t *peer, fastd_buffer_t *buffer, protocol_session_t *session, uint8_t flags, size_t stat_size) {
+	if (flags && !(session->method->provider->flags & METHOD_SUPPORTS_CONTROL)) {
+		fastd_buffer_free(buffer);
+		return;
+	}
 
-	if (buffer->len && session->compression != COMPRESSION_NONE)
+	if (!flags && buffer->len && session->compression != COMPRESSION_NONE)
 		buffer = fastd_compress_payload(buffer);
 
 	fastd_buffer_zero_pad(buffer);
 
-	fastd_buffer_t *send_buffer = session->method->provider->encrypt(session->method_state, buffer);
+	fastd_buffer_t *send_buffer = session->method->provider->encrypt(session->method_state, buffer, flags);
 	if (!send_buffer) {
 		fastd_buffer_free(buffer);
 		pr_error("failed to encrypt packet for %P", peer);
@@ -193,6 +210,11 @@ static void session_send(fastd_peer_t *peer, fastd_buffer_t *buffer, protocol_se
 
 	if (!(session->method->provider->flags & METHOD_FORCE_KEEPALIVE))
 		fastd_peer_clear_keepalive(peer);
+}
+
+/** Encrypts and sends a packet to a peer using a specified session */
+static void session_send(fastd_peer_t *peer, fastd_buffer_t *buffer, protocol_session_t *session) {
+	session_send_flags(peer, buffer, session, 0, buffer->len);
 }
 
 /** Encrypts and sends a packet to a peer */
@@ -212,10 +234,74 @@ static void protocol_send(fastd_peer_t *peer, fastd_buffer_t *buffer) {
 	}
 }
 
+/** Sends an authenticated internal control packet to a peer */
+static void protocol_send_control(fastd_peer_t *peer, fastd_buffer_t *buffer) {
+	if (!peer->protocol_state || !fastd_peer_is_established(peer) || !check_session(peer)) {
+		fastd_buffer_free(buffer);
+		return;
+	}
+
+	session_send_flags(peer, buffer, &peer->protocol_state->session, FASTD_METHOD_FLAG_CONTROL, 0);
+}
+
 /** Sends an empty payload packet (i.e. keepalive) to a peer using a specified session */
 void fastd_protocol_ec25519_fhmqvc_send_empty(fastd_peer_t *peer, protocol_session_t *session) {
 	session_send(peer, fastd_buffer_alloc(0, alignto(session->method->provider->encrypt_headroom, 8)), session);
 }
+
+/** Returns the raw ec25519-fhmqvc public key length */
+static size_t protocol_key_length(void) {
+	return PUBLICKEYBYTES;
+}
+
+/** Returns our raw ec25519-fhmqvc public key */
+static const void *protocol_get_own_key(void) {
+	return conf.protocol_config->key.public.u8;
+}
+
+/** Returns a peer's raw ec25519-fhmqvc public key */
+static const void *protocol_get_peer_key(const fastd_peer_t *peer) {
+	return peer->key->key.u8;
+}
+
+/** Finds a peer by a raw ec25519-fhmqvc public key */
+static fastd_peer_t *protocol_find_peer_by_key_data(const void *key, size_t len) {
+	if (len != PUBLICKEYBYTES)
+		return NULL;
+
+	fastd_protocol_key_t peer_key;
+	memcpy(peer_key.key.u8, key, PUBLICKEYBYTES);
+	return fastd_protocol_ec25519_fhmqvc_find_peer(&peer_key);
+}
+
+#ifdef WITH_DYNAMIC_PEERS
+/** Adds a dynamic peer for a raw ec25519-fhmqvc public key */
+static fastd_peer_t *protocol_add_dynamic_peer_by_key_data(const void *key, size_t len) {
+	if (len != PUBLICKEYBYTES)
+		return NULL;
+
+	fastd_protocol_key_t peer_key;
+	memcpy(peer_key.key.u8, key, PUBLICKEYBYTES);
+
+	if (!ecc_25519_load_packed_legacy(&peer_key.unpacked, &peer_key.key.int256) ||
+	    ecc_25519_is_identity(&peer_key.unpacked))
+		return NULL;
+
+	fastd_peer_t *peer = fastd_new0(fastd_peer_t);
+	peer->group = conf.peer_group;
+	peer->config_state = CONFIG_DYNAMIC;
+	peer->floating = true;
+
+	peer->key = fastd_new(fastd_protocol_key_t);
+	*peer->key = peer_key;
+
+	if (!fastd_peer_add(peer))
+		return NULL;
+
+	fastd_peer_reset(peer);
+	return peer;
+}
+#endif
 
 /** get_current_method implementation for ec25519-fhmqvc */
 const fastd_method_info_t *protocol_get_current_method(const fastd_peer_t *peer) {
@@ -243,6 +329,7 @@ const fastd_protocol_t fastd_protocol_ec25519_fhmqvc = {
 
 	.handle_recv = protocol_handle_recv,
 	.send = protocol_send,
+	.send_control = protocol_send_control,
 
 	.init_peer_state = fastd_protocol_ec25519_fhmqvc_init_peer_state,
 	.reset_peer_state = fastd_protocol_ec25519_fhmqvc_reset_peer_state,
@@ -251,6 +338,13 @@ const fastd_protocol_t fastd_protocol_ec25519_fhmqvc = {
 	.read_key = protocol_read_key,
 	.check_peer = protocol_check_peer,
 	.find_peer = fastd_protocol_ec25519_fhmqvc_find_peer,
+	.key_length = protocol_key_length,
+	.get_own_key = protocol_get_own_key,
+	.get_peer_key = protocol_get_peer_key,
+	.find_peer_by_key_data = protocol_find_peer_by_key_data,
+#ifdef WITH_DYNAMIC_PEERS
+	.add_dynamic_peer_by_key_data = protocol_add_dynamic_peer_by_key_data,
+#endif
 
 	.get_current_method = protocol_get_current_method,
 

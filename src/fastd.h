@@ -89,6 +89,9 @@ struct fastd_protocol {
 	/** Sends a payload data packet to the given peer */
 	void (*send)(fastd_peer_t *peer, fastd_buffer_t *buffer);
 
+	/** Sends an authenticated internal control packet to the given peer */
+	void (*send_control)(fastd_peer_t *peer, fastd_buffer_t *buffer);
+
 
 	/** Initializes the protocol state for a peer */
 	void (*init_peer_state)(fastd_peer_t *peer);
@@ -108,6 +111,23 @@ struct fastd_protocol {
 
 	/** Searches a peer identified by a specific key */
 	fastd_peer_t *(*find_peer)(const fastd_protocol_key_t *key);
+
+	/** Returns the length of the protocol's public key representation */
+	size_t (*key_length)(void);
+
+	/** Returns this instance's protocol public key */
+	const void *(*get_own_key)(void);
+
+	/** Returns a peer's protocol public key */
+	const void *(*get_peer_key)(const fastd_peer_t *peer);
+
+	/** Searches a peer identified by a raw public key */
+	fastd_peer_t *(*find_peer_by_key_data)(const void *key, size_t len);
+
+#ifdef WITH_DYNAMIC_PEERS
+	/** Adds a dynamic peer identified by a raw public key */
+	fastd_peer_t *(*add_dynamic_peer_by_key_data)(const void *key, size_t len);
+#endif
 
 
 	/** Retrieves information about the currently used encyption/authentication method of a connection with a peer
@@ -260,7 +280,8 @@ struct fastd_config {
 #ifdef USE_PACKET_MARK
 	uint32_t packet_mark; /**< The configured packet mark (or 0) */
 #endif
-	bool forward; /**< Specifies if packet forwarding is enable */
+	bool forward;        /**< Specifies if packet forwarding is enable */
+	bool peer_discovery; /**< Enables relay-assisted endpoint discovery for direct peer connections */
 
 	fastd_drop_caps_t drop_caps; /**< Specifies if and when to drop capabilities */
 
@@ -394,9 +415,9 @@ struct fastd_context {
 	FILE *urandom;  /**< /dev/urandom FILE */
 	int ioctl_sock; /**< The global ioctl socket */
 
-	size_t n_socks;                     /**< The number of sockets in socks */
-	fastd_socket_t *socks;              /**< Array of all sockets */
-	VECTOR(fastd_socket_t *) tcp_socks; /**< Allocated TCP connection sockets */
+	size_t n_socks;                           /**< The number of sockets in socks */
+	fastd_socket_t *socks;                    /**< Array of all sockets */
+	VECTOR(fastd_socket_t *) tcp_socks;       /**< Allocated TCP connection sockets */
 	VECTOR(fastd_socket_t *) udp_punch_socks; /**< Allocated unclaimed UDP hole punching sockets */
 
 	fastd_socket_t *sock_default_v4; /**< Points to the socket that is used for new outgoing IPv4 connections */

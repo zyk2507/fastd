@@ -11,6 +11,7 @@
 */
 
 #include "peer.h"
+#include "discovery.h"
 #include "handshake.h"
 #include "hole_punch.h"
 #include "offload/offload.h"
@@ -21,6 +22,8 @@
 
 #include <arpa/inet.h>
 #include <sys/wait.h>
+
+#define FASTD_DIRECT_MAC_LIMIT 256
 
 
 /** Adds address and port of an fastd_peer_address_t to \e env */
@@ -514,6 +517,7 @@ void fastd_peer_free(fastd_peer_t *peer) {
 	}
 
 	VECTOR_FREE(peer->remotes);
+	VECTOR_FREE(peer->direct_macs);
 	fastd_turn_server_free(peer->turn_servers);
 
 	free(peer->ifname);
@@ -525,6 +529,8 @@ void fastd_peer_free(fastd_peer_t *peer) {
 static void delete_peer(fastd_peer_t *peer) {
 	if (fastd_peer_is_dynamic(peer) || peer->config_source_dir)
 		pr_verbose("deleting peer %P", peer);
+
+	fastd_discovery_peer_deleted(peer);
 
 	size_t i = peer_index(peer);
 	VECTOR_DELETE(ctx.peers, i);
@@ -583,8 +589,8 @@ static bool fastd_peer_address_ip_equal(const fastd_peer_address_t *addr1, const
 		if (!IN6_ARE_ADDR_EQUAL(&addr1->in6.sin6_addr, &addr2->in6.sin6_addr))
 			return false;
 
-		return !IN6_IS_ADDR_LINKLOCAL(&addr1->in6.sin6_addr)
-		       || addr1->in6.sin6_scope_id == addr2->in6.sin6_scope_id;
+		return !IN6_IS_ADDR_LINKLOCAL(&addr1->in6.sin6_addr) ||
+		       addr1->in6.sin6_scope_id == addr2->in6.sin6_scope_id;
 
 	default:
 		return false;
@@ -652,6 +658,22 @@ bool fastd_peer_matches_address(const fastd_peer_t *peer, const fastd_peer_addre
 	if (fastd_peer_is_floating(peer))
 		return true;
 
+	if (fastd_peer_has_direct_candidate(peer)) {
+		if (fastd_peer_address_equal(&peer->direct_remote, addr))
+			return true;
+
+		fastd_peer_transport_t transport = fastd_peer_get_transport(peer);
+		bool can_hole_punch = (fastd_peer_hole_punch_allows(peer, TRANSPORT_UDP) &&
+				       fastd_peer_transport_allows(transport, TRANSPORT_UDP)) ||
+				      (fastd_peer_hole_punch_allows(peer, TRANSPORT_TCP) &&
+				       fastd_peer_transport_allows(transport, TRANSPORT_TCP));
+
+		if (addr->sa.sa_family == AF_INET && can_hole_punch &&
+		    fastd_hole_punch_port_valid(ntohs(fastd_peer_address_get_port(addr)), time(NULL)) &&
+		    fastd_peer_address_ip_equal(&peer->direct_remote, addr))
+			return true;
+	}
+
 	size_t i, j;
 	for (i = 0; i < VECTOR_LEN(peer->remotes); i++) {
 		fastd_remote_t *remote = &VECTOR_INDEX(peer->remotes, i);
@@ -663,14 +685,13 @@ bool fastd_peer_matches_address(const fastd_peer_t *peer, const fastd_peer_addre
 	}
 
 	fastd_peer_transport_t transport = fastd_peer_get_transport(peer);
-	bool can_hole_punch =
-		(fastd_peer_hole_punch_allows(peer, TRANSPORT_UDP)
-		 && fastd_peer_transport_allows(transport, TRANSPORT_UDP))
-		|| (fastd_peer_hole_punch_allows(peer, TRANSPORT_TCP)
-		    && fastd_peer_transport_allows(transport, TRANSPORT_TCP));
+	bool can_hole_punch = (fastd_peer_hole_punch_allows(peer, TRANSPORT_UDP) &&
+			       fastd_peer_transport_allows(transport, TRANSPORT_UDP)) ||
+			      (fastd_peer_hole_punch_allows(peer, TRANSPORT_TCP) &&
+			       fastd_peer_transport_allows(transport, TRANSPORT_TCP));
 
-	if (addr->sa.sa_family == AF_INET && can_hole_punch
-	    && fastd_hole_punch_port_valid(ntohs(fastd_peer_address_get_port(addr)), time(NULL))) {
+	if (addr->sa.sa_family == AF_INET && can_hole_punch &&
+	    fastd_hole_punch_port_valid(ntohs(fastd_peer_address_get_port(addr)), time(NULL))) {
 		for (i = 0; i < VECTOR_LEN(peer->remotes); i++) {
 			fastd_remote_t *remote = &VECTOR_INDEX(peer->remotes, i);
 
@@ -682,6 +703,60 @@ bool fastd_peer_matches_address(const fastd_peer_t *peer, const fastd_peer_addre
 	}
 
 	return false;
+}
+
+/** Checks if a relay-discovered direct endpoint is currently usable */
+bool fastd_peer_has_direct_candidate(const fastd_peer_t *peer) {
+	return peer->direct_remote.sa.sa_family != AF_UNSPEC && !fastd_timed_out(peer->direct_remote_timeout);
+}
+
+/** Adds one relay-discovered MAC address to a direct peer */
+static void add_direct_mac(fastd_peer_t *peer, fastd_eth_addr_t mac) {
+	if (!fastd_eth_addr_is_unicast(mac))
+		return;
+
+	size_t i;
+	for (i = 0; i < VECTOR_LEN(peer->direct_macs); i++) {
+		if (!memcmp(&VECTOR_INDEX(peer->direct_macs, i), &mac, sizeof(mac)))
+			return;
+	}
+
+	if (VECTOR_LEN(peer->direct_macs) >= FASTD_DIRECT_MAC_LIMIT)
+		return;
+
+	VECTOR_ADD(peer->direct_macs, mac);
+}
+
+/** Adds or refreshes a relay-discovered direct endpoint for a peer */
+void fastd_peer_add_direct_candidate(
+	fastd_peer_t *peer, fastd_peer_t *relay, const fastd_peer_address_t *remote_addr, const fastd_eth_addr_t *macs,
+	size_t n_macs) {
+	if (!conf.peer_discovery)
+		return;
+
+	if (peer == relay || !fastd_peer_is_enabled(peer))
+		return;
+
+	if (remote_addr->sa.sa_family != AF_INET && remote_addr->sa.sa_family != AF_INET6)
+		return;
+
+	peer->direct_relay = relay;
+	peer->direct_remote = *remote_addr;
+	peer->direct_remote_timeout = ctx.now + PEER_STALE_TIME;
+
+	size_t i;
+	for (i = 0; i < n_macs; i++)
+		add_direct_mac(peer, macs[i]);
+
+	if (fastd_peer_is_established(peer)) {
+		for (i = 0; i < VECTOR_LEN(peer->direct_macs); i++)
+			fastd_peer_eth_addr_add(peer, VECTOR_INDEX(peer->direct_macs, i));
+
+		return;
+	}
+
+	fastd_peer_seen(peer);
+	fastd_peer_schedule_handshake(peer, 0);
 }
 
 /**
@@ -929,16 +1004,10 @@ static inline void no_valid_address_debug(const fastd_peer_t *peer) {
 	pr_debug("not sending a handshake to %P (no valid address resolved)", peer);
 }
 
-/** Sends a new handshake to the current address of the given remote of a peer */
-static void send_handshake(fastd_peer_t *peer, fastd_remote_t *next_remote) {
+/** Sends a new handshake to a specific peer address */
+static void send_handshake_address(fastd_peer_t *peer, const fastd_peer_address_t *addr) {
 	if (!fastd_peer_is_established(peer)) {
-		if (!next_remote->n_addresses) {
-			no_valid_address_debug(peer);
-			return;
-		}
-
-		fastd_peer_claim_address(
-			peer, NULL, NULL, &next_remote->addresses[next_remote->current_address], false);
+		fastd_peer_claim_address(peer, NULL, NULL, addr, false);
 		fastd_peer_reset_socket(peer);
 	}
 
@@ -959,6 +1028,20 @@ static void send_handshake(fastd_peer_t *peer, fastd_remote_t *next_remote) {
 	peer->last_handshake_timeout = ctx.now + MIN_HANDSHAKE_INTERVAL;
 	peer->last_handshake_address = peer->address;
 	conf.protocol->handshake_init(peer->sock, &peer->local_address, &peer->address, peer, FLAG_INITIAL);
+}
+
+/** Sends a new handshake to the current address of the given remote of a peer */
+static void send_handshake(fastd_peer_t *peer, fastd_remote_t *next_remote) {
+	if (!fastd_peer_is_established(peer)) {
+		if (!next_remote->n_addresses) {
+			no_valid_address_debug(peer);
+			return;
+		}
+
+		send_handshake_address(peer, &next_remote->addresses[next_remote->current_address]);
+	} else {
+		send_handshake_address(peer, &peer->address);
+	}
 }
 
 /** Marks a peer as established */
@@ -1013,6 +1096,7 @@ bool fastd_peer_set_established(fastd_peer_t *peer, const fastd_offload_t *offlo
 	schedule_peer_task(peer);
 
 	on_establish(peer);
+	fastd_discovery_peer_established(peer);
 	pr_info("connection with %P established.", peer);
 
 	return true;
@@ -1041,6 +1125,12 @@ void fastd_peer_eth_addr_add(fastd_peer_t *peer, fastd_eth_addr_t addr) {
 		int cmp = eth_addr_cmp(&addr, &VECTOR_INDEX(ctx.eth_addrs, cur).addr);
 
 		if (cmp == 0) {
+			fastd_peer_t *old_peer = VECTOR_INDEX(ctx.eth_addrs, cur).peer;
+			if (old_peer && old_peer->direct_relay == peer && fastd_peer_is_established(old_peer)) {
+				VECTOR_INDEX(ctx.eth_addrs, cur).timeout = ctx.now + ETH_ADDR_STALE_TIME;
+				return;
+			}
+
 			VECTOR_INDEX(ctx.eth_addrs, cur).peer = peer;
 			VECTOR_INDEX(ctx.eth_addrs, cur).timeout = ctx.now + ETH_ADDR_STALE_TIME;
 			return; /* We're done here. */
@@ -1086,6 +1176,14 @@ static void handle_task_handshake(fastd_peer_t *peer) {
 
 	fastd_remote_t *next_remote = fastd_peer_get_next_remote(peer);
 
+	if (!fastd_peer_is_established(peer) && fastd_peer_has_direct_candidate(peer)) {
+		send_handshake_address(peer, &peer->direct_remote);
+		peer->state = STATE_HANDSHAKE;
+
+		if (!next_remote)
+			return;
+	}
+
 	if (next_remote || fastd_peer_is_established(peer)) {
 		send_handshake(peer, next_remote);
 
@@ -1099,6 +1197,9 @@ static void handle_task_handshake(fastd_peer_t *peer) {
 
 		peer->next_remote++;
 	}
+
+	if (!VECTOR_LEN(peer->remotes))
+		return;
 
 	if (peer->next_remote < 0 || (size_t)peer->next_remote >= VECTOR_LEN(peer->remotes))
 		peer->next_remote = 0;

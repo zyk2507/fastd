@@ -12,6 +12,7 @@
 
 
 #include "compression.h"
+#include "discovery.h"
 #include "fastd.h"
 #include "handshake.h"
 #include "hash.h"
@@ -251,7 +252,9 @@ void fastd_receive_packet(
 		peer = sock->peer;
 	} else if (sock->hole_punch_peer) {
 		if (!fastd_peer_address_equal(&sock->peer_addr, remote_addr)) {
-			pr_debug2("ignoring packet from %I on hole punching socket of %P", remote_addr, sock->hole_punch_peer);
+			pr_debug2(
+				"ignoring packet from %I on hole punching socket of %P", remote_addr,
+				sock->hole_punch_peer);
 			fastd_buffer_free(buffer);
 			return;
 		}
@@ -295,12 +298,14 @@ void fastd_receive_packet(
 		}
 
 		if (peer && fastd_peer_is_established(peer)) {
-			pr_debug("ignoring payload data from %P[%I] on inactive address or transport", peer, remote_addr);
+			pr_debug(
+				"ignoring payload data from %P[%I] on inactive address or transport", peer,
+				remote_addr);
 			goto end_free;
 		}
 	}
 
-	if (!peer && !allow_unknown_peers()) {
+	if (!peer && !allow_unknown_peers() && !(conf.peer_discovery && is_handshake_packet(packet_type))) {
 		pr_debug("received packet from unknown address %I", remote_addr);
 		goto end_free;
 	}
@@ -395,8 +400,10 @@ void fastd_handle_receive(fastd_peer_t *peer, fastd_buffer_t *buffer, bool reord
 
 		fastd_eth_addr_t src_addr = fastd_buffer_source_address(buffer);
 
-		if (fastd_eth_addr_is_unicast(src_addr))
+		if (fastd_eth_addr_is_unicast(src_addr)) {
 			fastd_peer_eth_addr_add(peer, src_addr);
+			fastd_discovery_maybe_announce(peer, src_addr);
+		}
 	}
 
 	fastd_stats_add(peer, STAT_RX, buffer->len);

@@ -23,7 +23,10 @@ struct fastd_method_info {
 	fastd_method_t *method;                  /**< Provider-specific method data */
 };
 
-#define METHOD_FORCE_KEEPALIVE 0x01 /**< Send keepalives even in the presence of regular data transmissions */
+#define METHOD_FORCE_KEEPALIVE 0x01  /**< Send keepalives even in the presence of regular data transmissions */
+#define METHOD_SUPPORTS_CONTROL 0x02 /**< The method can carry authenticated fastd control payloads */
+
+#define FASTD_METHOD_FLAG_CONTROL 0x01 /**< This encrypted packet carries a fastd control payload */
 
 /** Describes a method provider (an implementation of a class of encryption methods) */
 struct fastd_method_provider {
@@ -60,9 +63,10 @@ struct fastd_method_provider {
 	void (*session_superseded)(fastd_method_session_state_t *session);
 
 	/** Encrypts a packet for a given session, adding method-specific headers */
-	fastd_buffer_t *(*encrypt)(fastd_method_session_state_t *session, fastd_buffer_t *in);
+	fastd_buffer_t *(*encrypt)(fastd_method_session_state_t *session, fastd_buffer_t *in, uint8_t flags);
 	/** Decrypts a packet for a given session, stripping method-specific headers */
-	fastd_buffer_t *(*decrypt)(fastd_method_session_state_t *session, fastd_buffer_t *in, bool *reordered);
+	fastd_buffer_t *(*decrypt)(
+		fastd_method_session_state_t *session, fastd_buffer_t *in, bool *reordered, uint8_t *flags);
 };
 
 

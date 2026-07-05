@@ -114,7 +114,7 @@ static void method_session_free(fastd_method_session_state_t *session) {
 
 
 /** Encrypts a packet and adds the common method header */
-static fastd_buffer_t *method_encrypt(fastd_method_session_state_t *session, fastd_buffer_t *in) {
+static fastd_buffer_t *method_encrypt(fastd_method_session_state_t *session, fastd_buffer_t *in, uint8_t flags) {
 	fastd_buffer_t *out = fastd_buffer_alloc(in->len, COMMON_HEADROOM);
 
 	uint8_t nonce[session->method->cipher_info->iv_length ?: 1] __attribute__((aligned(8)));
@@ -131,7 +131,7 @@ static fastd_buffer_t *method_encrypt(fastd_method_session_state_t *session, fas
 
 	fastd_buffer_free(in);
 
-	fastd_method_put_common_header(&session->common, out, 0);
+	fastd_method_put_common_header(&session->common, out, flags);
 
 	return out;
 
@@ -141,7 +141,8 @@ fail:
 }
 
 /** Decrypts a packet */
-static fastd_buffer_t *method_decrypt(fastd_method_session_state_t *session, fastd_buffer_t *in, bool *reordered) {
+static fastd_buffer_t *
+method_decrypt(fastd_method_session_state_t *session, fastd_buffer_t *in, bool *reordered, uint8_t *out_flags) {
 	if (in->len < COMMON_HEADBYTES)
 		return NULL;
 
@@ -156,8 +157,7 @@ static fastd_buffer_t *method_decrypt(fastd_method_session_state_t *session, fas
 	if (!fastd_method_handle_common_header(&session->common, &in_view, in_nonce, &flags, &age))
 		return NULL;
 
-	if (flags)
-		return NULL;
+	*out_flags = flags;
 
 	uint8_t nonce[session->method->cipher_info->iv_length ?: 1] __attribute__((aligned(8)));
 	fastd_method_expand_nonce(nonce, in_nonce, sizeof(nonce));
@@ -191,6 +191,8 @@ fail:
 
 /** The cipher-test method provider */
 const fastd_method_provider_t fastd_method_cipher_test = {
+	.flags = METHOD_SUPPORTS_CONTROL,
+
 	.overhead = COMMON_HEADBYTES,
 	.encrypt_headroom = 0,
 	.decrypt_headroom = 0,

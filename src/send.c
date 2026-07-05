@@ -218,6 +218,9 @@ static inline bool send_data_tap_single(fastd_buffer_t *buffer, fastd_peer_t *so
 		return true;
 	}
 
+	if (!fastd_peer_is_established(dest) && dest->direct_relay && fastd_peer_is_established(dest->direct_relay))
+		dest = dest->direct_relay;
+
 	conf.protocol->send(dest, buffer);
 	return true;
 }

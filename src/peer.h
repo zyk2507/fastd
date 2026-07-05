@@ -80,6 +80,12 @@ struct fastd_peer {
 	fastd_peer_transport_t transport_probe; /**< Transport currently probed for automatic transport mode */
 	fastd_timeout_t turn_fallback_timeout;  /**< Timeout before automatic TURN fallback is used */
 
+	fastd_peer_t *direct_relay;              /**< Relay peer used while a discovered direct path is unavailable */
+	fastd_peer_address_t direct_remote;      /**< Relay-discovered direct peer endpoint */
+	fastd_timeout_t direct_remote_timeout;   /**< Timeout for the discovered direct endpoint */
+	fastd_timeout_t next_discovery_announce; /**< Rate limit for relay endpoint announcements */
+	VECTOR(fastd_eth_addr_t) direct_macs;    /**< MAC addresses that should prefer this direct peer */
+
 	fastd_peer_state_t state; /**< The peer's state */
 
 	fastd_task_t task; /**< Task queue entry for periodic maintenance tasks */
@@ -159,6 +165,10 @@ void fastd_peer_exec_shell_command(
 
 void fastd_peer_eth_addr_add(fastd_peer_t *peer, fastd_eth_addr_t addr);
 bool fastd_peer_find_by_eth_addr(const fastd_eth_addr_t addr, fastd_peer_t **peer);
+void fastd_peer_add_direct_candidate(
+	fastd_peer_t *peer, fastd_peer_t *relay, const fastd_peer_address_t *remote_addr, const fastd_eth_addr_t *macs,
+	size_t n_macs);
+bool fastd_peer_has_direct_candidate(const fastd_peer_t *peer);
 
 void fastd_peer_handle_task(fastd_task_t *task);
 void fastd_peer_eth_addr_cleanup(void);
