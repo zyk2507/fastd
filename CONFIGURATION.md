@@ -1,0 +1,478 @@
+# fastd 配置说明
+
+本文根据 `src/config.y`、`src/config.c` 和相关源码整理，覆盖 fastd 配置文件支持的指令。命令行选项不是本文重点；很多命令行选项只是配置文件指令的等价入口。
+
+## 基本语法
+
+- 每条指令以分号 `;` 结束。
+- 字符串使用双引号，例如 `"mesh0"`。
+- 布尔值只接受 `yes` 或 `no`。
+- 端口范围通常是 `1..65535`；`bind` 的端口允许 `0`，表示启动时选择一个固定随机端口。
+- 地址可写为 `192.0.2.1:10000`、`192.0.2.1 port 10000`、`[2001:db8::1]:10000`、`[fe80::1%eth0]:10000`。
+- `include` 的相对路径按包含它的配置文件所在目录解析。
+- peer 文件使用 peer 内部语法，不需要外层 `peer "name" { ... }`。
+
+## 默认值
+
+| 项目 | 默认值 |
+| --- | --- |
+| `mode` | `tap` |
+| `mtu` | `1500` |
+| `persist interface` | `yes` |
+| `drop capabilities` | `yes` |
+| `protocol` | `ec25519-fhmqvc` |
+| `compression` | `none` |
+| `compression zstd level` | `3` |
+| `transport` | `udp` |
+| `port-mapping` | `off` |
+| `hole-punch` | `off` |
+| `turn relay` | `no` |
+| `peer limit` | unlimited |
+| `method` | 未配置时回退到 `null` 并打印警告 |
+
+## 最小示例
+
+本机 `fastd.conf`：
+
+```conf
+log level info;
+interface "fastd0";
+bind 0.0.0.0:10000 default ipv4;
+
+method "salsa2012+umac";
+secret "本机私钥";
+
+peer "site-b" {
+	key "对端公钥";
+	remote 203.0.113.20:10000;
+}
+```
+
+只把 peer 放在单独目录：
+
+```conf
+interface "fastd0";
+bind any:10000;
+method "salsa2012+umac";
+secret "本机私钥";
+
+include peers from "peers";
+```
+
+`peers/site-b`：
+
+```conf
+key "对端公钥";
+remote "site-b.example.net" port 10000;
+```
+
+## 作用域
+
+fastd 配置有三个主要作用域：
+
+- 主配置：顶层配置文件。
+- peer group：`peer group "name" { ... }` 内。
+- peer：`peer "name" { ... }` 内，或者 `include peer` / `include peers from` 读取的 peer 文件。
+
+继承规则：
+
+- `method`、hook、`transport`、`port-mapping`、`hole-punch`、`turn relay`、`turn server` 等可在 peer group 中配置。
+- peer 可覆盖自己的 `transport`、`port-mapping`、`hole-punch`、`turn relay`、`turn server` 等。
+- peer group 可嵌套，子 group 继承父 group 未覆盖的设置。
+
+## 主配置指令
+
+主配置可以使用所有 peer group 指令，另外支持以下全局指令。
+
+### 身份与权限
+
+```conf
+user "<user>";
+group "<group>";
+drop capabilities yes|no|early|force;
+```
+
+- `user` / `group`：切换 fastd 运行用户和组。
+- `drop capabilities yes`：默认行为，运行 `on up` 后丢弃不再需要的 capabilities。
+- `drop capabilities no`：不丢弃 capabilities。
+- `drop capabilities early`：在运行 `on up` 前丢弃 capabilities。
+- `drop capabilities force`：强制丢弃更多 capabilities，适合已预先准备持久 TUN/TAP 接口的场景。
+
+### 加密、认证和压缩
+
+```conf
+protocol "ec25519-fhmqvc";
+secret "<secret-key>";
+method "<method>";
+cipher "<cipher>" use "<implementation>";
+mac "<mac>" use "<implementation>";
+compression no|none;
+compression zstd [level <1-22>];
+compression "<algorithm>" [level <1-22>];
+secure handshakes yes|no;
+```
+
+- `protocol`：目前源码只支持 `ec25519-fhmqvc`。
+- `secret`：本机私钥，通常由 `fastd --generate-key` 生成。
+- `method`：配置可协商的数据加密/认证方法。可写多条，越靠前优先级越高。
+- `cipher` / `mac`：强制选择某个 cipher/MAC 的实现，通常不需要手动设置。
+- `compression none` 或 `compression no`：关闭压缩。
+- `compression zstd level <n>`：启用 zstd，等级 `1..22`，默认 `3`。
+- `secure handshakes`：兼容旧配置的废弃指令；不安全握手已经不再支持。
+
+常见 method 形式：
+
+| method | 说明 |
+| --- | --- |
+| `salsa2012+umac` | 常用加密认证组合 |
+| `salsa20+umac` | Salsa20 + UMAC |
+| `aes128-gcm` | AES128-CTR + GMAC 的简写 |
+| `null` | 不加密不认证，仅用于测试或受信网络 |
+| `null@l2tp` | L2TPv3 格式，常与 L2TP offload 配合 |
+| `<cipher>+poly1305` | stream cipher + Poly1305 |
+| `<cipher>+<cipher>+umac` | 分离数据加密和认证 tag 加密 |
+| `<cipher>+<cipher>+gmac` | 分离数据加密和 GMAC tag 加密 |
+
+可用 cipher 名称取决于编译选项，源码包含 `aes128-ctr`、`salsa20`、`salsa2012`、`null`。可用 MAC 名称包含 `ghash`、`uhash`。
+
+### 日志
+
+```conf
+log level fatal|error|warn|info|verbose|debug|debug2;
+log to stderr [level fatal|error|warn|info|verbose|debug|debug2];
+log to syslog [level fatal|error|warn|info|verbose|debug|debug2];
+log to syslog as "<ident>" [level fatal|error|warn|info|verbose|debug|debug2];
+hide ip addresses yes|no;
+hide mac addresses yes|no;
+```
+
+- `log level`：设置默认日志级别。
+- `log to stderr`：启用或调整 stderr 日志。
+- `log to syslog`：启用或调整 syslog 日志。
+- `hide ip addresses` / `hide mac addresses`：日志中隐藏 IP 或 MAC 地址。
+
+### 接口、绑定地址和包标记
+
+```conf
+interface "<name>";
+bind <IPv4>[:<port>] [interface "<ifname>"] [default [ipv4]];
+bind <IPv6>[:<port>] [interface "<ifname>"] [default [ipv6]];
+bind any[:<port>] [interface "<ifname>"] [default [ipv4|ipv6]];
+bind <IPv4> port <port> [interface "<ifname>"] [default [ipv4]];
+bind <IPv6> port <port> [interface "<ifname>"] [default [ipv6]];
+bind any port <port> [interface "<ifname>"] [default [ipv4|ipv6]];
+packet mark <mark>;
+mtu <576-65535>;
+pmtu yes|no|auto;
+mode tap|multitap|tun;
+persist interface yes|no;
+offload l2tp yes|no;
+forward yes|no;
+```
+
+- `interface`：设置 TUN/TAP 接口名。名称不能包含 `/`。可使用 `%n`（peer 名称）或 `%k`（peer key 前 16 位）为多接口模式生成唯一名称。
+- `bind`：绑定本地监听地址。省略端口表示每次 outgoing 连接用动态随机 socket；端口 `0` 表示启动后固定随机端口。
+- `default ipv4|ipv6`：指定该 bind 地址作为对应地址族的默认 outgoing bind。
+- `packet mark`：Linux 上给 fastd 发出的包设置 mark，可配合策略路由；数字可用十进制、`0x` 十六进制或 `0` 前缀八进制。
+- `mtu`：设置 MTU，范围 `576..65535`。
+- `pmtu`：兼容旧配置的占位指令，源码中不产生实际效果。
+- `mode tap`：所有 peer 共用一个 TAP 接口。
+- `mode multitap`：每个 peer 一个 TAP 接口。
+- `mode tun`：TUN 模式。
+- `persist interface no`：仅在有活跃 session 时创建 peer 专属接口；TAP 模式无实际影响。
+- `offload l2tp yes`：启用 Linux L2TP offload。要求 `mode multitap`、`persist interface no`，且不能与 payload compression 同时使用。
+- `forward yes`：允许 peer 间转发，注意避免环路。
+
+### 状态 socket
+
+```conf
+status socket "<unix-socket-path>";
+```
+
+启用 UNIX status socket。查询方式：
+
+```sh
+fastd --config fastd.conf --status
+fastd --config fastd.conf --status --json
+fastd --status-socket /run/fastd.sock --status
+```
+
+普通 `--status` 输出人类可读状态；加 `--json` 输出原始 JSON。
+
+### 全局生命周期 hook
+
+```conf
+on pre-up "<command>";
+on post-down "<command>";
+```
+
+- `on pre-up`：创建接口前执行。
+- `on post-down`：销毁接口后执行。
+- 这两个 hook 在源码中固定同步执行，不支持 `sync|async` 关键字。
+
+## Peer group 指令
+
+这些指令可写在主配置顶层或 `peer group "name" { ... }` 中。
+
+### 结构和包含
+
+```conf
+peer "name" {
+	# peer 配置
+}
+
+peer group "name" {
+	# peer group 配置
+}
+
+peer limit <limit>;
+
+include "<file>";
+include peer "<file>" [as "<name>"];
+include peers from "<dir>";
+```
+
+- `peer`：内联定义一个 peer。
+- `peer group`：创建子 group，子 group 继承父 group 的配置。
+- `peer limit`：限制当前 group 同时连接数量。
+- `include "<file>"`：包含普通配置文件。
+- `include peer "<file>" [as "<name>"]`：包含一个 peer 文件。
+- `include peers from "<dir>"`：把目录下每个普通文件作为 peer 文件读取，忽略点文件和 `~` 结尾备份文件；收到 SIGHUP 时会重新加载。
+
+### 传输、端口映射、打洞和 TURN
+
+```conf
+transport udp|tcp|auto;
+
+port-mapping off|nat-pmp|upnp-igd|auto;
+nat-pmp yes|no;
+
+hole-punch off|tcp|udp|auto;
+
+turn relay yes|no;
+turn server "<address>":<port>;
+turn server "<address>" port <port>;
+turn server "<address>":<port> user "<username>" password "<password>";
+turn server "<address>" port <port> user "<username>" password "<password>";
+```
+
+- `transport udp`：默认 UDP 数据传输。
+- `transport tcp`：通过 TCP stream 传输 fastd packet。
+- `transport auto`：先探测 TCP，失败后回退 UDP。握手中会校验双方实际 transport 一致。
+- `port-mapping`：自动映射固定 IPv4 UDP bind 端口。
+- `nat-pmp yes|no`：兼容别名，等价于 `port-mapping nat-pmp|off`。
+- `hole-punch tcp|udp|auto`：启用确定性 IPv4 打洞；默认关闭。
+- `turn relay yes`：使用外部 TURN server 进行 UDP relay；需要编译时启用 libnice。
+- `turn server`：可配置多条；peer 自己配置 server 后使用 peer 的列表，不再继承 group 列表。
+
+NAT traversal 示例：
+
+```conf
+bind 0.0.0.0:10000 default ipv4;
+transport auto;
+port-mapping auto;
+hole-punch auto;
+
+turn relay yes;
+turn server "turn.example.net" port 3478 user "fastd" password "secret";
+```
+
+### 方法和 hook
+
+```conf
+method "<method>";
+
+on up [sync|async] "<command>";
+on down [sync|async] "<command>";
+on connect [sync|async] "<command>";
+on establish [sync|async] "<command>";
+on disestablish [sync|async] "<command>";
+on verify [sync|async] "<command>";
+```
+
+- `method`：为当前 group 配置协商方法。
+- `on up`：接口创建后执行。
+- `on down`：接口销毁前执行。
+- `on connect`：发送握手准备连接时执行。
+- `on establish`：session 建立后执行。
+- `on disestablish`：session 断开后执行。
+- `on verify`：未知 peer 尝试连接时执行；返回 `0` 接受，否则拒绝。未知 peer 会加入定义该 hook 的 group。
+- 这些 hook 的 `sync|async` 可省略；未写时命令本身按 `async` 保存。部分接口创建/销毁路径会为了保证顺序而同步等待。
+
+hook 环境变量：
+
+| 变量 | 说明 |
+| --- | --- |
+| `FASTD_PID` | 所有 hook 都有，表示 fastd 主进程 PID |
+| `INTERFACE` | 接口相关 hook 有，表示接口名 |
+| `INTERFACE_MTU` | 接口相关 hook 有，表示接口 MTU |
+| `LOCAL_KEY` | peer 相关 hook 有，表示本机公钥 |
+| `PEER_KEY` | peer 相关 hook 有，表示 peer 公钥 |
+| `PEER_NAME` | peer 相关 hook 有，表示 peer 名称 |
+| `LOCAL_ADDRESS` / `LOCAL_PORT` | `on connect`、`on establish`、`on disestablish`、`on verify` 有，表示本地地址和端口 |
+| `PEER_ADDRESS` / `PEER_PORT` | `on connect`、`on establish`、`on disestablish`、`on verify` 有，表示对端地址和端口 |
+
+`on pre-up` 和 `on post-down` 不带额外环境变量。TAP 单接口模式下的全局 `on up` / `on down` 只带接口变量；peer 专属接口路径会带 peer 变量。
+
+## Peer 指令
+
+peer 块和 peer 文件支持以下指令。
+
+### 地址、密钥和浮动 peer
+
+```conf
+key "<public-key>";
+remote <IPv4>:<port>;
+remote <IPv6>:<port>;
+remote [ipv4|ipv6] "<hostname>":<port>;
+remote <IPv4> port <port>;
+remote <IPv6> port <port>;
+remote [ipv4|ipv6] "<hostname>" port <port>;
+float yes|no;
+include "<file>";
+```
+
+- `key`：peer 公钥，必填。
+- `remote`：主动连接的对端地址，可配置多条。hostname 前可加 `ipv4` 或 `ipv6` 限制解析地址族。
+- 未配置 `remote` 的 peer 总是 floating，只接受入站连接，不主动连接。
+- `float yes`：允许该 peer 从任意地址/端口建立连接。
+- `float no`：只接受配置的 `remote` 地址/端口。
+- `include`：在当前 peer 配置中包含另一个文件。
+
+### Peer 覆盖项
+
+```conf
+interface "<name>";
+mtu <576-65535>;
+
+transport udp|tcp|auto;
+
+port-mapping off|nat-pmp|upnp-igd|auto;
+nat-pmp yes|no;
+
+hole-punch off|tcp|udp|auto;
+
+turn relay yes|no;
+turn server "<address>":<port>;
+turn server "<address>" port <port>;
+turn server "<address>":<port> user "<username>" password "<password>";
+turn server "<address>" port <port> user "<username>" password "<password>";
+```
+
+- `interface`：peer 专属接口名；TAP 模式下无效果。
+- `mtu`：peer 专属 MTU；TAP 模式下无效果。
+- `transport`、`port-mapping`、`hole-punch`、`turn relay`、`turn server`：覆盖继承自 group 的值。
+
+peer 示例：
+
+```conf
+peer "branch-a" {
+	key "分支A公钥";
+	remote ipv4 "branch-a.example.net" port 10000;
+	float no;
+
+	transport auto;
+	hole-punch auto;
+	turn relay yes;
+}
+```
+
+## 常见完整示例
+
+### 1. 普通 UDP mesh 节点
+
+```conf
+log level info;
+interface "fastd0";
+bind any:10000 default;
+
+method "salsa2012+umac";
+secret "本机私钥";
+
+include peers from "peers";
+```
+
+### 2. 启用 NAT-PMP/UPnP、打洞和 TURN fallback
+
+```conf
+log level info;
+interface "fastd0";
+bind 0.0.0.0:10000 default ipv4;
+
+method "salsa2012+umac";
+secret "本机私钥";
+
+transport auto;
+port-mapping auto;
+hole-punch auto;
+
+turn relay yes;
+turn server "turn.example.net" port 3478 user "fastd" password "secret";
+
+peer "site-b" {
+	key "对端公钥";
+	remote "site-b.example.net" port 10000;
+}
+```
+
+### 3. 使用 peer group 给不同 peer 设置不同策略
+
+```conf
+interface "fastd0";
+bind any:10000;
+method "salsa2012+umac";
+secret "本机私钥";
+
+peer group "direct" {
+	transport udp;
+	hole-punch off;
+
+	peer "lan-peer" {
+		key "对端公钥";
+		remote 192.0.2.10:10000;
+	}
+}
+
+peer group "nat" {
+	transport auto;
+	port-mapping auto;
+	hole-punch auto;
+
+	turn relay yes;
+	turn server "turn.example.net" port 3478 user "fastd" password "secret";
+
+	include peers from "nat-peers";
+}
+```
+
+### 4. L2TP offload 示例
+
+```conf
+mode multitap;
+persist interface no;
+offload l2tp yes;
+
+bind 0.0.0.0:10000;
+method "null@l2tp";
+secret "本机私钥";
+
+peer "site-b" {
+	key "对端公钥";
+	remote 203.0.113.20:10000;
+	interface "fastd-site-b";
+}
+```
+
+注意：L2TP offload 要求 Linux L2TP 支持、编译时启用 `offload_l2tp`，且不能启用 payload compression。
+
+## 验证配置
+
+```sh
+build/src/fastd --verify-config --config fastd.conf
+```
+
+如果已安装到系统：
+
+```sh
+fastd --verify-config --config /etc/fastd/mesh/fastd.conf
+```

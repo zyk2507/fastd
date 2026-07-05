@@ -10,5 +10,7 @@ Linux distributions.
 
 For build instructions, see [BUILDING.md](BUILDING.md).
 
+For configuration file syntax, see [CONFIGURATION.md](CONFIGURATION.md).
+
 For more information, see the [documentation](https://fastd.readthedocs.io/) and
 the [project wiki](https://github.com/neocturne/fastd/wiki).
