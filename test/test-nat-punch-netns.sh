@@ -87,6 +87,10 @@ ping_direct() {
 	ip netns exec "$NS_A" ping -I fda-b -n -c 1 -W 1 10.52.10.2 >> "$WORK/a.ping" 2>&1
 }
 
+ping_public_nat() {
+	ip netns exec "$NS_C" ping -I fdc-a -n -c 1 -W 1 10.52.20.2 >> "$WORK/c.ping" 2>&1
+}
+
 check_fastds_alive() {
 	local pid
 	for pid in "${PIDS[@]}"; do
@@ -269,6 +273,7 @@ start_fastds() {
 	: > "$WORK/b.log"
 	: > "$WORK/c.log"
 	: > "$WORK/a.ping"
+	: > "$WORK/c.ping"
 
 	ip netns exec "$NS_C" "$FASTD" --config "$WORK/c.conf" --log-level verbose > "$WORK/c.log" 2>&1 &
 	PID_C=$!
@@ -312,7 +317,7 @@ wait_for_direct_path() {
 	return 1
 }
 
-printf '1..2\n'
+printf '1..3\n'
 
 CURRENT_TEST=1
 write_c_conf no
@@ -329,6 +334,30 @@ if ! wait_for_direct_path; then
 	fail 'direct UDP path was not established'
 fi
 
+run ip -n "$NS_C" addr add 10.52.20.1/30 dev fdc-a
+run ip -n "$NS_A" addr add 10.52.20.2/30 dev fda-c
+run ip -n "$NS_C" link set fdc-a up
+run ip -n "$NS_A" link set fda-c up
+ip -n "$NS_C" addr show dev fdc-a > "$WORK/c.ip" 2>&1 || true
+ip -n "$NS_A" addr show dev fda-c >> "$WORK/a.ip" 2>&1 || true
+
+ok=false
+for _ in $(seq 1 5); do
+	if ping_public_nat; then
+		ok=true
+		break
+	fi
+	sleep 0.5
+done
+
+if [[ "$ok" != true ]]; then
+	dump_statuses
+	fail 'public C to NAT A data path failed'
+fi
+
+printf 'ok 2 - public node exchanges data with a NAT peer\n'
+
+CURRENT_TEST=3
 run ip -n "$NS_A" addr add 10.52.10.1/30 dev fda-b
 run ip -n "$NS_B" addr add 10.52.10.2/30 dev fdb-a
 run ip -n "$NS_A" link set fda-b up
@@ -358,4 +387,4 @@ if [[ "$ok" != true ]]; then
 	fail 'direct A/B data path failed after control relay was stopped'
 fi
 
-printf 'ok 2 - control relay establishes direct UDP path through full-cone mappings\n'
+printf 'ok 3 - control relay establishes direct UDP path through full-cone mappings\n'
