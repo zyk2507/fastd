@@ -49,6 +49,9 @@ static inline int task_timeout(void) {
 /** Handles a file descriptor that was selected on */
 static inline void handle_fd(fastd_poll_fd_t *fd, bool input, bool output, bool error) {
 	switch (fd->type) {
+	case POLL_TYPE_UNSPEC:
+		return;
+
 	case POLL_TYPE_ASYNC:
 		if (input)
 			fastd_async_handle();
@@ -164,14 +167,18 @@ void fastd_poll_handle(void) {
 
 	fastd_update_time();
 
-	if (ret < 0)
+	if (ret < 0) {
+		fastd_socket_free_deferred();
 		return;
+	}
 
 	size_t i;
 	for (i = 0; i < (size_t)ret; i++)
 		handle_fd(
 			events[i].data.ptr, events[i].events & EPOLLIN, events[i].events & EPOLLOUT,
 			events[i].events & (EPOLLERR | EPOLLHUP));
+
+	fastd_socket_free_deferred();
 }
 
 #else
@@ -307,8 +314,10 @@ void fastd_poll_handle(void) {
 	pthread_sigmask(SIG_SETMASK, &oldset, NULL);
 	fastd_update_time();
 
-	if (ret <= 0)
+	if (ret <= 0) {
+		fastd_socket_free_deferred();
 		return;
+	}
 
 	for (i = 0; i < VECTOR_LEN(ctx.pollfds) && ret > 0; i++) {
 		struct pollfd *pollfd = &VECTOR_INDEX(ctx.pollfds, i);
@@ -316,10 +325,15 @@ void fastd_poll_handle(void) {
 		if (pollfd->revents)
 			ret--;
 
-		handle_fd(
-			VECTOR_INDEX(ctx.fds, pollfd->fd), pollfd->revents & POLLIN, pollfd->revents & POLLOUT,
-			pollfd->revents & (POLLERR | POLLHUP | POLLNVAL));
+		fastd_poll_fd_t *fd = VECTOR_INDEX(ctx.fds, pollfd->fd);
+		if (fd) {
+			handle_fd(
+				fd, pollfd->revents & POLLIN, pollfd->revents & POLLOUT,
+				pollfd->revents & (POLLERR | POLLHUP | POLLNVAL));
+		}
 	}
+
+	fastd_socket_free_deferred();
 }
 
 #endif

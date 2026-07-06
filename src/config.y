@@ -54,6 +54,7 @@
 %token TOK_CIPHER
 %token TOK_COMPRESSION
 %token TOK_CONNECT
+%token TOK_CONTROL
 %token TOK_DEBUG
 %token TOK_DEBUG2
 %token TOK_DEFAULT
@@ -71,6 +72,7 @@
 %token TOK_FROM
 %token TOK_GROUP
 %token TOK_HANDSHAKES
+%token TOK_HARD_SYMMETRIC
 %token TOK_HIDE
 %token TOK_HOLE_PUNCH
 %token TOK_ID
@@ -87,6 +89,7 @@
 %token TOK_LOG
 %token TOK_MAC
 %token TOK_MARK
+%token TOK_MAX
 %token TOK_METHOD
 %token TOK_MODE
 %token TOK_MTU
@@ -98,6 +101,7 @@
 %token TOK_OFFLOAD
 %token TOK_ON
 %token TOK_PACKET
+%token TOK_PACKETS
 %token TOK_PASSWORD
 %token TOK_PEER
 %token TOK_PEERS
@@ -108,6 +112,7 @@
 %token TOK_POST_DOWN
 %token TOK_PRE_UP
 %token TOK_PROTOCOL
+%token TOK_PUNCH
 %token TOK_REALM
 %token TOK_RELAY
 %token TOK_REMOTE
@@ -115,10 +120,12 @@
 %token TOK_SECURE
 %token TOK_SERVER
 %token TOK_SOCKET
+%token TOK_SOCKETS
 %token TOK_STATUS
 %token TOK_STDERR
 %token TOK_STUN
 %token TOK_SYNC
+%token TOK_SYMMETRIC
 %token TOK_SYSLOG
 %token TOK_TAP
 %token TOK_TO
@@ -220,6 +227,37 @@ statement:	peer_group_statement
 	|	TOK_FORWARD forward ';'
 	|	TOK_PEER TOK_DISCOVERY peer_discovery ';'
 	|	TOK_REALM TOK_SERVER realm_server ';'
+	|	TOK_STUN TOK_SERVER stun_server ';'
+	|	TOK_PUNCH TOK_CONTROL TOK_RELAY boolean ';' {
+			conf.punch_control_relay = $4;
+		}
+	|	TOK_PUNCH TOK_SYMMETRIC boolean ';' {
+			conf.punch_symmetric = $3;
+		}
+	|	TOK_PUNCH TOK_HARD_SYMMETRIC boolean ';' {
+			conf.punch_hard_symmetric = $3;
+		}
+	|	TOK_PUNCH TOK_MAX TOK_SOCKETS TOK_UINT ';' {
+			if (!$4 || $4 > 256) {
+				fastd_config_error(&@$, state, "invalid punch socket limit");
+				YYERROR;
+			}
+			conf.punch_max_sockets = $4;
+		}
+	|	TOK_PUNCH TOK_MAX TOK_PACKET TOK_UINT ';' {
+			if (!$4 || $4 > 4096) {
+				fastd_config_error(&@$, state, "invalid punch packet limit");
+				YYERROR;
+			}
+			conf.punch_max_packets = $4;
+		}
+	|	TOK_PUNCH TOK_MAX TOK_PACKETS TOK_UINT ';' {
+			if (!$4 || $4 > 4096) {
+				fastd_config_error(&@$, state, "invalid punch packet limit");
+				YYERROR;
+			}
+			conf.punch_max_packets = $4;
+		}
 	;
 
 peer_group_statement:
@@ -573,6 +611,11 @@ maybe_stun_server:
 		}
 	|	{
 			$$ = false;
+		}
+	;
+
+stun_server:	TOK_STRING port {
+			fastd_nat_add_stun_server($1->str, $2);
 		}
 	;
 

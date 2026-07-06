@@ -24,7 +24,13 @@
 #include <sys/wait.h>
 
 #define FASTD_DIRECT_MAC_LIMIT 256
+#define FASTD_DIRECT_CANDIDATE_LIMIT 32
+#define FASTD_DIRECT_CANDIDATE_ATTEMPT_INTERVAL 5000
+#define FASTD_DIRECT_CANDIDATE_PRIORITY_REALM 80
+#define FASTD_DIRECT_CANDIDATE_PRIORITY_DISCOVERY 100
 
+
+static bool direct_candidate_valid(const fastd_peer_direct_candidate_t *candidate);
 
 /** Adds address and port of an fastd_peer_address_t to \e env */
 static void fastd_peer_set_shell_env_addr(
@@ -371,6 +377,7 @@ static void reset_peer(fastd_peer_t *peer) {
 
 	peer->address.sa.sa_family = AF_UNSPEC;
 	peer->local_address.sa.sa_family = AF_UNSPEC;
+	peer->direct_established = false;
 	peer->transport_probe = TRANSPORT_UNSET;
 	peer->turn_fallback_timeout = FASTD_TIMEOUT_INV;
 	peer->state = STATE_INACTIVE;
@@ -450,6 +457,11 @@ static void setup_peer(fastd_peer_t *peer) {
 
 	peer->establish_handshake_timeout = ctx.now;
 	peer->turn_fallback_timeout = FASTD_TIMEOUT_INV;
+	peer->direct_established = false;
+	peer->punch_timeout = FASTD_TIMEOUT_INV;
+	peer->next_punch_announce = ctx.now;
+	peer->next_punch_relay = ctx.now;
+	peer->punch_success_counted = false;
 
 #ifdef WITH_DYNAMIC_PEERS
 	peer->verify_timeout = ctx.now;
@@ -517,6 +529,7 @@ void fastd_peer_free(fastd_peer_t *peer) {
 	}
 
 	VECTOR_FREE(peer->remotes);
+	VECTOR_FREE(peer->direct_candidates);
 	VECTOR_FREE(peer->direct_macs);
 	fastd_turn_server_free(peer->turn_servers);
 
@@ -660,19 +673,26 @@ bool fastd_peer_matches_address(const fastd_peer_t *peer, const fastd_peer_addre
 		return true;
 
 	if (fastd_peer_has_direct_candidate(peer)) {
-		if (fastd_peer_address_equal(&peer->direct_remote, addr))
-			return true;
-
 		fastd_peer_transport_t transport = fastd_peer_get_transport(peer);
 		bool can_hole_punch = (fastd_peer_hole_punch_allows(peer, TRANSPORT_UDP) &&
 				       fastd_peer_transport_allows(transport, TRANSPORT_UDP)) ||
 				      (fastd_peer_hole_punch_allows(peer, TRANSPORT_TCP) &&
 				       fastd_peer_transport_allows(transport, TRANSPORT_TCP));
 
-		if (addr->sa.sa_family == AF_INET && can_hole_punch &&
-		    fastd_hole_punch_port_valid(ntohs(fastd_peer_address_get_port(addr)), time(NULL)) &&
-		    fastd_peer_address_ip_equal(&peer->direct_remote, addr))
-			return true;
+		size_t i;
+		for (i = 0; i < VECTOR_LEN(peer->direct_candidates); i++) {
+			const fastd_peer_direct_candidate_t *candidate = &VECTOR_INDEX(peer->direct_candidates, i);
+			if (!direct_candidate_valid(candidate))
+				continue;
+
+			if (fastd_peer_address_equal(&candidate->remote, addr))
+				return true;
+
+			if (addr->sa.sa_family == AF_INET && can_hole_punch &&
+			    fastd_hole_punch_port_valid(ntohs(fastd_peer_address_get_port(addr)), time(NULL)) &&
+			    fastd_peer_address_ip_equal(&candidate->remote, addr))
+				return true;
+		}
 	}
 
 	size_t i, j;
@@ -706,11 +726,6 @@ bool fastd_peer_matches_address(const fastd_peer_t *peer, const fastd_peer_addre
 	return false;
 }
 
-/** Checks if a relay-discovered direct endpoint is currently usable */
-bool fastd_peer_has_direct_candidate(const fastd_peer_t *peer) {
-	return peer->direct_remote.sa.sa_family != AF_UNSPEC && !fastd_timed_out(peer->direct_remote_timeout);
-}
-
 /** Adds one relay-discovered MAC address to a direct peer */
 static void add_direct_mac(fastd_peer_t *peer, fastd_eth_addr_t mac) {
 	if (!fastd_eth_addr_is_unicast(mac))
@@ -728,11 +743,179 @@ static void add_direct_mac(fastd_peer_t *peer, fastd_eth_addr_t mac) {
 	VECTOR_ADD(peer->direct_macs, mac);
 }
 
-/** Adds or refreshes a relay-discovered direct endpoint for a peer */
-void fastd_peer_add_direct_candidate(
+/** Checks whether a direct candidate is still usable */
+static bool direct_candidate_valid(const fastd_peer_direct_candidate_t *candidate) {
+	return candidate->remote.sa.sa_family != AF_UNSPEC && !fastd_timed_out(candidate->timeout);
+}
+
+/** Checks whether two direct candidates describe the same endpoint path */
+static bool direct_candidate_equal(
+	const fastd_peer_direct_candidate_t *candidate, fastd_peer_t *relay, const fastd_peer_address_t *remote_addr) {
+	return candidate->relay == relay && fastd_peer_address_equal(&candidate->remote, remote_addr);
+}
+
+/** Clears the cached selected direct candidate */
+static void clear_direct_candidate_cache(fastd_peer_t *peer) {
+	peer->direct_relay = NULL;
+	memset(&peer->direct_remote, 0, sizeof(peer->direct_remote));
+	peer->direct_remote_timeout = FASTD_TIMEOUT_INV;
+	peer->direct_remote_source = DIRECT_CANDIDATE_REALM;
+	peer->direct_remote_exact_udp = false;
+}
+
+/** Updates the cached selected direct candidate */
+static void set_direct_candidate_cache(fastd_peer_t *peer, const fastd_peer_direct_candidate_t *candidate) {
+	peer->direct_relay = candidate->relay;
+	peer->direct_remote = candidate->remote;
+	peer->direct_remote_timeout = candidate->timeout;
+	peer->direct_remote_source = candidate->source;
+	peer->direct_remote_exact_udp = candidate->exact_udp_punch;
+}
+
+/** Marks an established peer as direct when its address matches a direct candidate */
+static void mark_direct_established(
+	fastd_peer_t *peer, const fastd_peer_address_t *remote_addr, fastd_peer_direct_candidate_source_t source) {
+	if (!fastd_peer_is_established(peer) || remote_addr->sa.sa_family == AF_UNSPEC)
+		return;
+
+	if (!fastd_peer_address_equal(remote_addr, &peer->address) &&
+	    !fastd_peer_address_ip_equal(remote_addr, &peer->address))
+		return;
+
+	peer->direct_established = true;
+
+	if (source != DIRECT_CANDIDATE_PUNCH_CONTROL || peer->punch_success_counted)
+		return;
+
+	ctx.punch_direct_success++;
+	peer->punch_success_counted = true;
+
+	size_t i;
+	for (i = 0; i < VECTOR_LEN(peer->direct_candidates); i++) {
+		fastd_peer_direct_candidate_t *candidate = &VECTOR_INDEX(peer->direct_candidates, i);
+		if (candidate->source == DIRECT_CANDIDATE_PUNCH_CONTROL)
+			candidate->attempts = 0;
+	}
+}
+
+/** Removes expired direct endpoint candidates */
+static void compact_direct_candidates(fastd_peer_t *peer) {
+	bool cache_valid = false;
+
+	size_t i;
+	for (i = 0; i < VECTOR_LEN(peer->direct_candidates);) {
+		fastd_peer_direct_candidate_t *candidate = &VECTOR_INDEX(peer->direct_candidates, i);
+		if (!direct_candidate_valid(candidate)) {
+			if (!fastd_peer_is_established(peer) && candidate->source == DIRECT_CANDIDATE_PUNCH_CONTROL &&
+			    candidate->attempts)
+				ctx.punch_direct_failures++;
+			VECTOR_DELETE(peer->direct_candidates, i);
+			continue;
+		}
+
+		if (candidate->relay == peer->direct_relay &&
+		    fastd_peer_address_equal(&candidate->remote, &peer->direct_remote))
+			cache_valid = true;
+
+		i++;
+	}
+
+	if (!cache_valid)
+		clear_direct_candidate_cache(peer);
+}
+
+/** Selects the best direct candidate without updating attempt counters */
+static fastd_peer_direct_candidate_t *best_direct_candidate(fastd_peer_t *peer, bool require_ready) {
+	fastd_peer_direct_candidate_t *best = NULL;
+
+	size_t i;
+	for (i = 0; i < VECTOR_LEN(peer->direct_candidates); i++) {
+		fastd_peer_direct_candidate_t *candidate = &VECTOR_INDEX(peer->direct_candidates, i);
+		if (!direct_candidate_valid(candidate))
+			continue;
+
+		if (require_ready && candidate->attempts &&
+		    !fastd_timed_out(candidate->last_attempt + FASTD_DIRECT_CANDIDATE_ATTEMPT_INTERVAL))
+			continue;
+
+		if (!best || candidate->priority > best->priority ||
+		    (candidate->priority == best->priority && candidate->last_attempt < best->last_attempt))
+			best = candidate;
+	}
+
+	return best;
+}
+
+/** Selects one direct candidate for the next handshake attempt */
+static bool select_direct_candidate(fastd_peer_t *peer) {
+	compact_direct_candidates(peer);
+
+	fastd_peer_direct_candidate_t *candidate = best_direct_candidate(peer, true);
+	if (!candidate)
+		return false;
+
+	candidate->attempts++;
+	candidate->last_attempt = ctx.now;
+	set_direct_candidate_cache(peer, candidate);
+	return true;
+}
+
+/** Checks if a relay-discovered direct endpoint is currently usable */
+bool fastd_peer_has_direct_candidate(const fastd_peer_t *peer) {
+	return fastd_peer_direct_candidate_count(peer) > 0;
+}
+
+/** Counts currently usable direct endpoint candidates */
+size_t fastd_peer_direct_candidate_count(const fastd_peer_t *peer) {
+	size_t count = 0;
+	size_t i;
+	for (i = 0; i < VECTOR_LEN(peer->direct_candidates); i++) {
+		if (direct_candidate_valid(&VECTOR_INDEX(peer->direct_candidates, i)))
+			count++;
+	}
+
+	return count;
+}
+
+/** Counts currently usable direct endpoint candidates from a given source */
+size_t
+fastd_peer_direct_candidate_count_by_source(const fastd_peer_t *peer, fastd_peer_direct_candidate_source_t source) {
+	size_t count = 0;
+	size_t i;
+	for (i = 0; i < VECTOR_LEN(peer->direct_candidates); i++) {
+		const fastd_peer_direct_candidate_t *candidate = &VECTOR_INDEX(peer->direct_candidates, i);
+		if (candidate->source == source && direct_candidate_valid(candidate))
+			count++;
+	}
+
+	return count;
+}
+
+/** Checks if an address is the currently selected punch-control direct candidate */
+bool fastd_peer_is_current_punch_control_candidate(
+	const fastd_peer_t *peer, const fastd_peer_address_t *addr, bool *exact_udp_punch) {
+	if (peer->direct_remote_source != DIRECT_CANDIDATE_PUNCH_CONTROL ||
+	    peer->direct_remote.sa.sa_family == AF_UNSPEC || fastd_timed_out(peer->direct_remote_timeout) ||
+	    !fastd_peer_address_equal(&peer->direct_remote, addr))
+		return false;
+
+	if (exact_udp_punch)
+		*exact_udp_punch = peer->direct_remote_exact_udp;
+
+	return true;
+}
+
+/** Checks if an address is the currently selected exact-UDP punch-control direct candidate */
+bool fastd_peer_is_current_punch_candidate(const fastd_peer_t *peer, const fastd_peer_address_t *addr) {
+	bool exact_udp_punch = false;
+	return fastd_peer_is_current_punch_control_candidate(peer, addr, &exact_udp_punch) && exact_udp_punch;
+}
+
+/** Adds or refreshes a direct endpoint candidate for a peer */
+void fastd_peer_add_direct_candidate_source(
 	fastd_peer_t *peer, fastd_peer_t *relay, const fastd_peer_address_t *remote_addr, const fastd_eth_addr_t *macs,
-	size_t n_macs) {
-	if (relay && !conf.peer_discovery)
+	size_t n_macs, fastd_peer_direct_candidate_source_t source, uint8_t priority) {
+	if (relay && source == DIRECT_CANDIDATE_DISCOVERY && !conf.peer_discovery)
 		return;
 
 	if ((relay && peer == relay) || !fastd_peer_is_enabled(peer))
@@ -741,15 +924,68 @@ void fastd_peer_add_direct_candidate(
 	if (remote_addr->sa.sa_family != AF_INET && remote_addr->sa.sa_family != AF_INET6)
 		return;
 
-	peer->direct_relay = relay;
-	peer->direct_remote = *remote_addr;
-	peer->direct_remote_timeout = ctx.now + PEER_STALE_TIME;
+	compact_direct_candidates(peer);
 
+	fastd_peer_direct_candidate_t *candidate = NULL;
 	size_t i;
+	for (i = 0; i < VECTOR_LEN(peer->direct_candidates); i++) {
+		fastd_peer_direct_candidate_t *entry = &VECTOR_INDEX(peer->direct_candidates, i);
+		if (direct_candidate_equal(entry, relay, remote_addr)) {
+			candidate = entry;
+			break;
+		}
+	}
+
+	if (!candidate) {
+		if (VECTOR_LEN(peer->direct_candidates) >= FASTD_DIRECT_CANDIDATE_LIMIT) {
+			size_t victim = 0;
+			for (i = 1; i < VECTOR_LEN(peer->direct_candidates); i++) {
+				fastd_peer_direct_candidate_t *entry = &VECTOR_INDEX(peer->direct_candidates, i);
+				fastd_peer_direct_candidate_t *old = &VECTOR_INDEX(peer->direct_candidates, victim);
+				if (entry->priority < old->priority ||
+				    (entry->priority == old->priority && entry->timeout < old->timeout))
+					victim = i;
+			}
+
+			fastd_peer_direct_candidate_t *old = &VECTOR_INDEX(peer->direct_candidates, victim);
+			if (old->priority > priority)
+				return;
+
+			VECTOR_DELETE(peer->direct_candidates, victim);
+		}
+
+		VECTOR_ADD(
+			peer->direct_candidates, ((fastd_peer_direct_candidate_t){
+							 .remote = *remote_addr,
+							 .relay = relay,
+							 .last_attempt = 0,
+							 .source = source,
+						 }));
+		candidate = &VECTOR_INDEX(peer->direct_candidates, VECTOR_LEN(peer->direct_candidates) - 1);
+	}
+
+	candidate->timeout = ctx.now + PEER_STALE_TIME;
+	if (priority >= candidate->priority) {
+		candidate->priority = priority;
+		candidate->source = source;
+	}
+	if (source != DIRECT_CANDIDATE_PUNCH_CONTROL)
+		candidate->exact_udp_punch = false;
+
 	for (i = 0; i < n_macs; i++)
 		add_direct_mac(peer, macs[i]);
 
+	if (source == DIRECT_CANDIDATE_PUNCH_CONTROL) {
+		set_direct_candidate_cache(peer, candidate);
+	} else {
+		fastd_peer_direct_candidate_t *best = best_direct_candidate(peer, false);
+		if (best)
+			set_direct_candidate_cache(peer, best);
+	}
+
 	if (fastd_peer_is_established(peer)) {
+		mark_direct_established(peer, &candidate->remote, candidate->source);
+
 		for (i = 0; i < VECTOR_LEN(peer->direct_macs); i++)
 			fastd_peer_eth_addr_add(peer, VECTOR_INDEX(peer->direct_macs, i));
 
@@ -758,6 +994,33 @@ void fastd_peer_add_direct_candidate(
 
 	fastd_peer_seen(peer);
 	fastd_peer_schedule_handshake(peer, 0);
+}
+
+/** Adds or refreshes a relay/realm-discovered direct endpoint for a peer */
+void fastd_peer_add_direct_candidate(
+	fastd_peer_t *peer, fastd_peer_t *relay, const fastd_peer_address_t *remote_addr, const fastd_eth_addr_t *macs,
+	size_t n_macs) {
+	fastd_peer_add_direct_candidate_source(
+		peer, relay, remote_addr, macs, n_macs, relay ? DIRECT_CANDIDATE_DISCOVERY : DIRECT_CANDIDATE_REALM,
+		relay ? FASTD_DIRECT_CANDIDATE_PRIORITY_DISCOVERY : FASTD_DIRECT_CANDIDATE_PRIORITY_REALM);
+}
+
+/** Adds or refreshes a punch-control direct endpoint for a peer */
+void fastd_peer_add_punch_control_candidate(
+	fastd_peer_t *peer, const fastd_peer_address_t *remote_addr, uint8_t priority, bool exact_udp_punch) {
+	fastd_peer_add_direct_candidate_source(
+		peer, NULL, remote_addr, NULL, 0, DIRECT_CANDIDATE_PUNCH_CONTROL, priority);
+
+	size_t i;
+	for (i = 0; i < VECTOR_LEN(peer->direct_candidates); i++) {
+		fastd_peer_direct_candidate_t *candidate = &VECTOR_INDEX(peer->direct_candidates, i);
+		if (candidate->source == DIRECT_CANDIDATE_PUNCH_CONTROL &&
+		    direct_candidate_equal(candidate, NULL, remote_addr)) {
+			candidate->exact_udp_punch = exact_udp_punch;
+			set_direct_candidate_cache(peer, candidate);
+			return;
+		}
+	}
 }
 
 /**
@@ -1009,29 +1272,45 @@ static inline void no_valid_address_debug(const fastd_peer_t *peer) {
 }
 
 /** Sends a new handshake to a specific peer address */
-static void send_handshake_address(fastd_peer_t *peer, const fastd_peer_address_t *addr) {
+static bool send_handshake_address(fastd_peer_t *peer, const fastd_peer_address_t *addr) {
 	if (!fastd_peer_is_established(peer)) {
 		fastd_peer_claim_address(peer, NULL, NULL, addr, false);
 		fastd_peer_reset_socket(peer);
 	}
 
 	if (!peer->sock)
-		return;
+		return false;
 
 	if (peer->address.sa.sa_family == AF_UNSPEC) {
 		no_valid_address_debug(peer);
-		return;
+		return false;
 	}
 
 	if (!fastd_timed_out(peer->last_handshake_timeout) &&
 	    fastd_peer_address_equal(&peer->address, &peer->last_handshake_address)) {
 		pr_debug("not sending a handshake to %P as we sent one a short time ago", peer);
-		return;
+		return false;
 	}
 
 	peer->last_handshake_timeout = ctx.now + MIN_HANDSHAKE_INTERVAL;
 	peer->last_handshake_address = peer->address;
 	conf.protocol->handshake_init(peer->sock, &peer->local_address, &peer->address, peer, FLAG_INITIAL);
+	return true;
+}
+
+/** Sends an immediate direct punch handshake to a candidate endpoint */
+bool fastd_peer_send_direct_handshake(fastd_peer_t *peer, const fastd_peer_address_t *addr) {
+	if (!peer || fastd_peer_is_established(peer) || !fastd_peer_is_enabled(peer))
+		return false;
+
+	if (!fastd_peer_may_connect(peer))
+		return false;
+
+	bool sent = send_handshake_address(peer, addr);
+	if (sent)
+		peer->state = STATE_HANDSHAKE;
+
+	return sent;
 }
 
 /** Sends a new handshake to the current address of the given remote of a peer */
@@ -1093,6 +1372,9 @@ bool fastd_peer_set_established(fastd_peer_t *peer, const fastd_offload_t *offlo
 
 	peer->state = STATE_ESTABLISHED;
 	peer->established = ctx.now;
+
+	mark_direct_established(peer, &peer->direct_remote, peer->direct_remote_source);
+
 	fastd_peer_seen(peer);
 	fastd_peer_clear_keepalive(peer);
 	fastd_receive_unknown_purge(peer->address);
@@ -1180,7 +1462,7 @@ static void handle_task_handshake(fastd_peer_t *peer) {
 
 	fastd_remote_t *next_remote = fastd_peer_get_next_remote(peer);
 
-	if (!fastd_peer_is_established(peer) && fastd_peer_has_direct_candidate(peer)) {
+	if (!fastd_peer_is_established(peer) && select_direct_candidate(peer)) {
 		send_handshake_address(peer, &peer->direct_remote);
 		peer->state = STATE_HANDSHAKE;
 

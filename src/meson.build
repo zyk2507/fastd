@@ -54,12 +54,14 @@ src = [
 	'iface.c',
 	'lex.c',
 	'log.c',
+	'nat_detect.c',
 	'options.c',
 	'peer.c',
 	'peer_hashtable.c',
 	'polling.c',
 	'port_mapping.c',
 	'pqueue.c',
+	'punch_rpc.c',
 	'random.c',
 	'receive.c',
 	'realm.c',
@@ -158,6 +160,15 @@ if not get_option('realm').disabled()
 	with_realm = curl_dep.found() and json_c_dep.found() and realm_nice_dep.found()
 	if with_realm
 		deps += [ curl_dep, json_c_dep, realm_nice_dep ]
+	endif
+endif
+
+with_nat_detect = false
+if not get_option('nat_detect').disabled()
+	nat_detect_nice_dep = dependency('nice', required : get_option('nat_detect'))
+	with_nat_detect = nat_detect_nice_dep.found()
+	if with_nat_detect
+		deps += nat_detect_nice_dep
 	endif
 endif
 
@@ -296,6 +307,8 @@ conf_data.set('WITH_NATPMP', with_natpmp)
 conf_data.set('WITH_UPNP_IGD', with_upnp_igd)
 conf_data.set('WITH_TURN', with_turn)
 conf_data.set('WITH_REALM', with_realm)
+conf_data.set('WITH_NAT_DETECT', with_nat_detect)
+conf_data.set('WITH_TESTS', get_option('build_tests'))
 
 conf_data.set('WITH_OFFLOAD_L2TP', with_offload_l2tp)
 
@@ -312,7 +325,7 @@ libfastd = static_library(
 	dependencies : deps,
 )
 
-executable(
+fastd_exe = executable(
 	'fastd', 'main.c',
 	link_with : libfastd,
 	install : true,

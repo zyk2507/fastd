@@ -545,6 +545,7 @@ static inline void init(int argc, char *argv[]) {
 		exit(1);
 	fastd_socket_update_tcp_listeners();
 	fastd_port_mapping_init();
+	fastd_nat_init();
 	fastd_realm_init();
 
 	notify_systemd();
@@ -636,6 +637,7 @@ static inline void cleanup(void) {
 	pr_info("terminating fastd");
 
 	fastd_realm_cleanup();
+	fastd_nat_cleanup();
 
 	delete_peers();
 
@@ -652,6 +654,8 @@ static inline void cleanup(void) {
 	fastd_udp_punch_cleanup();
 	fastd_tcp_cleanup();
 	close_sockets();
+	fastd_socket_free_deferred();
+	VECTOR_FREE(ctx.deferred_socks);
 	fastd_poll_free();
 
 	on_post_down();

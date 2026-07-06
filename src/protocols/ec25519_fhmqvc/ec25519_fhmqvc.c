@@ -164,6 +164,9 @@ static void protocol_handle_recv(fastd_peer_t *peer, fastd_buffer_t *buffer) {
 	}
 
 	if (flags & FASTD_METHOD_FLAG_CONTROL) {
+		if (fastd_punch_handle_control(peer, recv_buffer))
+			return;
+
 		fastd_discovery_handle_control(peer, recv_buffer);
 		return;
 	}

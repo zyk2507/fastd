@@ -14,6 +14,8 @@
 #include "port_mapping.h"
 #include "peer.h"
 
+#include <arpa/inet.h>
+
 
 #ifdef WITH_NATPMP
 #include <natpmp.h>
@@ -83,9 +85,10 @@ struct fastd_port_mapping {
 #endif
 
 #ifdef WITH_UPNP_IGD
-	struct UPNPUrls upnp_urls; /**< UPnP IGD control URLs */
-	struct IGDdatas upnp_data; /**< UPnP IGD service metadata */
-	bool upnp_initialized;     /**< Specifies if upnp_urls has been initialized */
+	struct UPNPUrls upnp_urls;               /**< UPnP IGD control URLs */
+	struct IGDdatas upnp_data;               /**< UPnP IGD service metadata */
+	fastd_peer_address_t upnp_external_addr; /**< External address reported by the UPnP IGD */
+	bool upnp_initialized;                   /**< Specifies if upnp_urls has been initialized */
 #endif
 
 	VECTOR(fastd_port_mapping_entry_t) mappings; /**< Configured UDP port mappings */
@@ -479,6 +482,19 @@ static void cleanup_natpmp(fastd_port_mapping_t *mapping) {
 
 #ifdef WITH_UPNP_IGD
 
+/** Sets a peer address port from host byte order */
+static void set_mapped_address_port(fastd_peer_address_t *addr, uint16_t port) {
+	switch (addr->sa.sa_family) {
+	case AF_INET:
+		addr->in.sin_port = htons(port);
+		return;
+
+	case AF_INET6:
+		addr->in6.sin6_port = htons(port);
+		return;
+	}
+}
+
 /** Returns a human-readable string for a miniupnpc return code */
 static const char *upnp_error(int ret) {
 	const char *error = strupnperror(ret);
@@ -488,6 +504,23 @@ static const char *upnp_error(int ret) {
 /** Formats a UDP port for miniupnpc calls */
 static void format_port(char buf[static 6], uint16_t port) {
 	snprintf(buf, 6, "%u", port);
+}
+
+/** Stores the external address reported by the UPnP IGD, if it is parseable */
+static void set_upnp_external_address(fastd_port_mapping_t *mapping, const char *wanaddr) {
+	fastd_peer_address_t addr = {};
+
+	if (inet_pton(AF_INET, wanaddr, &addr.in.sin_addr) == 1) {
+		addr.in.sin_family = AF_INET;
+	} else if (inet_pton(AF_INET6, wanaddr, &addr.in6.sin6_addr) == 1) {
+		addr.in6.sin6_family = AF_INET6;
+	} else {
+		pr_debug("unable to parse UPnP IGD external address `%s'", wanaddr);
+		return;
+	}
+
+	fastd_peer_address_simplify(&addr);
+	mapping->upnp_external_addr = addr;
 }
 
 /** Adds UPnP IGD mappings for all configured ports */
@@ -534,6 +567,7 @@ static void init_upnp_igd(fastd_port_mapping_t *mapping) {
 	switch (ret) {
 	case UPNP_CONNECTED_IGD:
 		pr_verbose("found UPnP IGD with external address %s", wanaddr);
+		set_upnp_external_address(mapping, wanaddr);
 		break;
 
 	case UPNP_PRIVATEIP_IGD:
@@ -649,6 +683,56 @@ void fastd_port_mapping_handle_task(void) {
 	if (ctx.port_mapping)
 		handle_pending_request(ctx.port_mapping);
 #endif
+}
+
+/** Returns the external address for a mapped fixed UDP socket, if one is known */
+bool fastd_port_mapping_get_external_address(const fastd_socket_t *sock, fastd_peer_address_t *addr) {
+	if (!ctx.port_mapping || !socket_is_mappable(sock))
+		return false;
+
+	uint16_t local_port = ntohs(fastd_peer_address_get_port(sock->bound_addr));
+	fastd_port_mapping_entry_t *entry = find_mapping(ctx.port_mapping, local_port);
+	if (!entry)
+		return false;
+
+	uint16_t public_port = 0;
+
+#ifdef WITH_NATPMP
+	if (entry->natpmp_mapped)
+		public_port = entry->natpmp_public_port;
+#endif
+
+#ifdef WITH_UPNP_IGD
+	if (!public_port && entry->upnp_mapped)
+		public_port = entry->upnp_public_port;
+#endif
+
+	if (!public_port)
+		return false;
+
+#ifdef WITH_UPNP_IGD
+	if (entry->upnp_mapped && ctx.port_mapping->upnp_external_addr.sa.sa_family != AF_UNSPEC) {
+		*addr = ctx.port_mapping->upnp_external_addr;
+		set_mapped_address_port(addr, entry->upnp_public_port);
+		return true;
+	}
+#endif
+
+	if (!fastd_nat_get_public_address(addr))
+		return false;
+
+	switch (addr->sa.sa_family) {
+	case AF_INET:
+		addr->in.sin_port = htons(public_port);
+		return true;
+
+	case AF_INET6:
+		addr->in6.sin6_port = htons(public_port);
+		return true;
+
+	default:
+		return false;
+	}
 }
 
 /** Frees resources used by automatic port mapping */

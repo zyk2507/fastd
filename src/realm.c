@@ -12,13 +12,14 @@
 
 #include "realm.h"
 #include "async.h"
+#include "nat_detect.h"
 #include "peer.h"
 
 #ifdef WITH_REALM
 #include <curl/curl.h>
 #include <json-c/json.h>
-#include <stun/usages/bind.h>
 #include <stun/stunagent.h>
+#include <stun/usages/bind.h>
 
 #include <netdb.h>
 #include <unistd.h>
@@ -31,16 +32,21 @@
 #define FASTD_REALM_HTTP_TIMEOUT 12L
 
 
+/** Returns true if a metadata field is absent */
+static bool field_empty(const char *str) {
+	return !str || !str[0];
+}
+
 /** Runtime state for the realm rendezvous control plane */
 struct fastd_realm_state {
 	fastd_task_t task; /**< Periodic maintenance task */
 
 #ifdef WITH_REALM
 	pthread_mutex_t mutex; /**< Protects fields updated by worker threads */
-	bool worker_running;  /**< true while a periodic HTTP worker is active */
-	bool events_running;  /**< true while an SSE event worker is active */
-	bool stopping;        /**< true while realm cleanup is waiting for workers */
-	char *session_id;     /**< Current realm session token */
+	bool worker_running;   /**< true while a periodic HTTP worker is active */
+	bool events_running;   /**< true while an SSE event worker is active */
+	bool stopping;         /**< true while realm cleanup is waiting for workers */
+	char *session_id;      /**< Current realm session token */
 
 	StunAgent stun_agent;             /**< STUN transaction state */
 	bool stun_pending;                /**< true while a STUN binding request is in flight */
@@ -77,11 +83,6 @@ typedef struct realm_worker {
 } realm_worker_t;
 
 static char *format_address(const fastd_peer_address_t *addr);
-
-/** Returns true if a metadata field is absent */
-static bool field_empty(const char *str) {
-	return !str || !str[0];
-}
 
 /** Returns the sockaddr length for a peer address */
 static socklen_t address_len(const fastd_peer_address_t *addr) {
@@ -259,8 +260,9 @@ static char *format_address(const fastd_peer_address_t *addr) {
 	char host[INET6_ADDRSTRLEN + IFNAMSIZ + 1];
 	char port[16];
 
-	if (getnameinfo(&addr->sa, address_len(addr), host, sizeof(host), port, sizeof(port),
-	    NI_NUMERICHOST | NI_NUMERICSERV))
+	if (getnameinfo(
+		    &addr->sa, address_len(addr), host, sizeof(host), port, sizeof(port),
+		    NI_NUMERICHOST | NI_NUMERICSERV))
 		return NULL;
 
 	if (addr->sa.sa_family == AF_INET6) {
@@ -299,6 +301,54 @@ static void worker_add_address(realm_worker_t *work, const fastd_peer_address_t 
 
 	work->addresses = fastd_realloc_array(work->addresses, work->n_addresses + 1, sizeof(char *));
 	work->addresses[work->n_addresses++] = formatted;
+}
+
+/** Sets an address port from host byte order */
+static void set_address_port(fastd_peer_address_t *addr, uint16_t port) {
+	switch (addr->sa.sa_family) {
+	case AF_INET:
+		addr->in.sin_port = htons(port);
+		return;
+
+	case AF_INET6:
+		addr->in6.sin6_port = htons(port);
+		return;
+	}
+}
+
+/** Returns true if a NAT type preserves the local UDP source port */
+static bool nat_type_preserves_port(fastd_nat_type_t type) {
+	switch (type) {
+	case FASTD_NAT_OPEN_INTERNET:
+	case FASTD_NAT_NO_PAT:
+	case FASTD_NAT_SYM_UDP_FIREWALL:
+		return true;
+
+	default:
+		return false;
+	}
+}
+
+/** Adds NAT-detected public addresses for fixed sockets when the detected NAT preserves ports */
+static void worker_add_nat_addresses(realm_worker_t *work) {
+	fastd_nat_status_t status = {};
+	if (!fastd_nat_get_status(&status) || !status.available || !nat_type_preserves_port(status.type))
+		return;
+
+	size_t i;
+	for (i = 0; i < ctx.n_socks; i++) {
+		const fastd_socket_t *sock = &ctx.socks[i];
+		if (!sock->bound_addr || sock->bound_addr->sa.sa_family != status.reflexive.sa.sa_family)
+			continue;
+
+		uint16_t port = ntohs(fastd_peer_address_get_port(sock->bound_addr));
+		if (!port)
+			continue;
+
+		fastd_peer_address_t addr = status.reflexive;
+		set_address_port(&addr, port);
+		worker_add_address(work, &addr);
+	}
 }
 
 /** Parses an addr:port string into a fastd address */
@@ -408,8 +458,8 @@ static void send_stun_request(void) {
 	if (!len)
 		return;
 
-	ssize_t sent = sendto(
-		sock->fd.fd, buf, len, 0, &ctx.realm->stun_server.sa, address_len(&ctx.realm->stun_server));
+	ssize_t sent =
+		sendto(sock->fd.fd, buf, len, 0, &ctx.realm->stun_server.sa, address_len(&ctx.realm->stun_server));
 	if (sent < 0) {
 		pr_debug_errno("realm STUN sendto");
 		return;
@@ -493,8 +543,7 @@ static bool heartbeat_realm(const realm_worker_t *work) {
 }
 
 /** Enqueues direct candidates from a JSON address array */
-static void enqueue_address_candidates(
-	const char *source_id, const char *source_key, struct json_object *addresses) {
+static void enqueue_address_candidates(const char *source_id, const char *source_key, struct json_object *addresses) {
 	if (!json_object_is_type(addresses, json_type_array))
 		return;
 
@@ -721,8 +770,9 @@ static size_t sse_write_cb(char *ptr, size_t size, size_t nmemb, void *userdata)
 }
 
 /** Aborts long-running libcurl work during shutdown */
-static int curl_progress_cb(void *clientp, UNUSED curl_off_t dltotal, UNUSED curl_off_t dlnow,
-			    UNUSED curl_off_t ultotal, UNUSED curl_off_t ulnow) {
+static int curl_progress_cb(
+	void *clientp, UNUSED curl_off_t dltotal, UNUSED curl_off_t dlnow, UNUSED curl_off_t ultotal,
+	UNUSED curl_off_t ulnow) {
 	(void)clientp;
 	return realm_should_continue() ? 0 : 1;
 }
@@ -869,10 +919,18 @@ static realm_worker_t *create_worker(void) {
 		worker_add_address(work, &ctx.realm->reflexive);
 	pthread_mutex_unlock(&ctx.realm->mutex);
 
+	worker_add_nat_addresses(work);
+
+	size_t i;
+	for (i = 0; i < ctx.n_socks; i++) {
+		fastd_peer_address_t mapped_addr;
+		if (fastd_port_mapping_get_external_address(&ctx.socks[i], &mapped_addr))
+			worker_add_address(work, &mapped_addr);
+	}
+
 	if (!work->n_addresses && ctx.sock_default_v4 && ctx.sock_default_v4->bound_addr)
 		worker_add_address(work, ctx.sock_default_v4->bound_addr);
 
-	size_t i;
 	for (i = 0; i < VECTOR_LEN(ctx.peers); i++) {
 		fastd_peer_t *peer = VECTOR_INDEX(ctx.peers, i);
 		if (!peer->realm || !fastd_peer_is_enabled(peer) || fastd_peer_is_established(peer))
@@ -1023,8 +1081,7 @@ bool fastd_realm_handle_stun_response(
 		return false;
 
 	StunMessage msg;
-	StunValidationStatus status =
-		stun_agent_validate(&ctx.realm->stun_agent, &msg, data, len, NULL, NULL);
+	StunValidationStatus status = stun_agent_validate(&ctx.realm->stun_agent, &msg, data, len, NULL, NULL);
 	if (status == STUN_VALIDATION_NOT_STUN)
 		return false;
 

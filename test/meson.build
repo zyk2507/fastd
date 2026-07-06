@@ -21,6 +21,24 @@ test('uhash',
 	protocol : 'tap',
 )
 
+test_nat_traversal = executable(
+	'test-nat-traversal', 'test-nat-traversal.c',
+	dependencies: test_deps,
+)
+test('nat-traversal',
+	test_nat_traversal,
+	env : test_env,
+	protocol : 'tap',
+)
+
+bash = find_program('bash')
+test('nat-punch-netns',
+	bash,
+	args : [files('test-nat-punch-netns.sh'), fastd_exe.full_path()],
+	protocol : 'tap',
+	timeout : 120,
+)
+
 benchmark_uhash = executable(
 	'benchmark-uhash', 'benchmark-uhash.c',
 	dependencies: test_deps,

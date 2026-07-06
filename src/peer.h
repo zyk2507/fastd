@@ -37,6 +37,25 @@ typedef enum fastd_peer_config_state {
 #endif
 } fastd_peer_config_state_t;
 
+/** Source of a direct endpoint candidate */
+typedef enum fastd_peer_direct_candidate_source {
+	DIRECT_CANDIDATE_REALM = 0,     /**< External realm rendezvous */
+	DIRECT_CANDIDATE_DISCOVERY,     /**< Authenticated relay endpoint discovery */
+	DIRECT_CANDIDATE_PUNCH_CONTROL, /**< fastd punch control RPC */
+} fastd_peer_direct_candidate_source_t;
+
+/** One direct endpoint candidate for a peer */
+typedef struct fastd_peer_direct_candidate {
+	fastd_peer_address_t remote;                 /**< Remote endpoint */
+	fastd_peer_t *relay;                         /**< Relay peer that announced the endpoint, if any */
+	fastd_timeout_t timeout;                     /**< Expiry timeout */
+	fastd_timeout_t last_attempt;                /**< Last handshake attempt timestamp */
+	unsigned attempts;                           /**< Number of attempts sent to this candidate */
+	uint8_t priority;                            /**< Selection priority */
+	fastd_peer_direct_candidate_source_t source; /**< Candidate source */
+	bool exact_udp_punch;                        /**< Send UDP handshakes from a short-lived exact punch socket */
+} fastd_peer_direct_candidate_t;
+
 /** A peer's configuration and state */
 struct fastd_peer {
 	/* The following fields are more or less static configuration: */
@@ -81,11 +100,24 @@ struct fastd_peer {
 	fastd_peer_transport_t transport_probe; /**< Transport currently probed for automatic transport mode */
 	fastd_timeout_t turn_fallback_timeout;  /**< Timeout before automatic TURN fallback is used */
 
-	fastd_peer_t *direct_relay;              /**< Relay peer used while a discovered direct path is unavailable */
-	fastd_peer_address_t direct_remote;      /**< Relay-discovered direct peer endpoint */
-	fastd_timeout_t direct_remote_timeout;   /**< Timeout for the discovered direct endpoint */
-	fastd_timeout_t next_discovery_announce; /**< Rate limit for relay endpoint announcements */
-	VECTOR(fastd_eth_addr_t) direct_macs;    /**< MAC addresses that should prefer this direct peer */
+	fastd_peer_t *direct_relay;            /**< Relay peer used while a discovered direct path is unavailable */
+	fastd_peer_address_t direct_remote;    /**< Relay-discovered direct peer endpoint */
+	fastd_timeout_t direct_remote_timeout; /**< Timeout for the discovered direct endpoint */
+	bool direct_established; /**< true if the current session was established using a direct candidate */
+	fastd_peer_direct_candidate_source_t direct_remote_source; /**< Source of the cached direct endpoint */
+	bool direct_remote_exact_udp;                            /**< true if cached endpoint uses exact UDP punching */
+	VECTOR(fastd_peer_direct_candidate_t) direct_candidates; /**< Direct endpoint candidates */
+	fastd_timeout_t next_discovery_announce;                 /**< Rate limit for relay endpoint announcements */
+	fastd_peer_address_t punch_endpoint;                     /**< Last endpoint announced through punch control */
+	fastd_nat_type_t punch_nat_type;                         /**< Last NAT type announced through punch control */
+	uint16_t punch_min_port;              /**< Lowest public port announced through punch control */
+	uint16_t punch_max_port;              /**< Highest public port announced through punch control */
+	int punch_port_delta;                 /**< Public port delta announced through punch control */
+	fastd_timeout_t punch_timeout;        /**< Timeout for punch control metadata */
+	fastd_timeout_t next_punch_announce;  /**< Rate limit for local punch metadata announcements */
+	fastd_timeout_t next_punch_relay;     /**< Rate limit for relay-generated punch commands */
+	bool punch_success_counted;           /**< true if the current punch-control session has been counted */
+	VECTOR(fastd_eth_addr_t) direct_macs; /**< MAC addresses that should prefer this direct peer */
 
 	fastd_peer_state_t state; /**< The peer's state */
 
@@ -169,7 +201,19 @@ bool fastd_peer_find_by_eth_addr(const fastd_eth_addr_t addr, fastd_peer_t **pee
 void fastd_peer_add_direct_candidate(
 	fastd_peer_t *peer, fastd_peer_t *relay, const fastd_peer_address_t *remote_addr, const fastd_eth_addr_t *macs,
 	size_t n_macs);
+void fastd_peer_add_direct_candidate_source(
+	fastd_peer_t *peer, fastd_peer_t *relay, const fastd_peer_address_t *remote_addr, const fastd_eth_addr_t *macs,
+	size_t n_macs, fastd_peer_direct_candidate_source_t source, uint8_t priority);
+void fastd_peer_add_punch_control_candidate(
+	fastd_peer_t *peer, const fastd_peer_address_t *remote_addr, uint8_t priority, bool exact_udp_punch);
 bool fastd_peer_has_direct_candidate(const fastd_peer_t *peer);
+size_t fastd_peer_direct_candidate_count(const fastd_peer_t *peer);
+size_t
+fastd_peer_direct_candidate_count_by_source(const fastd_peer_t *peer, fastd_peer_direct_candidate_source_t source);
+bool fastd_peer_is_current_punch_control_candidate(
+	const fastd_peer_t *peer, const fastd_peer_address_t *addr, bool *exact_udp_punch);
+bool fastd_peer_is_current_punch_candidate(const fastd_peer_t *peer, const fastd_peer_address_t *addr);
+bool fastd_peer_send_direct_handshake(fastd_peer_t *peer, const fastd_peer_address_t *addr);
 
 void fastd_peer_handle_task(fastd_task_t *task);
 void fastd_peer_eth_addr_cleanup(void);

@@ -23,6 +23,7 @@
 #include "handshake.h"
 #include "lex.h"
 #include "method.h"
+#include "nat_detect.h"
 #include "peer.h"
 #include "peer_group.h"
 #include "turn.h"
@@ -66,6 +67,9 @@ static void default_config(void) {
 	conf.peer_group->transport = TRANSPORT_UDP;
 	conf.peer_group->hole_punch = HOLE_PUNCH_OFF;
 	conf.peer_group->turn_relay = FASTD_TRISTATE_FALSE;
+	conf.punch_symmetric = true;
+	conf.punch_max_sockets = 25;
+	conf.punch_max_packets = 256;
 }
 
 /** Handles the configuration of a handshake protocol */
@@ -701,6 +705,9 @@ static void config_check_base(void) {
 	if (!fastd_turn_check())
 		exit(1);
 
+	if (!fastd_nat_check())
+		exit(1);
+
 	if (!fastd_realm_check())
 		exit(1);
 }
@@ -880,6 +887,9 @@ void fastd_config_release(void) {
 	free(conf.realm.token);
 	free(conf.realm.id);
 	free(conf.realm.stun_host);
+	for (size_t i = 0; i < VECTOR_LEN(conf.stun_servers); i++)
+		free(VECTOR_INDEX(conf.stun_servers, i).host);
+	VECTOR_FREE(conf.stun_servers);
 	free(conf.secret);
 	free(conf.protocol_config);
 	free(conf.log_syslog_ident);

@@ -17,6 +17,7 @@
 #ifdef WITH_STATUS_SOCKET
 
 #include "method.h"
+#include "nat_detect.h"
 #include "offload/offload.h"
 #include "peer.h"
 
@@ -190,8 +191,9 @@ static void format_duration(char buf[64], int64_t msec) {
 	sec %= 60;
 
 	if (days)
-		snprintf(buf, 64, "%lldd %02lld:%02lld:%02lld", (long long)days, (long long)hours,
-			 (long long)minutes, (long long)sec);
+		snprintf(
+			buf, 64, "%lldd %02lld:%02lld:%02lld", (long long)days, (long long)hours, (long long)minutes,
+			(long long)sec);
 	else if (hours)
 		snprintf(buf, 64, "%lld:%02lld:%02lld", (long long)hours, (long long)minutes, (long long)sec);
 	else
@@ -232,6 +234,65 @@ static void print_traffic_summary(json_object *stats) {
 	print_stat_line("TX error", stats, "tx_error");
 }
 
+/** Prints NAT detection status */
+static void print_nat_status(json_object *nat) {
+	if (!nat || !get_bool_member(nat, "enabled"))
+		return;
+
+	const char *type = get_string_member(nat, "type");
+	const char *public_address = get_string_member(nat, "public_address");
+	bool available = get_bool_member(nat, "available");
+
+	printf("NAT:       %s", type ? type : "unknown");
+	if (available && public_address && *public_address)
+		printf(", public %s", public_address);
+
+	int64_t min_port = get_int_member(nat, "min_port");
+	int64_t max_port = get_int_member(nat, "max_port");
+	if (min_port && max_port && min_port != max_port)
+		printf(", ports %lld-%lld", (long long)min_port, (long long)max_port);
+
+	int64_t age = get_int_member(nat, "last_update_age");
+	if (available && age >= 0) {
+		char duration[64];
+		format_duration(duration, age);
+		printf(", updated %s ago", duration);
+	}
+
+	putchar('\n');
+}
+
+/** Prints punch control status */
+static void print_punch_status(json_object *punch) {
+	if (!punch)
+		return;
+
+	printf("Punch:     relay %s, symmetric %s, hard-symmetric %s, max sockets %lld, max packets %lld\n",
+	       get_bool_member(punch, "control_relay") ? "on" : "off",
+	       get_bool_member(punch, "symmetric") ? "on" : "off",
+	       get_bool_member(punch, "hard_symmetric") ? "on" : "off", (long long)get_int_member(punch, "max_sockets"),
+	       (long long)get_int_member(punch, "max_packets"));
+
+	int64_t active = get_int_member(punch, "active_candidates");
+	if (active)
+		printf("           active punch candidates: %lld\n", (long long)active);
+
+	json_object *counters = get_object_member(punch, "counters");
+	if (!counters)
+		return;
+
+	int64_t tx = get_int_member(counters, "control_tx");
+	int64_t rx = get_int_member(counters, "control_rx");
+	int64_t handshakes = get_int_member(counters, "direct_handshakes");
+	int64_t success = get_int_member(counters, "direct_success");
+	int64_t failures = get_int_member(counters, "direct_failures");
+	int64_t exact_udp = get_int_member(counters, "udp_exact_tx");
+	if (tx || rx || handshakes || success || failures || exact_udp)
+		printf("           control tx %lld/rx %lld, direct handshakes %lld, success %lld, failures %lld, exact UDP %lld\n",
+		       (long long)tx, (long long)rx, (long long)handshakes, (long long)success, (long long)failures,
+		       (long long)exact_udp);
+}
+
 /** Prints a peer's hole punching status line */
 static void print_hole_punch_status(json_object *hole_punch) {
 	if (!hole_punch)
@@ -257,6 +318,10 @@ static void print_hole_punch_status(json_object *hole_punch) {
 		printf(" (local %lld, remote %lld)", (long long)local_port, (long long)remote_port);
 
 	putchar('\n');
+
+	int64_t direct_candidates = get_int_member(hole_punch, "direct_candidates");
+	if (!established && direct_candidates)
+		printf("       candidates: %lld direct\n", (long long)direct_candidates);
 }
 
 /** Prints a human-readable peer status */
@@ -353,6 +418,9 @@ static void print_status_human(json_object *json) {
 	if (interface)
 		printf("Interface: %s\n", interface);
 
+	print_nat_status(get_object_member(json, "nat"));
+	print_punch_status(get_object_member(json, "punch"));
+
 	printf("Peers:     %zu total, %zu established\n\n", peer_count, established_count);
 
 	json_object *stats = get_object_member(json, "statistics");
@@ -421,18 +489,26 @@ static const char *hole_punch_mode_name(fastd_hole_punch_mode_t mode) {
 /** Dumps a peer's hole punching status as a JSON object */
 static json_object *dump_hole_punch(const fastd_peer_t *peer) {
 	fastd_hole_punch_mode_t mode = fastd_peer_get_hole_punch(peer);
-	bool established = fastd_peer_is_established(peer) && fastd_socket_is_hole_punch(peer->sock);
+	bool established =
+		fastd_peer_is_established(peer) && (fastd_socket_is_hole_punch(peer->sock) || peer->direct_established);
 
 	struct json_object *ret = json_object_new_object();
 	json_object_object_add(ret, "mode", json_object_new_string(hole_punch_mode_name(mode)));
 	json_object_object_add(ret, "enabled", json_object_new_boolean(mode != HOLE_PUNCH_OFF));
 	json_object_object_add(ret, "established", json_object_new_boolean(established));
+	json_object_object_add(
+		ret, "direct_candidates", json_object_new_int64(fastd_peer_direct_candidate_count(peer)));
+	json_object_object_add(
+		ret, "punch_control_candidates",
+		json_object_new_int64(
+			fastd_peer_direct_candidate_count_by_source(peer, DIRECT_CANDIDATE_PUNCH_CONTROL)));
 
 	if (established) {
 		json_object_object_add(
 			ret, "transport", json_object_new_string(fastd_socket_is_tcp(peer->sock) ? "tcp" : "udp"));
 		json_object_object_add(
-			ret, "local_port", json_object_new_int(ntohs(fastd_peer_address_get_port(peer->sock->bound_addr))));
+			ret, "local_port",
+			json_object_new_int(ntohs(fastd_peer_address_get_port(peer->sock->bound_addr))));
 		json_object_object_add(
 			ret, "remote_port", json_object_new_int(ntohs(fastd_peer_address_get_port(&peer->address))));
 	} else {
@@ -440,6 +516,76 @@ static json_object *dump_hole_punch(const fastd_peer_t *peer) {
 		json_object_object_add(ret, "local_port", NULL);
 		json_object_object_add(ret, "remote_port", NULL);
 	}
+
+	return ret;
+}
+
+/** Dumps NAT detection status as a JSON object */
+static json_object *dump_nat(void) {
+	fastd_nat_status_t status = {};
+	struct json_object *ret = json_object_new_object();
+
+	if (!fastd_nat_get_status(&status)) {
+		json_object_object_add(ret, "enabled", json_object_new_boolean(false));
+		json_object_object_add(ret, "available", json_object_new_boolean(false));
+		json_object_object_add(ret, "type", json_object_new_string(fastd_nat_type_name(FASTD_NAT_UNKNOWN)));
+		json_object_object_add(ret, "public_address", NULL);
+		return ret;
+	}
+
+	json_object_object_add(ret, "enabled", json_object_new_boolean(status.enabled));
+	json_object_object_add(ret, "available", json_object_new_boolean(status.available));
+	json_object_object_add(ret, "type", json_object_new_string(fastd_nat_type_name(status.type)));
+
+	if (status.available) {
+		char addr_buf[1 + INET6_ADDRSTRLEN + 2 + IFNAMSIZ + 1 + 5 + 1];
+		fastd_snprint_peer_address(addr_buf, sizeof(addr_buf), &status.reflexive, NULL, false, false);
+		json_object_object_add(ret, "public_address", json_object_new_string(addr_buf));
+		json_object_object_add(ret, "min_port", json_object_new_int(status.min_port));
+		json_object_object_add(ret, "max_port", json_object_new_int(status.max_port));
+		json_object_object_add(ret, "port_delta", json_object_new_int(status.port_delta));
+		json_object_object_add(ret, "responses", json_object_new_int64(status.responses));
+		json_object_object_add(ret, "servers", json_object_new_int64(status.servers));
+		json_object_object_add(ret, "last_update", json_object_new_int64(status.last_update));
+		json_object_object_add(ret, "last_update_age", json_object_new_int64(ctx.now - status.last_update));
+	} else {
+		json_object_object_add(ret, "public_address", NULL);
+		json_object_object_add(ret, "min_port", NULL);
+		json_object_object_add(ret, "max_port", NULL);
+		json_object_object_add(ret, "port_delta", NULL);
+		json_object_object_add(ret, "responses", json_object_new_int64(status.responses));
+		json_object_object_add(ret, "servers", json_object_new_int64(status.servers));
+		json_object_object_add(ret, "last_update", NULL);
+		json_object_object_add(ret, "last_update_age", NULL);
+	}
+
+	return ret;
+}
+
+/** Dumps punch control status as a JSON object */
+static json_object *dump_punch(void) {
+	struct json_object *ret = json_object_new_object();
+	json_object_object_add(ret, "control_relay", json_object_new_boolean(conf.punch_control_relay));
+	json_object_object_add(ret, "symmetric", json_object_new_boolean(conf.punch_symmetric));
+	json_object_object_add(ret, "hard_symmetric", json_object_new_boolean(conf.punch_hard_symmetric));
+	json_object_object_add(ret, "max_sockets", json_object_new_int64(conf.punch_max_sockets));
+	json_object_object_add(ret, "max_packets", json_object_new_int64(conf.punch_max_packets));
+
+	size_t active_candidates = 0;
+	size_t i;
+	for (i = 0; i < VECTOR_LEN(ctx.peers); i++)
+		active_candidates += fastd_peer_direct_candidate_count_by_source(
+			VECTOR_INDEX(ctx.peers, i), DIRECT_CANDIDATE_PUNCH_CONTROL);
+	json_object_object_add(ret, "active_candidates", json_object_new_int64(active_candidates));
+
+	struct json_object *counters = json_object_new_object();
+	json_object_object_add(counters, "control_tx", json_object_new_int64(ctx.punch_control_tx));
+	json_object_object_add(counters, "control_rx", json_object_new_int64(ctx.punch_control_rx));
+	json_object_object_add(counters, "direct_handshakes", json_object_new_int64(ctx.punch_direct_handshakes));
+	json_object_object_add(counters, "direct_success", json_object_new_int64(ctx.punch_direct_success));
+	json_object_object_add(counters, "direct_failures", json_object_new_int64(ctx.punch_direct_failures));
+	json_object_object_add(counters, "udp_exact_tx", json_object_new_int64(ctx.punch_udp_exact_tx));
+	json_object_object_add(ret, "counters", counters);
 
 	return ret;
 }
@@ -535,6 +681,8 @@ static void dump_status(int fd) {
 		json_object_object_add(json, "interface", wrap_string_or_null(ctx.iface->name));
 
 	json_object_object_add(json, "statistics", dump_stats(&ctx.stats));
+	json_object_object_add(json, "nat", dump_nat());
+	json_object_object_add(json, "punch", dump_punch());
 
 	struct json_object *peers = json_object_new_object();
 	json_object_object_add(json, "peers", peers);

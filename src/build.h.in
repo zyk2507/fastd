@@ -101,6 +101,12 @@
 /** Defined if realm rendezvous support is enabled */
 #mesondefine WITH_REALM
 
+/** Defined if active NAT type detection support is enabled */
+#mesondefine WITH_NAT_DETECT
+
+/** Defined when internal test helpers are enabled */
+#mesondefine WITH_TESTS
+
 
 /** Defined if L2TP offloading is enabled */
 #mesondefine WITH_OFFLOAD_L2TP

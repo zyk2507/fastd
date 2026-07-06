@@ -229,11 +229,45 @@ struct fastd_iface {
 
 /** Realm rendezvous configuration */
 struct fastd_realm_config {
-	char *server;    /**< Base URL of the rendezvous server */
-	char *token;     /**< Bearer token used for realm registration and connection requests */
-	char *id;        /**< Realm ID advertised by this fastd instance */
-	char *stun_host; /**< Optional STUN server host used for UDP reflection */
+	char *server;       /**< Base URL of the rendezvous server */
+	char *token;        /**< Bearer token used for realm registration and connection requests */
+	char *id;           /**< Realm ID advertised by this fastd instance */
+	char *stun_host;    /**< Optional STUN server host used for UDP reflection */
 	uint16_t stun_port; /**< Optional STUN server port */
+};
+
+/** Configured STUN server for NAT type detection */
+struct fastd_stun_server {
+	char *host;    /**< STUN server hostname or address */
+	uint16_t port; /**< STUN server port */
+};
+
+/** NAT behavior classification */
+typedef enum fastd_nat_type {
+	FASTD_NAT_UNKNOWN = 0,        /**< No usable NAT classification is available */
+	FASTD_NAT_OPEN_INTERNET,      /**< Directly reachable public endpoint */
+	FASTD_NAT_NO_PAT,             /**< NAT changes the address but preserves the UDP port */
+	FASTD_NAT_FULL_CONE,          /**< Endpoint-independent mapping and filtering */
+	FASTD_NAT_RESTRICTED,         /**< Endpoint-independent mapping with address-restricted filtering */
+	FASTD_NAT_PORT_RESTRICTED,    /**< Endpoint-independent mapping with address-and-port filtering */
+	FASTD_NAT_SYMMETRIC,          /**< Endpoint-dependent mapping without predictable port direction */
+	FASTD_NAT_SYM_UDP_FIREWALL,   /**< Public address with endpoint-dependent UDP filtering */
+	FASTD_NAT_SYMMETRIC_EASY_INC, /**< Endpoint-dependent mapping with increasing public ports */
+	FASTD_NAT_SYMMETRIC_EASY_DEC, /**< Endpoint-dependent mapping with decreasing public ports */
+} fastd_nat_type_t;
+
+/** Snapshot of the latest NAT detection result */
+struct fastd_nat_status {
+	bool enabled;                   /**< true if NAT detection is configured and running */
+	bool available;                 /**< true if a successful STUN result is available */
+	fastd_nat_type_t type;          /**< Detected NAT behavior */
+	fastd_peer_address_t reflexive; /**< Latest server-reflexive UDP endpoint */
+	uint16_t min_port;              /**< Lowest observed public UDP port, host byte order */
+	uint16_t max_port;              /**< Highest observed public UDP port, host byte order */
+	int port_delta;                 /**< Typical public port delta for easy symmetric NATs */
+	size_t responses;               /**< Number of successful STUN responses used for classification */
+	size_t servers;                 /**< Number of configured STUN servers in the worker snapshot */
+	fastd_timeout_t last_update;    /**< Monotonic timestamp of the latest completed detection run */
 };
 
 
@@ -289,9 +323,15 @@ struct fastd_config {
 #ifdef USE_PACKET_MARK
 	uint32_t packet_mark; /**< The configured packet mark (or 0) */
 #endif
-	bool forward;        /**< Specifies if packet forwarding is enable */
-	bool peer_discovery; /**< Enables relay-assisted endpoint discovery for direct peer connections */
+	bool forward;               /**< Specifies if packet forwarding is enable */
+	bool peer_discovery;        /**< Enables relay-assisted endpoint discovery for direct peer connections */
+	bool punch_control_relay;   /**< Relays punch control messages without forwarding data-plane packets */
+	bool punch_symmetric;       /**< Enables bounded symmetric NAT punch predictions */
+	bool punch_hard_symmetric;  /**< Enables bounded hard-symmetric port scans */
+	unsigned punch_max_sockets; /**< Maximum predicted or probed sockets per punch command */
+	unsigned punch_max_packets; /**< Maximum punch control messages relayed per maintenance interval */
 	fastd_realm_config_t realm; /**< External rendezvous configuration for peer hole punching */
+	VECTOR(fastd_stun_server_t) stun_servers; /**< Global STUN servers used for NAT type detection */
 
 	fastd_drop_caps_t drop_caps; /**< Specifies if and when to drop capabilities */
 
@@ -396,9 +436,17 @@ struct fastd_context {
 #endif
 
 	fastd_port_mapping_t *port_mapping; /**< Global automatic port mapping state */
+	fastd_nat_detect_t *nat_detect;     /**< Global NAT behavior detection state */
 
-	fastd_task_t turn_task; /**< Drives the TURN relay GLib main context */
+	fastd_task_t turn_task;     /**< Drives the TURN relay GLib main context */
 	fastd_realm_state_t *realm; /**< External rendezvous runtime state */
+
+	uint64_t punch_control_tx;        /**< Number of punch control packets sent */
+	uint64_t punch_control_rx;        /**< Number of punch control packets received */
+	uint64_t punch_direct_handshakes; /**< Number of direct handshakes sent from punch control commands */
+	uint64_t punch_direct_success;    /**< Number of direct sessions established from punch control candidates */
+	uint64_t punch_direct_failures;   /**< Number of attempted punch control candidates that expired */
+	uint64_t punch_udp_exact_tx;      /**< Number of exact-endpoint UDP punch packets sent */
 
 	bool has_floating; /**< Specifies if any of the configured peers have floating remotes */
 	uint16_t max_mtu;  /**< The maximum MTU of all peer-specific interfaces */
@@ -430,6 +478,7 @@ struct fastd_context {
 	fastd_socket_t *socks;                    /**< Array of all sockets */
 	VECTOR(fastd_socket_t *) tcp_socks;       /**< Allocated TCP connection sockets */
 	VECTOR(fastd_socket_t *) udp_punch_socks; /**< Allocated unclaimed UDP hole punching sockets */
+	VECTOR(fastd_socket_t *) deferred_socks;  /**< Closed dynamic sockets waiting for safe memory release */
 
 	fastd_socket_t *sock_default_v4; /**< Points to the socket that is used for new outgoing IPv4 connections */
 	fastd_socket_t *sock_default_v6; /**< Points to the socket that is used for new outgoing IPv6 connections */
@@ -497,6 +546,7 @@ void fastd_hole_punch_claim_socket(fastd_socket_t *sock);
 void fastd_hole_punch_close_peer(fastd_peer_t *peer);
 void fastd_udp_punch_maintenance(void);
 void fastd_udp_punch_cleanup(void);
+void fastd_socket_free_deferred(void);
 void fastd_tcp_maintenance(void);
 void fastd_tcp_cleanup(void);
 
@@ -507,11 +557,24 @@ void fastd_port_mapping_init(void);
 void fastd_port_mapping_refresh(void);
 void fastd_port_mapping_handle(void);
 void fastd_port_mapping_handle_task(void);
+bool fastd_port_mapping_get_external_address(const fastd_socket_t *sock, fastd_peer_address_t *addr);
 void fastd_port_mapping_cleanup(void);
 
 bool fastd_turn_check(void);
 void fastd_turn_handle_task(void);
 void fastd_turn_cleanup(void);
+
+void fastd_nat_add_stun_server(const char *host, uint16_t port);
+bool fastd_nat_check(void);
+void fastd_nat_init(void);
+void fastd_nat_handle_task(void);
+void fastd_nat_cleanup(void);
+bool fastd_nat_get_status(fastd_nat_status_t *status);
+bool fastd_nat_get_public_address(fastd_peer_address_t *addr);
+const char *fastd_nat_type_name(fastd_nat_type_t type);
+
+bool fastd_punch_handle_control(fastd_peer_t *peer, fastd_buffer_t *buffer);
+void fastd_punch_maintenance(void);
 
 bool fastd_realm_check(void);
 void fastd_realm_init(void);

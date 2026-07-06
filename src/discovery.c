@@ -258,5 +258,12 @@ void fastd_discovery_peer_deleted(fastd_peer_t *peer) {
 
 		if (other->direct_relay == peer)
 			other->direct_relay = NULL;
+
+		for (size_t j = 0; j < VECTOR_LEN(other->direct_candidates);) {
+			if (VECTOR_INDEX(other->direct_candidates, j).relay == peer)
+				VECTOR_DELETE(other->direct_candidates, j);
+			else
+				j++;
+		}
 	}
 }

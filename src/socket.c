@@ -33,6 +33,22 @@ static void set_bound_address(fastd_socket_t *sock);
 static bool tcp_queue(fastd_socket_t *sock, fastd_peer_t *peer, const fastd_buffer_t *buffer, size_t stat_size);
 
 
+/** Defers freeing a closed dynamic socket until the current poll batch has drained */
+static void defer_socket_free(fastd_socket_t *sock) {
+	sock->fd.type = POLL_TYPE_UNSPEC;
+	VECTOR_ADD(ctx.deferred_socks, sock);
+}
+
+/** Frees dynamic sockets whose file descriptors have already been closed */
+void fastd_socket_free_deferred(void) {
+	while (VECTOR_LEN(ctx.deferred_socks)) {
+		fastd_socket_t *sock = VECTOR_INDEX(ctx.deferred_socks, VECTOR_LEN(ctx.deferred_socks) - 1);
+		VECTOR_DELETE(ctx.deferred_socks, VECTOR_LEN(ctx.deferred_socks) - 1);
+		free(sock);
+	}
+}
+
+
 /** Returns true if a transport mode may use TCP */
 static inline bool transport_uses_tcp(fastd_peer_transport_t transport) {
 	return transport == TRANSPORT_TCP || transport == TRANSPORT_AUTO;
@@ -195,7 +211,7 @@ static void close_udp_punch_socket(fastd_socket_t *sock) {
 
 	udp_punch_unlink(sock);
 	fastd_socket_close(sock);
-	free(sock);
+	defer_socket_free(sock);
 }
 
 /** Marks a hole punching socket as claimed by an authenticated peer */
@@ -252,7 +268,9 @@ static fastd_socket_t *find_tcp_hole_punch_socket(fastd_peer_t *peer, const fast
 /** Opens a TCP socket for active TCP hole punching */
 static fastd_socket_t *open_tcp_hole_punch_socket(fastd_peer_t *peer, const fastd_peer_address_t *remote_addr) {
 	if (VECTOR_LEN(ctx.tcp_socks) >= TCP_MAX_CONNECTIONS) {
-		pr_debug("not opening TCP hole punch connection for %P because the connection limit has been reached", peer);
+		pr_debug(
+			"not opening TCP hole punch connection for %P because the connection limit has been reached",
+			peer);
 		return NULL;
 	}
 
@@ -281,8 +299,8 @@ static fastd_socket_t *open_tcp_hole_punch_socket(fastd_peer_t *peer, const fast
 	set_tcp_options(fd);
 
 #ifdef USE_BINDTODEVICE
-	if (base_sock && base_sock->addr && base_sock->addr->bindtodev
-	    && !fastd_peer_address_is_v6_ll(&base_sock->addr->addr)) {
+	if (base_sock && base_sock->addr && base_sock->addr->bindtodev &&
+	    !fastd_peer_address_is_v6_ll(&base_sock->addr->addr)) {
 		if (setsockopt(
 			    fd, SOL_SOCKET, SO_BINDTODEVICE, base_sock->addr->bindtodev,
 			    strlen(base_sock->addr->bindtodev))) {
@@ -998,8 +1016,8 @@ static bool tcp_queue(fastd_socket_t *sock, fastd_peer_t *peer, const fastd_buff
 }
 
 /** Queues an initial handshake on deterministic TCP hole punching candidates */
-static void tcp_hole_punch_queue(
-	fastd_peer_t *peer, const fastd_peer_address_t *remote_addr, const fastd_buffer_t *buffer) {
+static void
+tcp_hole_punch_queue(fastd_peer_t *peer, const fastd_peer_address_t *remote_addr, const fastd_buffer_t *buffer) {
 	if (!peer || fastd_peer_is_established(peer) || !fastd_peer_hole_punch_allows(peer, TRANSPORT_TCP))
 		return;
 
@@ -1039,15 +1057,22 @@ static fastd_socket_t *find_udp_hole_punch_socket(fastd_peer_t *peer, const fast
 	return NULL;
 }
 
-/** Opens a UDP socket for active UDP hole punching */
-static fastd_socket_t *open_udp_hole_punch_socket(fastd_peer_t *peer, const fastd_peer_address_t *remote_addr) {
+/** Opens a UDP socket for active UDP hole punching with a selected local source port */
+static fastd_socket_t *
+open_udp_hole_punch_socket_local(fastd_peer_t *peer, const fastd_peer_address_t *remote_addr, uint16_t local_port) {
+	unsigned limit = conf.punch_max_sockets ? conf.punch_max_sockets : 1;
+	if (VECTOR_LEN(ctx.udp_punch_socks) >= limit) {
+		pr_debug("not opening UDP punch socket for %P because the punch socket limit has been reached", peer);
+		return NULL;
+	}
+
 	const fastd_socket_t *base_sock = get_default_socket(remote_addr->sa.sa_family);
 
 	fastd_peer_address_t local_addr = { .sa.sa_family = remote_addr->sa.sa_family };
 	if (base_sock && base_sock->bound_addr && base_sock->bound_addr->sa.sa_family == remote_addr->sa.sa_family)
 		local_addr = *base_sock->bound_addr;
 
-	set_address_port(&local_addr, ntohs(fastd_peer_address_get_port(remote_addr)));
+	set_address_port(&local_addr, local_port);
 
 	fastd_bind_address_t bind_address = {
 		.addr = local_addr,
@@ -1070,6 +1095,31 @@ static fastd_socket_t *open_udp_hole_punch_socket(fastd_peer_t *peer, const fast
 	return sock;
 }
 
+/** Opens a UDP socket using the deterministic target port as local source port */
+static fastd_socket_t *open_udp_hole_punch_socket(fastd_peer_t *peer, const fastd_peer_address_t *remote_addr) {
+	return open_udp_hole_punch_socket_local(peer, remote_addr, ntohs(fastd_peer_address_get_port(remote_addr)));
+}
+
+/** Sends one handshake from an ephemeral UDP punch socket to the exact remote endpoint */
+static bool
+udp_punch_send_exact(fastd_peer_t *peer, const fastd_peer_address_t *remote_addr, const fastd_buffer_t *buffer) {
+	fastd_socket_t *sock = find_udp_hole_punch_socket(peer, remote_addr);
+	if (!sock)
+		sock = open_udp_hole_punch_socket_local(peer, remote_addr, 0);
+
+	if (!sock)
+		return false;
+
+	ssize_t ret = sendto(sock->fd.fd, buffer->data, buffer->len, 0, &remote_addr->sa, address_len(remote_addr));
+	if (ret < 0) {
+		pr_debug2_errno("UDP exact punch sendto");
+		return false;
+	}
+
+	ctx.punch_udp_exact_tx++;
+	return true;
+}
+
 /** Sends an initial handshake on deterministic UDP hole punching candidates */
 bool fastd_udp_punch_send(
 	fastd_peer_t *peer, UNUSED const fastd_socket_t *base_sock, const fastd_peer_address_t *remote_addr,
@@ -1082,6 +1132,10 @@ bool fastd_udp_punch_send(
 
 	if (remote_addr->sa.sa_family != AF_INET)
 		return false;
+
+	bool exact_udp_punch = false;
+	if (fastd_peer_is_current_punch_control_candidate(peer, remote_addr, &exact_udp_punch))
+		return exact_udp_punch ? udp_punch_send_exact(peer, remote_addr, buffer) : false;
 
 	uint16_t ports[FASTD_HOLE_PUNCH_NUM_PORTS * FASTD_HOLE_PUNCH_BUCKETS];
 	size_t n_ports = fastd_hole_punch_generate_ports(ports, array_size(ports), time(NULL));
@@ -1099,7 +1153,8 @@ bool fastd_udp_punch_send(
 		if (!sock)
 			continue;
 
-		ssize_t ret = sendto(sock->fd.fd, buffer->data, buffer->len, 0, &punch_addr.sa, address_len(&punch_addr));
+		ssize_t ret =
+			sendto(sock->fd.fd, buffer->data, buffer->len, 0, &punch_addr.sa, address_len(&punch_addr));
 		if (ret < 0)
 			pr_debug2_errno("UDP punch sendto");
 		else
@@ -1114,7 +1169,8 @@ bool fastd_tcp_send(
 	fastd_peer_t *peer, fastd_socket_t *sock, UNUSED const fastd_peer_address_t *local_addr,
 	const fastd_peer_address_t *remote_addr, const fastd_buffer_t *buffer, size_t stat_size) {
 	if (sock && sock->type == SOCKET_TYPE_TCP_CONNECTION) {
-		if (fastd_peer_address_equal(&sock->peer_addr, remote_addr) && (!sock->peer || !peer || sock->peer == peer)) {
+		if (fastd_peer_address_equal(&sock->peer_addr, remote_addr) &&
+		    (!sock->peer || !peer || sock->peer == peer)) {
 			if (!stat_size && sock->peer == peer)
 				tcp_hole_punch_queue(peer, remote_addr, buffer);
 

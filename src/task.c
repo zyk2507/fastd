@@ -19,6 +19,7 @@ static inline void maintenance(void) {
 	fastd_peer_eth_addr_cleanup();
 	fastd_tcp_maintenance();
 	fastd_udp_punch_maintenance();
+	fastd_punch_maintenance();
 	fastd_task_reschedule_relative(&ctx.next_maintenance, MAINTENANCE_INTERVAL);
 }
 
@@ -46,6 +47,10 @@ static void handle_task(void) {
 
 	case TASK_TYPE_REALM:
 		fastd_realm_handle_task();
+		break;
+
+	case TASK_TYPE_NAT_DETECT:
+		fastd_nat_handle_task();
 		break;
 
 	default:
