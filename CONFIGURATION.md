@@ -202,7 +202,7 @@ fastd --config fastd.conf --status --json
 fastd --status-socket /run/fastd.sock --status
 ```
 
-普通 `--status` 输出人类可读状态；加 `--json` 输出原始 JSON。
+普通 `--status` 输出人类可读的表格状态，包含 `Overview`、`NAT`、`Punch`、`Traffic`、`Peers`、`Connections` 和 `Hole Punch` 等区块。`Peers` 展示 peer 名称、公钥、当前 endpoint、接口、MTU 和流量计数；`Connections` 展示已建立连接的 active endpoint、transport、接口和是否通过打洞建立；`NAT` / `Punch` / `Hole Punch` 用于观察 NAT 探测和打洞状态。加 `--json` 输出原始 JSON，更适合脚本、监控和兼容性稳定的机器读取场景。
 
 ### 全局生命周期 hook
 

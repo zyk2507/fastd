@@ -425,11 +425,12 @@ Example config:
 | ``status socket "<socket>";``
 
   Configures a UNIX socket which can be used to retrieve the current state of fastd. The status can be queried with
-  ``fastd --config <config> --status`` or ``fastd --status-socket <socket> --status``. The default output is
-  human-readable; add ``--json`` to print the raw JSON status dump. An example script to get the status can be found
-  at ``doc/examples/status.pl`` in the fastd repository. Peer status includes a ``hole_punch`` object that reports the
-  configured mode, whether hole punching is enabled, and whether the current connection was established through hole
-  punching. Established peer connections include their active ``transport`` and the same ``hole_punch`` object.
+  ``fastd --config <config> --status`` or ``fastd --status-socket <socket> --status``. The default output is a set of
+  human-readable tables with ``Overview``, ``NAT``, ``Punch``, ``Traffic``, ``Peers``, ``Connections`` and
+  ``Hole Punch`` sections. The peer and connection tables include names, public keys, endpoint addresses, traffic
+  counters, interface/MTU information, active transports and hole-punch state. Add ``--json`` to print the raw JSON
+  status dump instead; this format is better suited for scripts and monitoring. An example script to get the status can
+  be found at ``doc/examples/status.pl`` in the fastd repository.
 
 | ``user "<user>";``
 

@@ -19,10 +19,11 @@ Command line options and config files are parsed in order they are specified, so
   Configures a socket to get fastd's status.
 
 --status
-  Queries the configured status socket and exits. By default, the status is printed in a human-readable format.
+  Queries the configured status socket and exits. By default, the status is printed as human-readable tables covering
+  the overview, NAT detection, punching state, traffic counters, peers, connections and hole-punch details.
 
 --json
-  Prints ``--status`` output as JSON.
+  Prints ``--status`` output as JSON. Use this format for scripts and monitoring integrations.
 
 --log-level error|warn|info|verbose|debug|debug2
   Sets the stderr log level; default is info,
