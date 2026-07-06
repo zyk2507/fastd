@@ -21,6 +21,8 @@
 #include "offload/offload.h"
 #include "peer.h"
 
+#include "dep/libfort/fort.h"
+
 #include <json-c/json.h>
 #include <sys/file.h>
 #include <sys/socket.h>
@@ -217,197 +219,387 @@ static void format_bytes(char buf[32], int64_t bytes) {
 		snprintf(buf, 32, "%.1f %s", value, units[unit]);
 }
 
-/** Prints a statistics line */
-static void print_stat_line(const char *label, json_object *stats, const char *name) {
-	char bytes[32];
-	format_bytes(bytes, get_stat_counter(stats, name, "bytes"));
-
-	printf("  %-12s %12s  %8lld packets\n", label, bytes, (long long)get_stat_counter(stats, name, "packets"));
+/** Returns a display string for optional values */
+static const char *value_or_dash(const char *value) {
+	return value && *value ? value : "-";
 }
 
-/** Prints a compact traffic summary */
-static void print_traffic_summary(json_object *stats) {
-	print_stat_line("RX", stats, "rx");
-	print_stat_line("TX", stats, "tx");
-	print_stat_line("RX reorder", stats, "rx_reordered");
-	print_stat_line("TX dropped", stats, "tx_dropped");
-	print_stat_line("TX error", stats, "tx_error");
+/** Returns "on" or "off" for booleans */
+static const char *onoff(bool value) {
+	return value ? "on" : "off";
 }
 
-/** Prints NAT detection status */
-static void print_nat_status(json_object *nat) {
-	if (!nat || !get_bool_member(nat, "enabled"))
+/** Formats an integer counter */
+static void format_counter(char buf[32], int64_t value) {
+	snprintf(buf, 32, "%lld", (long long)value);
+}
+
+/** Formats an optional integer counter */
+static void format_optional_counter(char buf[32], int64_t value) {
+	if (value)
+		format_counter(buf, value);
+	else
+		snprintf(buf, 32, "-");
+}
+
+/** Formats a port range from NAT metadata */
+static void format_port_range(char buf[64], json_object *nat) {
+	if (!get_bool_member(nat, "available")) {
+		snprintf(buf, 64, "-");
 		return;
-
-	const char *type = get_string_member(nat, "type");
-	const char *public_address = get_string_member(nat, "public_address");
-	bool available = get_bool_member(nat, "available");
-
-	printf("NAT:       %s", type ? type : "unknown");
-	if (available && public_address && *public_address)
-		printf(", public %s", public_address);
+	}
 
 	int64_t min_port = get_int_member(nat, "min_port");
 	int64_t max_port = get_int_member(nat, "max_port");
-	if (min_port && max_port && min_port != max_port)
-		printf(", ports %lld-%lld", (long long)min_port, (long long)max_port);
-
-	int64_t age = get_int_member(nat, "last_update_age");
-	if (available && age >= 0) {
-		char duration[64];
-		format_duration(duration, age);
-		printf(", updated %s ago", duration);
+	if (!min_port || !max_port) {
+		snprintf(buf, 64, "-");
+		return;
 	}
 
-	putchar('\n');
+	if (min_port == max_port)
+		snprintf(buf, 64, "%lld", (long long)min_port);
+	else
+		snprintf(buf, 64, "%lld-%lld", (long long)min_port, (long long)max_port);
 }
 
-/** Prints punch control status */
-static void print_punch_status(json_object *punch) {
+/** Formats an optional peer port */
+static void format_peer_port(char buf[32], json_object *object, const char *key) {
+	int64_t port = get_int_member(object, key);
+	if (port)
+		snprintf(buf, 32, "%lld", (long long)port);
+	else
+		snprintf(buf, 32, "-");
+}
+
+/** Returns a newly allocated comma-separated list of JSON array strings */
+static char *join_string_array(json_object *array) {
+	size_t len = array ? json_object_array_length(array) : 0;
+	if (!len)
+		return fastd_strdup("-");
+
+	size_t alloc = 1;
+	size_t i;
+	for (i = 0; i < len; i++) {
+		const char *str = json_object_get_string(json_object_array_get_idx(array, i));
+		if (str)
+			alloc += strlen(str);
+		if (i)
+			alloc += 2;
+	}
+
+	char *ret = fastd_alloc(alloc);
+	char *pos = ret;
+	size_t left = alloc;
+	ret[0] = 0;
+
+	for (i = 0; i < len; i++) {
+		const char *str = json_object_get_string(json_object_array_get_idx(array, i));
+		int written = snprintf(pos, left, "%s%s", i ? ", " : "", str ? str : "");
+		if (written < 0 || (size_t)written >= left)
+			break;
+		pos += written;
+		left -= written;
+	}
+
+	return ret;
+}
+
+/** Creates a libfort table with fastd's status style */
+static ft_table_t *create_status_table(void) {
+	ft_table_t *table = ft_create_table();
+	if (!table)
+		exit_error("status query: unable to create output table");
+
+	ft_set_border_style(table, FT_NICE_STYLE);
+	ft_set_cell_prop(table, FT_ANY_ROW, FT_ANY_COLUMN, FT_CPROP_LEFT_PADDING, 1);
+	ft_set_cell_prop(table, FT_ANY_ROW, FT_ANY_COLUMN, FT_CPROP_RIGHT_PADDING, 1);
+
+	return table;
+}
+
+/** Marks the last-written row as a table header */
+static void mark_header_row(ft_table_t *table, size_t row) {
+	ft_set_cell_prop(table, row, FT_ANY_COLUMN, FT_CPROP_ROW_TYPE, FT_ROW_HEADER);
+}
+
+/** Prints and destroys a libfort table */
+static void print_status_table(const char *title, ft_table_t *table) {
+	if (!table)
+		return;
+
+	if (ft_is_empty(table)) {
+		ft_destroy_table(table);
+		return;
+	}
+
+	if (title)
+		printf("%s\n", title);
+
+	const char *str = ft_to_string(table);
+	if (!str) {
+		ft_destroy_table(table);
+		exit_error("status query: unable to render output table");
+	}
+
+	fputs(str, stdout);
+	if (!strlen(str) || str[strlen(str) - 1] != '\n')
+		putchar('\n');
+	putchar('\n');
+
+	ft_destroy_table(table);
+}
+
+/** Adds a two-column header row */
+static void add_key_value_header(ft_table_t *table) {
+	size_t row = ft_cur_row(table);
+	ft_write_ln(table, "Item", "Value");
+	mark_header_row(table, row);
+}
+
+/** Adds a row to a key/value table */
+static void add_key_value_row(ft_table_t *table, const char *key, const char *value) {
+	ft_write_ln(table, key, value_or_dash(value));
+}
+
+/** Prints the top-level fastd status summary */
+static void print_overview_table(json_object *json, size_t peer_count, size_t established_count) {
+	ft_table_t *table = create_status_table();
+	add_key_value_header(table);
+
+	char duration[64];
+	format_duration(duration, get_int_member(json, "uptime"));
+	add_key_value_row(table, "Uptime", duration);
+	add_key_value_row(table, "Interface", get_string_member(json, "interface"));
+
+	char peers[64];
+	snprintf(peers, sizeof(peers), "%zu total, %zu established", peer_count, established_count);
+	add_key_value_row(table, "Peers", peers);
+
+	print_status_table("Overview", table);
+}
+
+/** Prints NAT detection status as a table */
+static void print_nat_table(json_object *nat) {
+	ft_table_t *table = create_status_table();
+	add_key_value_header(table);
+
+	if (!nat) {
+		add_key_value_row(table, "Enabled", "off");
+		add_key_value_row(table, "Type", "unknown");
+		print_status_table("NAT", table);
+		return;
+	}
+
+	bool available = get_bool_member(nat, "available");
+	add_key_value_row(table, "Enabled", onoff(get_bool_member(nat, "enabled")));
+	add_key_value_row(table, "Available", available ? "yes" : "no");
+	add_key_value_row(table, "Type", value_or_dash(get_string_member(nat, "type")));
+	add_key_value_row(table, "Public address", get_string_member(nat, "public_address"));
+
+	char ports[64];
+	format_port_range(ports, nat);
+	add_key_value_row(table, "Port range", ports);
+
+	char delta[32];
+	if (available)
+		format_counter(delta, get_int_member(nat, "port_delta"));
+	else
+		snprintf(delta, sizeof(delta), "-");
+	add_key_value_row(table, "Port delta", delta);
+
+	char servers[32], responses[32], age[64];
+	format_counter(servers, get_int_member(nat, "servers"));
+	format_counter(responses, get_int_member(nat, "responses"));
+	add_key_value_row(table, "STUN servers", servers);
+	add_key_value_row(table, "STUN responses", responses);
+
+	if (available)
+		format_duration(age, get_int_member(nat, "last_update_age"));
+	else
+		snprintf(age, sizeof(age), "-");
+	add_key_value_row(table, "Last update age", age);
+
+	print_status_table("NAT", table);
+}
+
+/** Prints punch control status as a table */
+static void print_punch_table(json_object *punch) {
 	if (!punch)
 		return;
 
-	printf("Punch:     relay %s, symmetric %s, hard-symmetric %s, max sockets %lld, max packets %lld\n",
-	       get_bool_member(punch, "control_relay") ? "on" : "off",
-	       get_bool_member(punch, "symmetric") ? "on" : "off",
-	       get_bool_member(punch, "hard_symmetric") ? "on" : "off", (long long)get_int_member(punch, "max_sockets"),
-	       (long long)get_int_member(punch, "max_packets"));
+	ft_table_t *table = create_status_table();
+	add_key_value_header(table);
 
-	int64_t active = get_int_member(punch, "active_candidates");
-	if (active)
-		printf("           active punch candidates: %lld\n", (long long)active);
-
-	int64_t suppressions = get_int_member(punch, "active_suppressions");
-	if (suppressions)
-		printf("           suppressed punch endpoints: %lld\n", (long long)suppressions);
+	char value[32];
+	add_key_value_row(table, "Control relay", onoff(get_bool_member(punch, "control_relay")));
+	add_key_value_row(table, "Symmetric punch", onoff(get_bool_member(punch, "symmetric")));
+	add_key_value_row(table, "Hard-symmetric punch", onoff(get_bool_member(punch, "hard_symmetric")));
+	format_counter(value, get_int_member(punch, "max_sockets"));
+	add_key_value_row(table, "Max sockets", value);
+	format_counter(value, get_int_member(punch, "max_packets"));
+	add_key_value_row(table, "Max packets", value);
+	format_counter(value, get_int_member(punch, "active_candidates"));
+	add_key_value_row(table, "Active candidates", value);
+	format_counter(value, get_int_member(punch, "active_suppressions"));
+	add_key_value_row(table, "Suppressed endpoints", value);
 
 	json_object *counters = get_object_member(punch, "counters");
-	if (!counters)
-		return;
-
-	int64_t tx = get_int_member(counters, "control_tx");
-	int64_t rx = get_int_member(counters, "control_rx");
-	int64_t handshakes = get_int_member(counters, "direct_handshakes");
-	int64_t success = get_int_member(counters, "direct_success");
-	int64_t failures = get_int_member(counters, "direct_failures");
-	int64_t suppressed = get_int_member(counters, "direct_suppressed");
-	int64_t exact_udp = get_int_member(counters, "udp_exact_tx");
-	int64_t result_tx = get_int_member(counters, "result_tx");
-	int64_t result_rx = get_int_member(counters, "result_rx");
-	if (tx || rx || handshakes || success || failures || suppressed || exact_udp || result_tx || result_rx)
-		printf(
-			"           control tx %lld/rx %lld, direct handshakes %lld, success %lld, failures %lld, "
-			"suppressed %lld, exact UDP %lld, results tx %lld/rx %lld\n",
-			(long long)tx, (long long)rx, (long long)handshakes, (long long)success,
-			(long long)failures, (long long)suppressed, (long long)exact_udp, (long long)result_tx,
-			(long long)result_rx);
-}
-
-/** Prints a peer's hole punching status line */
-static void print_hole_punch_status(json_object *hole_punch) {
-	if (!hole_punch)
-		return;
-
-	bool enabled = get_bool_member(hole_punch, "enabled");
-	bool established = get_bool_member(hole_punch, "established");
-	if (!enabled && !established)
-		return;
-
-	const char *mode = get_string_member(hole_punch, "mode");
-	const char *transport = get_string_member(hole_punch, "transport");
-
-	printf("       hole punch: %s", established ? "established" : "enabled");
-	if (established && transport)
-		printf(" via %s", transport);
-	if (mode)
-		printf(" (%s)", mode);
-
-	int64_t local_port = get_int_member(hole_punch, "local_port");
-	int64_t remote_port = get_int_member(hole_punch, "remote_port");
-	if (established && local_port && remote_port)
-		printf(" (local %lld, remote %lld)", (long long)local_port, (long long)remote_port);
-
-	putchar('\n');
-
-	int64_t direct_candidates = get_int_member(hole_punch, "direct_candidates");
-	if (!established && direct_candidates)
-		printf("       candidates: %lld direct\n", (long long)direct_candidates);
-}
-
-/** Prints a human-readable peer status */
-static void print_peer_status(const char *key, json_object *peer) {
-	const char *name = get_string_member(peer, "name");
-	const char *address = get_string_member(peer, "address");
-	json_object *connection = get_object_member(peer, "connection");
-	bool established = connection != NULL;
-
-	printf("  [%s] %s\n", established ? "up" : "down", name ? name : key);
-
-	if (name)
-		printf("       key:       %s\n", key);
-	printf("       address:   %s\n", (address && *address) ? address : "-");
-
-	const char *interface = get_string_member(peer, "interface");
-	if (interface)
-		printf("       interface: %s\n", interface);
-
-	int64_t mtu = get_int_member(peer, "mtu");
-	if (mtu)
-		printf("       mtu:       %lld\n", (long long)mtu);
-
-	json_object *hole_punch = get_object_member(peer, "hole_punch");
-	bool hole_punch_established = get_bool_member(hole_punch, "established");
-
-	if (!established) {
-		print_hole_punch_status(hole_punch);
-		putchar('\n');
-		return;
-	}
-
-	char duration[64];
-	format_duration(duration, get_int_member(connection, "established"));
-	printf("       connected: %s\n", duration);
-
-	const char *transport = get_string_member(connection, "transport");
-	if (transport)
-		printf("       transport: %s%s\n", transport, hole_punch_established ? " (hole-punch)" : "");
-
-	const char *method = get_string_member(connection, "method");
-	if (method)
-		printf("       method:    %s\n", method);
-
-	print_hole_punch_status(hole_punch);
-
-	json_object *stats = get_object_member(connection, "statistics");
-	if (stats) {
-		char rx[32], tx[32];
-		format_bytes(rx, get_stat_counter(stats, "rx", "bytes"));
-		format_bytes(tx, get_stat_counter(stats, "tx", "bytes"));
-		printf("       traffic:   RX %s / TX %s\n", rx, tx);
-	}
-
-	json_object *macs = get_array_member(connection, "mac_addresses");
-	if (macs && json_object_array_length(macs)) {
-		printf("       macs:      ");
+	if (counters) {
+		static const char *const names[] = {
+			"control_tx",		"control_rx",		"direct_handshakes",
+			"direct_success",	"direct_failures",	"direct_suppressed",
+			"udp_exact_tx",		"result_tx",		"result_rx",
+			"result_accepted",	"result_handshake",	"result_suppressed",
+			"result_no_peer",
+		};
 
 		size_t i;
-		for (i = 0; i < json_object_array_length(macs); i++) {
-			if (i)
-				printf(", ");
-			printf("%s", json_object_get_string(json_object_array_get_idx(macs, i)));
+		for (i = 0; i < array_size(names); i++) {
+			format_counter(value, get_int_member(counters, names[i]));
+			add_key_value_row(table, names[i], value);
 		}
-
-		putchar('\n');
 	}
 
-	putchar('\n');
+	print_status_table("Punch", table);
+}
+
+/** Adds one traffic statistics row */
+static void add_traffic_row(ft_table_t *table, const char *label, json_object *stats, const char *name) {
+	char bytes[32], packets[32];
+	format_bytes(bytes, get_stat_counter(stats, name, "bytes"));
+	format_counter(packets, get_stat_counter(stats, name, "packets"));
+	ft_write_ln(table, label, bytes, packets);
+}
+
+/** Prints a compact traffic summary table */
+static void print_traffic_table(json_object *stats) {
+	if (!stats)
+		return;
+
+	ft_table_t *table = create_status_table();
+	size_t row = ft_cur_row(table);
+	ft_write_ln(table, "Metric", "Bytes", "Packets");
+	mark_header_row(table, row);
+	ft_set_cell_prop(table, FT_ANY_ROW, 2, FT_CPROP_TEXT_ALIGN, FT_ALIGNED_RIGHT);
+
+	add_traffic_row(table, "RX", stats, "rx");
+	add_traffic_row(table, "TX", stats, "tx");
+	add_traffic_row(table, "RX reorder", stats, "rx_reordered");
+	add_traffic_row(table, "TX dropped", stats, "tx_dropped");
+	add_traffic_row(table, "TX error", stats, "tx_error");
+
+	print_status_table("Traffic", table);
+}
+
+/** Returns the display name for a peer */
+static const char *peer_display_name(const char *key, json_object *peer) {
+	const char *name = get_string_member(peer, "name");
+	return name && *name ? name : key;
+}
+
+/** Prints the peer list table */
+static void print_peer_list_table(json_object *peers) {
+	if (!peers || !json_object_object_length(peers))
+		return;
+
+	ft_table_t *table = create_status_table();
+	size_t row = ft_cur_row(table);
+	ft_write_ln(table, "State", "Peer", "Key", "Address", "Interface", "MTU");
+	mark_header_row(table, row);
+	ft_set_cell_prop(table, FT_ANY_ROW, 5, FT_CPROP_TEXT_ALIGN, FT_ALIGNED_RIGHT);
+
+	json_object_object_foreach(peers, key, peer) {
+		json_object *connection = get_object_member(peer, "connection");
+		const char *state = connection ? "up" : "down";
+		const char *name = peer_display_name(key, peer);
+		const char *interface = get_string_member(peer, "interface");
+
+		char mtu[32];
+		format_optional_counter(mtu, get_int_member(peer, "mtu"));
+
+		ft_write_ln(
+			table, state, name, key, value_or_dash(get_string_member(peer, "address")),
+			value_or_dash(interface), mtu);
+	}
+
+	print_status_table("Peers", table);
+}
+
+/** Prints established connection details */
+static void print_connection_table(json_object *peers) {
+	if (!peers || !json_object_object_length(peers))
+		return;
+
+	ft_table_t *table = create_status_table();
+	size_t row = ft_cur_row(table);
+	ft_write_ln(table, "Peer", "Connected", "Transport", "Method", "RX", "TX", "MACs");
+	mark_header_row(table, row);
+
+	json_object_object_foreach(peers, key, peer) {
+		json_object *connection = get_object_member(peer, "connection");
+		if (!connection)
+			continue;
+
+		char connected[64], rx[32], tx[32];
+		format_duration(connected, get_int_member(connection, "established"));
+
+		json_object *stats = get_object_member(connection, "statistics");
+		format_bytes(rx, stats ? get_stat_counter(stats, "rx", "bytes") : 0);
+		format_bytes(tx, stats ? get_stat_counter(stats, "tx", "bytes") : 0);
+
+		char *macs = join_string_array(get_array_member(connection, "mac_addresses"));
+		ft_write_ln(
+			table, peer_display_name(key, peer), connected, value_or_dash(get_string_member(connection, "transport")),
+			value_or_dash(get_string_member(connection, "method")), rx, tx, macs);
+		free(macs);
+	}
+
+	print_status_table("Connections", table);
+}
+
+/** Prints hole punching state for all peers */
+static void print_hole_punch_table(json_object *peers) {
+	if (!peers || !json_object_object_length(peers))
+		return;
+
+	ft_table_t *table = create_status_table();
+	size_t row = ft_cur_row(table);
+	ft_write_ln(
+		table, "Peer", "State", "Mode", "Transport", "Local port", "Remote port", "Direct candidates",
+		"Punch candidates", "Symmetric", "Hard symmetric");
+	mark_header_row(table, row);
+	ft_set_cell_prop(table, FT_ANY_ROW, 4, FT_CPROP_TEXT_ALIGN, FT_ALIGNED_RIGHT);
+	ft_set_cell_prop(table, FT_ANY_ROW, 5, FT_CPROP_TEXT_ALIGN, FT_ALIGNED_RIGHT);
+	ft_set_cell_prop(table, FT_ANY_ROW, 6, FT_CPROP_TEXT_ALIGN, FT_ALIGNED_RIGHT);
+	ft_set_cell_prop(table, FT_ANY_ROW, 7, FT_CPROP_TEXT_ALIGN, FT_ALIGNED_RIGHT);
+
+	json_object_object_foreach(peers, key, peer) {
+		json_object *hole_punch = get_object_member(peer, "hole_punch");
+		if (!hole_punch)
+			continue;
+
+		bool established = get_bool_member(hole_punch, "established");
+		bool enabled = get_bool_member(hole_punch, "enabled");
+		const char *state = established ? "established" : (enabled ? "enabled" : "off");
+
+		char local_port[32], remote_port[32], direct_candidates[32], punch_candidates[32];
+		format_peer_port(local_port, hole_punch, "local_port");
+		format_peer_port(remote_port, hole_punch, "remote_port");
+		format_counter(direct_candidates, get_int_member(hole_punch, "direct_candidates"));
+		format_counter(punch_candidates, get_int_member(hole_punch, "punch_control_candidates"));
+
+		ft_write_ln(
+			table, peer_display_name(key, peer), state, value_or_dash(get_string_member(hole_punch, "mode")),
+			value_or_dash(get_string_member(hole_punch, "transport")), local_port, remote_port,
+			direct_candidates, punch_candidates, onoff(get_bool_member(hole_punch, "symmetric")),
+			onoff(get_bool_member(hole_punch, "hard_symmetric")));
+	}
+
+	print_status_table("Hole Punch", table);
 }
 
 /** Prints a human-readable status dump */
 static void print_status_human(json_object *json) {
-	char duration[64];
-	format_duration(duration, get_int_member(json, "uptime"));
-
 	json_object *peers = get_object_member(json, "peers");
 	size_t peer_count = 0, established_count = 0;
 
@@ -422,31 +614,14 @@ static void print_status_human(json_object *json) {
 
 	printf("fastd status\n");
 	printf("============\n\n");
-	printf("Uptime:    %s\n", duration);
 
-	const char *interface = get_string_member(json, "interface");
-	if (interface)
-		printf("Interface: %s\n", interface);
-
-	print_nat_status(get_object_member(json, "nat"));
-	print_punch_status(get_object_member(json, "punch"));
-
-	printf("Peers:     %zu total, %zu established\n\n", peer_count, established_count);
-
-	json_object *stats = get_object_member(json, "statistics");
-	if (stats) {
-		printf("Traffic\n");
-		print_traffic_summary(stats);
-		putchar('\n');
-	}
-
-	if (!peers || !peer_count)
-		return;
-
-	printf("Peers\n");
-	json_object_object_foreach(peers, key, peer) {
-		print_peer_status(key, peer);
-	}
+	print_overview_table(json, peer_count, established_count);
+	print_nat_table(get_object_member(json, "nat"));
+	print_punch_table(get_object_member(json, "punch"));
+	print_traffic_table(get_object_member(json, "statistics"));
+	print_peer_list_table(peers);
+	print_connection_table(peers);
+	print_hole_punch_table(peers);
 }
 
 /** Queries a status socket and prints its result */

@@ -32,6 +32,13 @@ test('nat-traversal',
 )
 
 bash = find_program('bash')
+test('status-output',
+	bash,
+	args : [files('test-status-output.sh'), fastd_exe.full_path()],
+	protocol : 'tap',
+	timeout : 30,
+)
+
 test('nat-punch-netns',
 	bash,
 	args : [files('test-nat-punch-netns.sh'), fastd_exe.full_path()],

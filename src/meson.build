@@ -179,6 +179,8 @@ endif
 
 with_status_socket = not get_option('status_socket').disabled()
 if with_status_socket
+	subdir('dep/libfort')
+	deps += libfort_dep
 	deps += dependency('json-c')
 endif
 
