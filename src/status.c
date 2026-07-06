@@ -292,12 +292,15 @@ static void print_punch_status(json_object *punch) {
 	int64_t failures = get_int_member(counters, "direct_failures");
 	int64_t suppressed = get_int_member(counters, "direct_suppressed");
 	int64_t exact_udp = get_int_member(counters, "udp_exact_tx");
-	if (tx || rx || handshakes || success || failures || suppressed || exact_udp)
+	int64_t result_tx = get_int_member(counters, "result_tx");
+	int64_t result_rx = get_int_member(counters, "result_rx");
+	if (tx || rx || handshakes || success || failures || suppressed || exact_udp || result_tx || result_rx)
 		printf(
 			"           control tx %lld/rx %lld, direct handshakes %lld, success %lld, failures %lld, "
-			"suppressed %lld, exact UDP %lld\n",
+			"suppressed %lld, exact UDP %lld, results tx %lld/rx %lld\n",
 			(long long)tx, (long long)rx, (long long)handshakes, (long long)success,
-			(long long)failures, (long long)suppressed, (long long)exact_udp);
+			(long long)failures, (long long)suppressed, (long long)exact_udp, (long long)result_tx,
+			(long long)result_rx);
 }
 
 /** Prints a peer's hole punching status line */
@@ -600,6 +603,12 @@ static json_object *dump_punch(void) {
 	json_object_object_add(counters, "direct_failures", json_object_new_int64(ctx.punch_direct_failures));
 	json_object_object_add(counters, "direct_suppressed", json_object_new_int64(ctx.punch_direct_suppressed));
 	json_object_object_add(counters, "udp_exact_tx", json_object_new_int64(ctx.punch_udp_exact_tx));
+	json_object_object_add(counters, "result_tx", json_object_new_int64(ctx.punch_result_tx));
+	json_object_object_add(counters, "result_rx", json_object_new_int64(ctx.punch_result_rx));
+	json_object_object_add(counters, "result_accepted", json_object_new_int64(ctx.punch_result_accepted));
+	json_object_object_add(counters, "result_handshake", json_object_new_int64(ctx.punch_result_handshake));
+	json_object_object_add(counters, "result_suppressed", json_object_new_int64(ctx.punch_result_suppressed));
+	json_object_object_add(counters, "result_no_peer", json_object_new_int64(ctx.punch_result_no_peer));
 	json_object_object_add(ret, "counters", counters);
 
 	return ret;

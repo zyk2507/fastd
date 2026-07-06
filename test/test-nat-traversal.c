@@ -337,6 +337,19 @@ static void test_punch_parses_valid_message(void **state UNUSED) {
 	assert_int_equal(key_len, 4);
 }
 
+static void test_punch_parses_result_message(void **state UNUSED) {
+	test_punch_message_t msg = make_punch_message();
+	msg.header.type = 3;
+	msg.endpoint.reserved = 3;
+
+	uint8_t type = 0;
+	size_t key_len = 0;
+
+	assert_true(fastd_punch_test_parse_endpoint_message((const uint8_t *)&msg, sizeof(msg), &type, &key_len));
+	assert_int_equal(type, 3);
+	assert_int_equal(key_len, 4);
+}
+
 static void test_punch_rejects_bad_magic(void **state UNUSED) {
 	test_punch_message_t msg = make_punch_message();
 	msg.header.magic[0] = 'x';
@@ -484,6 +497,7 @@ int main(void) {
 		cmocka_unit_test(test_punch_skips_out_of_range_predicted_ports),
 		cmocka_unit_test(test_punch_respects_output_limit),
 		cmocka_unit_test(test_punch_parses_valid_message),
+		cmocka_unit_test(test_punch_parses_result_message),
 		cmocka_unit_test(test_punch_rejects_bad_magic),
 		cmocka_unit_test(test_punch_rejects_bad_version),
 		cmocka_unit_test(test_punch_rejects_bad_length),

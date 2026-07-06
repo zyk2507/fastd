@@ -18,6 +18,7 @@
 #define FASTD_PUNCH_VERSION 1
 #define FASTD_PUNCH_NAT_INFO 1
 #define FASTD_PUNCH_SEND_CONE 2
+#define FASTD_PUNCH_RESULT 3
 
 #define FASTD_PUNCH_ANNOUNCE_INTERVAL 15000
 #define FASTD_PUNCH_RELAY_INTERVAL 10000
@@ -43,7 +44,7 @@ typedef struct __attribute__((packed)) fastd_punch_endpoint {
 	uint8_t key_len;        /**< Length of the following protocol key */
 	uint8_t nat_type;       /**< fastd_nat_type_t value */
 	uint8_t address_family; /**< FASTD_PUNCH_AF_* */
-	uint8_t reserved;       /**< Reserved for future use */
+	uint8_t reserved;       /**< Type-specific extra value; used as result code for FASTD_PUNCH_RESULT */
 	uint16_t port;          /**< Endpoint UDP port, network byte order */
 	uint16_t min_port;      /**< Lowest observed public UDP port, network byte order */
 	uint16_t max_port;      /**< Highest observed public UDP port, network byte order */
@@ -51,6 +52,14 @@ typedef struct __attribute__((packed)) fastd_punch_endpoint {
 	uint16_t reserved2;     /**< Reserved for future use */
 	uint8_t address[16];    /**< IPv4 address in the first 4 bytes, or an IPv6 address */
 } fastd_punch_endpoint_t;
+
+/** Result codes carried by FASTD_PUNCH_RESULT */
+typedef enum fastd_punch_result {
+	FASTD_PUNCH_RESULT_ACCEPTED = 1,   /**< Candidate was accepted but no immediate handshake was sent */
+	FASTD_PUNCH_RESULT_HANDSHAKE = 2,  /**< Candidate was accepted and an immediate handshake was sent */
+	FASTD_PUNCH_RESULT_SUPPRESSED = 3, /**< Candidate was suppressed by local cooldown policy */
+	FASTD_PUNCH_RESULT_NO_PEER = 4,    /**< Subject key is not configured locally */
+} fastd_punch_result_t;
 
 
 /** Returns true if punch control messages can be sent with the current protocol */
@@ -176,7 +185,7 @@ static bool get_peer_endpoint(const fastd_peer_t *peer, fastd_peer_address_t *en
 /** Sends one endpoint punch control message */
 static bool send_endpoint_message(
 	fastd_peer_t *dest, uint8_t type, const void *subject_key, size_t key_len, const fastd_peer_address_t *endpoint,
-	fastd_nat_type_t nat_type, uint16_t min_port, uint16_t max_port, int port_delta) {
+	fastd_nat_type_t nat_type, uint16_t min_port, uint16_t max_port, int port_delta, uint8_t extra) {
 	if (!punch_control_supported() || !fastd_peer_is_established(dest))
 		return false;
 	if (!peer_control_supported(dest))
@@ -204,6 +213,7 @@ static bool send_endpoint_message(
 		.min_port = htobe16(min_port),
 		.max_port = htobe16(max_port),
 		.port_delta = htobe16((uint16_t)port_delta),
+		.reserved = extra,
 	};
 
 	if (!encode_address(payload, endpoint)) {
@@ -231,7 +241,7 @@ static void send_local_nat_info(fastd_peer_t *dest) {
 
 	send_endpoint_message(
 		dest, FASTD_PUNCH_NAT_INFO, conf.protocol->get_own_key(), conf.protocol->key_length(),
-		&status.reflexive, status.type, status.min_port, status.max_port, status.port_delta);
+		&status.reflexive, status.type, status.min_port, status.max_port, status.port_delta, 0);
 }
 
 /** Sets an endpoint port from host byte order */
@@ -417,7 +427,17 @@ static bool relay_one_endpoint_to_peer(
 	fastd_peer_t *dest, fastd_peer_t *subject, const fastd_peer_address_t *endpoint, fastd_nat_type_t nat_type) {
 	return send_endpoint_message(
 		dest, FASTD_PUNCH_SEND_CONE, conf.protocol->get_peer_key(subject), conf.protocol->key_length(),
-		endpoint, nat_type, subject->punch_min_port, subject->punch_max_port, subject->punch_port_delta);
+		endpoint, nat_type, subject->punch_min_port, subject->punch_max_port, subject->punch_port_delta, 0);
+}
+
+/** Sends a punch command result back to the peer that requested it */
+static void send_punch_result(
+	fastd_peer_t *dest, const void *subject_key, size_t key_len, const fastd_peer_address_t *endpoint,
+	fastd_punch_result_t result) {
+	if (send_endpoint_message(
+		    dest, FASTD_PUNCH_RESULT, subject_key, key_len, endpoint, FASTD_NAT_UNKNOWN, 0, 0, 0,
+		    (uint8_t)result))
+		ctx.punch_result_tx++;
 }
 
 /** Sends one peer endpoint, or bounded easy-symmetric predictions, to another peer */
@@ -516,22 +536,84 @@ static void handle_send_cone(fastd_peer_t *sender, const fastd_punch_endpoint_t 
 	if (key_is_self(key, key_len))
 		return;
 
-	fastd_peer_t *peer = find_peer_by_key(key, key_len);
-	if (!peer)
+	fastd_peer_address_t endpoint;
+	if (!decode_address(&endpoint, payload))
 		return;
+
+	fastd_peer_t *peer = find_peer_by_key(key, key_len);
+	if (!peer) {
+		send_punch_result(sender, key, key_len, &endpoint, FASTD_PUNCH_RESULT_NO_PEER);
+		return;
+	}
+
+	unsigned udp_punch_sockets = punch_udp_socket_count(peer, payload->nat_type);
+	bool exact_udp_punch = udp_punch_sockets > 0;
+	bool accepted = fastd_peer_add_punch_control_candidate(
+		peer, &endpoint, FASTD_PUNCH_CANDIDATE_PRIORITY, exact_udp_punch, udp_punch_sockets);
+
+	if (!accepted) {
+		send_punch_result(sender, key, key_len, &endpoint, FASTD_PUNCH_RESULT_SUPPRESSED);
+		return;
+	}
+
+	if (fastd_peer_send_direct_handshake(peer, &endpoint)) {
+		ctx.punch_direct_handshakes++;
+		send_punch_result(sender, key, key_len, &endpoint, FASTD_PUNCH_RESULT_HANDSHAKE);
+	} else {
+		send_punch_result(sender, key, key_len, &endpoint, FASTD_PUNCH_RESULT_ACCEPTED);
+	}
+
+	pr_debug("received punch cone command from %P for %P[%I]", sender, peer, &endpoint);
+}
+
+/** Handles a punch command result from another peer */
+static void handle_result(fastd_peer_t *sender, const fastd_punch_endpoint_t *payload) {
+	size_t key_len = conf.protocol->key_length();
+	if (payload->key_len != key_len)
+		return;
+
+	const uint8_t *key = (const uint8_t *)(payload + 1);
+	fastd_peer_t *subject = find_peer_by_key(key, key_len);
 
 	fastd_peer_address_t endpoint;
 	if (!decode_address(&endpoint, payload))
 		return;
 
-	unsigned udp_punch_sockets = punch_udp_socket_count(peer, payload->nat_type);
-	bool exact_udp_punch = udp_punch_sockets > 0;
-	fastd_peer_add_punch_control_candidate(
-		peer, &endpoint, FASTD_PUNCH_CANDIDATE_PRIORITY, exact_udp_punch, udp_punch_sockets);
-	if (fastd_peer_send_direct_handshake(peer, &endpoint))
-		ctx.punch_direct_handshakes++;
+	ctx.punch_result_rx++;
 
-	pr_debug("received punch cone command from %P for %P[%I]", sender, peer, &endpoint);
+	switch ((fastd_punch_result_t)payload->reserved) {
+	case FASTD_PUNCH_RESULT_ACCEPTED:
+		ctx.punch_result_accepted++;
+		if (subject)
+			pr_debug("received punch accepted result from %P for %P[%I]", sender, subject, &endpoint);
+		else
+			pr_debug("received punch accepted result from %P for unknown key endpoint %I", sender, &endpoint);
+		break;
+
+	case FASTD_PUNCH_RESULT_HANDSHAKE:
+		ctx.punch_result_handshake++;
+		if (subject)
+			pr_debug("received punch handshake result from %P for %P[%I]", sender, subject, &endpoint);
+		else
+			pr_debug("received punch handshake result from %P for unknown key endpoint %I", sender, &endpoint);
+		break;
+
+	case FASTD_PUNCH_RESULT_SUPPRESSED:
+		ctx.punch_result_suppressed++;
+		if (subject)
+			pr_debug("received punch suppressed result from %P for %P[%I]", sender, subject, &endpoint);
+		else
+			pr_debug("received punch suppressed result from %P for unknown key endpoint %I", sender, &endpoint);
+		break;
+
+	case FASTD_PUNCH_RESULT_NO_PEER:
+		ctx.punch_result_no_peer++;
+		pr_debug("received punch no-peer result from %P for key length %zu endpoint %I", sender, key_len, &endpoint);
+		break;
+
+	default:
+		break;
+	}
 }
 
 /** Handles an authenticated punch control packet. Returns true if the packet was consumed. */
@@ -557,6 +639,10 @@ bool fastd_punch_handle_control(fastd_peer_t *peer, fastd_buffer_t *buffer) {
 
 	case FASTD_PUNCH_SEND_CONE:
 		handle_send_cone(peer, payload);
+		break;
+
+	case FASTD_PUNCH_RESULT:
+		handle_result(peer, payload);
 		break;
 
 	default:

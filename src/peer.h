@@ -215,7 +215,7 @@ void fastd_peer_add_direct_candidate(
 void fastd_peer_add_direct_candidate_source(
 	fastd_peer_t *peer, fastd_peer_t *relay, const fastd_peer_address_t *remote_addr, const fastd_eth_addr_t *macs,
 	size_t n_macs, fastd_peer_direct_candidate_source_t source, uint8_t priority);
-void fastd_peer_add_punch_control_candidate(
+bool fastd_peer_add_punch_control_candidate(
 	fastd_peer_t *peer, const fastd_peer_address_t *remote_addr, uint8_t priority, bool exact_udp_punch,
 	unsigned udp_punch_sockets);
 bool fastd_peer_has_direct_candidate(const fastd_peer_t *peer);
