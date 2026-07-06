@@ -137,6 +137,26 @@ sys.exit(0 if direct_hole_punched(a, "b") and direct_hole_punched(b, "a") else 1
 PY
 }
 
+punch_results_seen() {
+	python3 - "$WORK/c.json" <<'PY'
+import json
+import sys
+
+try:
+    c = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+
+counters = ((c.get("punch") or {}).get("counters") or {})
+if counters.get("result_rx", 0) < 2:
+    sys.exit(1)
+if counters.get("result_handshake", 0) < 1 and counters.get("result_accepted", 0) < 1:
+    sys.exit(1)
+
+sys.exit(0)
+PY
+}
+
 make_public_link() {
 	local ns=$1 ifname=$2 host=$3
 	local peer="${host}p"
@@ -309,7 +329,8 @@ wait_for_direct_path() {
 		check_fastds_alive
 		dump_statuses
 
-		if [[ -f "$WORK/a.json" && -f "$WORK/b.json" ]] && direct_hole_punched; then
+		if [[ -f "$WORK/a.json" && -f "$WORK/b.json" && -f "$WORK/c.json" ]] &&
+			direct_hole_punched && punch_results_seen; then
 			return 0
 		fi
 	done
@@ -387,4 +408,4 @@ if [[ "$ok" != true ]]; then
 	fail 'direct A/B data path failed after control relay was stopped'
 fi
 
-printf 'ok 3 - control relay establishes direct UDP path through full-cone mappings\n'
+printf 'ok 3 - control relay establishes direct UDP path through full-cone mappings and receives punch results\n'
