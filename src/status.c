@@ -503,6 +503,9 @@ static json_object *dump_hole_punch(const fastd_peer_t *peer) {
 	json_object_object_add(ret, "mode", json_object_new_string(hole_punch_mode_name(mode)));
 	json_object_object_add(ret, "enabled", json_object_new_boolean(mode != HOLE_PUNCH_OFF));
 	json_object_object_add(ret, "established", json_object_new_boolean(established));
+	json_object_object_add(ret, "symmetric", json_object_new_boolean(fastd_peer_get_punch_symmetric(peer)));
+	json_object_object_add(
+		ret, "hard_symmetric", json_object_new_boolean(fastd_peer_get_punch_hard_symmetric(peer)));
 	json_object_object_add(
 		ret, "direct_candidates", json_object_new_int64(fastd_peer_direct_candidate_count(peer)));
 	json_object_object_add(

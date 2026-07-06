@@ -1275,6 +1275,14 @@ static inline bool peer_configs_equal(const fastd_peer_t *peer1, const fastd_pee
 	if (peer1->hole_punch != peer2->hole_punch)
 		return false;
 
+	if (peer1->punch_symmetric.set != peer2->punch_symmetric.set ||
+	    peer1->punch_symmetric.state != peer2->punch_symmetric.state)
+		return false;
+
+	if (peer1->punch_hard_symmetric.set != peer2->punch_hard_symmetric.set ||
+	    peer1->punch_hard_symmetric.state != peer2->punch_hard_symmetric.state)
+		return false;
+
 	if (peer1->turn_relay.set != peer2->turn_relay.set || peer1->turn_relay.state != peer2->turn_relay.state)
 		return false;
 

@@ -398,7 +398,7 @@ static size_t relay_endpoint_to_peer(fastd_peer_t *dest, fastd_peer_t *subject, 
 	fastd_peer_address_t *candidates = fastd_new_array(count, fastd_peer_address_t);
 	size_t n_candidates = build_endpoint_candidates(
 		candidates, count, &endpoint, nat_type, subject->punch_port_delta, conf.punch_max_sockets,
-		conf.punch_symmetric, conf.punch_hard_symmetric);
+		fastd_peer_get_punch_symmetric(subject), fastd_peer_get_punch_hard_symmetric(subject));
 
 	size_t sent = 0;
 	size_t i;
@@ -481,8 +481,8 @@ static void handle_send_cone(fastd_peer_t *sender, const fastd_punch_endpoint_t 
 	if (!decode_address(&endpoint, payload))
 		return;
 
-	fastd_peer_add_punch_control_candidate(
-		peer, &endpoint, FASTD_PUNCH_CANDIDATE_PRIORITY, nat_type_needs_exact_udp(payload->nat_type));
+	bool exact_udp_punch = fastd_peer_get_punch_symmetric(peer) && nat_type_needs_exact_udp(payload->nat_type);
+	fastd_peer_add_punch_control_candidate(peer, &endpoint, FASTD_PUNCH_CANDIDATE_PRIORITY, exact_udp_punch);
 	if (fastd_peer_send_direct_handshake(peer, &endpoint))
 		ctx.punch_direct_handshakes++;
 

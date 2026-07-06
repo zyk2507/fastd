@@ -583,6 +583,12 @@ peer_statement: TOK_REMOTE peer_remote ';'
 	|	TOK_HOLE_PUNCH hole_punch ';' {
 			state->peer->hole_punch = $2;
 		}
+	|	TOK_PUNCH TOK_SYMMETRIC boolean ';' {
+			state->peer->punch_symmetric = (fastd_tristate_t){ true, $3 };
+		}
+	|	TOK_PUNCH TOK_HARD_SYMMETRIC boolean ';' {
+			state->peer->punch_hard_symmetric = (fastd_tristate_t){ true, $3 };
+		}
 	|	TOK_TURN TOK_RELAY boolean ';' {
 			if (!fastd_config_set_turn_relay(&@$, state, &state->peer->turn_relay, $3))
 				YYERROR;

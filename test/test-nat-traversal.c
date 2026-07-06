@@ -406,6 +406,23 @@ static void test_punch_suppression_is_bounded(void **state UNUSED) {
 	VECTOR_FREE(peer.punch_suppressions);
 }
 
+static void test_peer_punch_symmetric_inherits_and_overrides(void **state UNUSED) {
+	fastd_peer_t peer = {};
+
+	conf.punch_symmetric = true;
+	conf.punch_hard_symmetric = false;
+	assert_true(fastd_peer_get_punch_symmetric(&peer));
+	assert_false(fastd_peer_get_punch_hard_symmetric(&peer));
+
+	peer.punch_symmetric = FASTD_TRISTATE_FALSE;
+	peer.punch_hard_symmetric = FASTD_TRISTATE_TRUE;
+	assert_false(fastd_peer_get_punch_symmetric(&peer));
+	assert_true(fastd_peer_get_punch_hard_symmetric(&peer));
+
+	conf.punch_symmetric = false;
+	conf.punch_hard_symmetric = false;
+}
+
 int main(void) {
 #ifndef WITH_NAT_DETECT
 	printf("1..0 # Skipped: NAT detection not included\n");
@@ -437,6 +454,7 @@ int main(void) {
 		cmocka_unit_test(test_punch_rejects_bad_key_length),
 		cmocka_unit_test(test_punch_suppresses_failed_endpoint_temporarily),
 		cmocka_unit_test(test_punch_suppression_is_bounded),
+		cmocka_unit_test(test_peer_punch_symmetric_inherits_and_overrides),
 	};
 
 	return cmocka_run_group_tests(tests, NULL, NULL);
