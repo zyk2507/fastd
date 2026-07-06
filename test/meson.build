@@ -46,6 +46,13 @@ test('nat-punch-netns',
 	timeout : 60,
 )
 
+test('nat-punch-iperf-netns',
+	bash,
+	args : [files('test-nat-punch-iperf-netns.sh'), fastd_exe.full_path()],
+	protocol : 'tap',
+	timeout : 60,
+)
+
 benchmark_uhash = executable(
 	'benchmark-uhash', 'benchmark-uhash.c',
 	dependencies: test_deps,
