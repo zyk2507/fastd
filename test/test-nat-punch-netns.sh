@@ -58,17 +58,29 @@ NS_RA="${PREFIX}ra"
 NS_RB="${PREFIX}rb"
 BR="${PREFIX}br"
 PIDS=()
+STUN_PID=
 
 stop_fastds() {
 	for pid in "${PIDS[@]}"; do
 		kill "$pid" >/dev/null 2>&1 || true
 	done
-	wait >/dev/null 2>&1 || true
+	for pid in "${PIDS[@]}"; do
+		wait "$pid" >/dev/null 2>&1 || true
+	done
 	PIDS=()
+}
+
+stop_stun() {
+	if [[ -n "$STUN_PID" ]]; then
+		kill "$STUN_PID" >/dev/null 2>&1 || true
+		wait "$STUN_PID" >/dev/null 2>&1 || true
+		STUN_PID=
+	fi
 }
 
 cleanup() {
 	stop_fastds
+	stop_stun
 
 	ip link del "$BR" >/dev/null 2>&1 || true
 	for ns in "$NS_A" "$NS_B" "$NS_C" "$NS_RA" "$NS_RB"; do
@@ -151,6 +163,26 @@ counters = ((c.get("punch") or {}).get("counters") or {})
 if counters.get("result_rx", 0) < 2:
     sys.exit(1)
 if counters.get("result_handshake", 0) < 1 and counters.get("result_accepted", 0) < 1:
+    sys.exit(1)
+
+sys.exit(0)
+PY
+}
+
+nat_types_seen() {
+	python3 - "$WORK/a.json" "$WORK/b.json" <<'PY'
+import json
+import sys
+
+try:
+    a = json.load(open(sys.argv[1]))
+    b = json.load(open(sys.argv[2]))
+except Exception:
+    sys.exit(1)
+
+if (a.get("nat") or {}).get("type") != "symmetric-easy-inc":
+    sys.exit(1)
+if (b.get("nat") or {}).get("type") != "full-cone":
     sys.exit(1)
 
 sys.exit(0)
@@ -286,6 +318,146 @@ peer "b" { key "$PUB_B"; transport udp; hole-punch udp; }
 EOF
 }
 
+write_symmetric_to_cone_confs() {
+	cat > "$WORK/a.conf" <<EOF
+mode multitap;
+interface "fda-%n";
+persist interface no;
+method "salsa2012+umac";
+secret "$SEC_A";
+bind 0.0.0.0:11001;
+status socket "$WORK/a.status";
+stun server "10.52.0.1" port 3478;
+stun server "10.52.0.1" port 3479;
+punch max sockets 25;
+punch max packets 800;
+peer "c" { key "$PUB_C"; remote 10.52.0.1 port 11000; transport udp; }
+peer "b" { key "$PUB_B"; transport udp; hole-punch udp; punch symmetric yes; }
+EOF
+
+	cat > "$WORK/b.conf" <<EOF
+mode multitap;
+interface "fdb-%n";
+persist interface no;
+method "salsa2012+umac";
+secret "$SEC_B";
+bind 0.0.0.0:11001;
+status socket "$WORK/b.status";
+stun server "10.52.0.1" port 3478;
+stun server "10.52.0.1" port 3479;
+punch max sockets 25;
+punch max packets 800;
+peer "c" { key "$PUB_C"; remote 10.52.0.1 port 11000; transport udp; }
+peer "a" { key "$PUB_A"; transport udp; hole-punch udp; punch symmetric yes; }
+EOF
+
+	cat > "$WORK/c.conf" <<EOF
+mode multitap;
+interface "fdc-%n";
+persist interface no;
+method "salsa2012+umac";
+secret "$SEC_C";
+bind 10.52.0.1:11000;
+status socket "$WORK/c.status";
+forward no;
+peer discovery no;
+punch control relay yes;
+punch max sockets 25;
+punch max packets 800;
+peer "a" { key "$PUB_A"; transport udp; hole-punch udp; punch symmetric yes; }
+peer "b" { key "$PUB_B"; transport udp; hole-punch udp; punch symmetric yes; }
+EOF
+}
+
+start_fake_stun() {
+	rm -f "$WORK/stun.ready"
+	: > "$WORK/stun.log"
+
+	ip netns exec "$NS_C" python3 - "$WORK/stun.ready" > "$WORK/stun.log" 2>&1 <<'PY' &
+import select
+import signal
+import socket
+import struct
+import sys
+
+COOKIE = 0x2112A442
+SERVER_IP = "10.52.0.1"
+READY = sys.argv[1]
+running = True
+easy_counters = {}
+
+
+def stop(signum, frame):
+    global running
+    running = False
+
+
+def mapped_endpoint(source):
+    ip, port = source
+
+    if ip == "10.52.0.2":
+        counter = easy_counters.get(ip, 0)
+        easy_counters[ip] = counter + 1
+        return ip, 41100 + counter
+
+    if ip == "10.52.0.3":
+        return ip, 11001
+
+    return ip, port
+
+
+def stun_response(data, source):
+    if len(data) < 20:
+        return None
+
+    msg_type, msg_len, cookie = struct.unpack("!HHI", data[:8])
+    if msg_type != 0x0001 or cookie != COOKIE or len(data) < 20 + msg_len:
+        return None
+
+    transaction = data[8:20]
+    mapped_ip, mapped_port = mapped_endpoint(source)
+    xport = mapped_port ^ (COOKIE >> 16)
+    xaddr = struct.unpack("!I", socket.inet_aton(mapped_ip))[0] ^ COOKIE
+    attr = struct.pack("!HHBBHI", 0x0020, 8, 0, 1, xport, xaddr)
+    return struct.pack("!HHI12s", 0x0101, len(attr), COOKIE, transaction) + attr
+
+
+signal.signal(signal.SIGTERM, stop)
+signal.signal(signal.SIGINT, stop)
+
+sockets = []
+for port in (3478, 3479):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((SERVER_IP, port))
+    sockets.append(sock)
+
+open(READY, "w").close()
+
+while running:
+    readable, _, _ = select.select(sockets, [], [], 0.5)
+    for sock in readable:
+        data, source = sock.recvfrom(2048)
+        response = stun_response(data, source)
+        if response:
+            sock.sendto(response, source)
+
+for sock in sockets:
+    sock.close()
+PY
+	STUN_PID=$!
+
+	for _ in $(seq 1 20); do
+		[[ -f "$WORK/stun.ready" ]] && return 0
+		if ! kill -0 "$STUN_PID" >/dev/null 2>&1; then
+			fail 'fake STUN server exited before becoming ready'
+		fi
+		sleep 0.1
+	done
+
+	fail 'fake STUN server did not become ready'
+}
+
 start_fastds() {
 	rm -f "$WORK/a.status" "$WORK/b.status" "$WORK/c.status" "$WORK/a.json" "$WORK/b.json" "$WORK/c.json" \
 		"$WORK/a.ip" "$WORK/b.ip" "$WORK/c.ip"
@@ -338,7 +510,22 @@ wait_for_direct_path() {
 	return 1
 }
 
-printf '1..3\n'
+wait_for_symmetric_to_cone_path() {
+	for _ in $(seq 1 120); do
+		sleep 0.5
+		check_fastds_alive
+		dump_statuses
+
+		if [[ -f "$WORK/a.json" && -f "$WORK/b.json" && -f "$WORK/c.json" ]] &&
+			nat_types_seen && direct_hole_punched && punch_results_seen; then
+			return 0
+		fi
+	done
+
+	return 1
+}
+
+printf '1..4\n'
 
 CURRENT_TEST=1
 write_c_conf no
@@ -409,3 +596,40 @@ if [[ "$ok" != true ]]; then
 fi
 
 printf 'ok 3 - control relay establishes direct UDP path through full-cone mappings and receives punch results\n'
+
+CURRENT_TEST=4
+stop_fastds
+start_fake_stun
+run ip netns exec "$NS_RA" nft insert rule ip nat postrouting ip saddr 10.52.1.2 ip daddr 10.52.0.1 udp dport 11000 snat to 10.52.0.2:41100
+run ip netns exec "$NS_RA" nft insert rule ip nat postrouting ip saddr 10.52.1.2 ip daddr 10.52.0.3 udp dport 11001 snat to 10.52.0.2:41100-41163
+run ip netns exec "$NS_RB" nft add rule ip nat prerouting iifname pub udp dport 11001 dnat to 10.52.2.2:11001
+write_symmetric_to_cone_confs
+start_fastds
+
+if ! wait_for_symmetric_to_cone_path; then
+	fail 'symmetric-to-cone UDP path was not established'
+fi
+
+run ip -n "$NS_A" addr add 10.52.10.1/30 dev fda-b
+run ip -n "$NS_B" addr add 10.52.10.2/30 dev fdb-a
+run ip -n "$NS_A" link set fda-b up
+run ip -n "$NS_B" link set fdb-a up
+ip -n "$NS_A" addr show dev fda-b > "$WORK/a.ip" 2>&1 || true
+ip -n "$NS_B" addr show dev fdb-a > "$WORK/b.ip" 2>&1 || true
+sleep 1
+
+ok=false
+for _ in $(seq 1 20); do
+	if ping_direct; then
+		ok=true
+		break
+	fi
+	sleep 0.5
+done
+
+if [[ "$ok" != true ]]; then
+	dump_statuses
+	fail 'symmetric-to-cone direct data path failed'
+fi
+
+printf 'ok 4 - easy-symmetric NAT peer punches directly to a full-cone NAT peer\n'
