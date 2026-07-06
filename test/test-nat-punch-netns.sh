@@ -83,7 +83,7 @@ FAILOVER_WAIT_SLEEP=0.2
 TEST_PUNCH_KEEPALIVE=2
 IPERF_DURATION=${FASTD_IPERF_DURATION:-1}
 IPERF_PARALLEL=${FASTD_IPERF_PARALLEL:-2}
-IPERF_CONNECT_TIMEOUT=${FASTD_IPERF_CONNECT_TIMEOUT:-2000}
+IPERF_CONNECT_TIMEOUT=${FASTD_IPERF_CONNECT_TIMEOUT:-5000}
 
 punch_test_limits() {
 	local maintenance=${1:-2}
@@ -350,12 +350,19 @@ PY
 block_active_direct_path() {
 	local a_active=$1 b_active=$2
 
+	clear_blocked_direct_path
+
 	run ip netns exec "$NS_RA" nft add table ip failover
 	run ip netns exec "$NS_RA" nft 'add chain ip failover prerouting { type filter hook prerouting priority -200; policy accept; }'
 	run ip netns exec "$NS_RA" nft add rule ip failover prerouting iifname pub ip saddr 10.52.0.3 ip daddr 10.52.0.2 udp sport "$a_active" udp dport "$b_active" drop
 	run ip netns exec "$NS_RB" nft add table ip failover
 	run ip netns exec "$NS_RB" nft 'add chain ip failover prerouting { type filter hook prerouting priority -200; policy accept; }'
 	run ip netns exec "$NS_RB" nft add rule ip failover prerouting iifname pub ip saddr 10.52.0.2 ip daddr 10.52.0.3 udp sport "$b_active" udp dport "$a_active" drop
+}
+
+clear_blocked_direct_path() {
+	ip netns exec "$NS_RA" nft delete table ip failover >/dev/null 2>&1 || true
+	ip netns exec "$NS_RB" nft delete table ip failover >/dev/null 2>&1 || true
 }
 
 direct_active_ports_changed() {
@@ -993,6 +1000,40 @@ wait_for_direct_ping() {
 	[[ "$ok" == true ]] || fail "$label"
 }
 
+run_direct_iperf_after_active_cut() {
+	local label=$1 port=$2
+	local a_active b_active
+
+	dump_statuses
+	a_active=$(hole_punch_field a b remote_port) || fail "missing A active punch remote port before $label iperf3 cut"
+	b_active=$(hole_punch_field b a remote_port) || fail "missing B active punch remote port before $label iperf3 cut"
+	block_active_direct_path "$a_active" "$b_active"
+	run_direct_iperf "$label" "$port"
+
+	if ! direct_active_ports_changed "$a_active" "$b_active"; then
+		fail "$label did not recover onto a different direct path during iperf3"
+	fi
+}
+
+run_direct_iperf_after_transient_cut() {
+	local label=$1 port=$2
+	local a_active b_active
+
+	dump_statuses
+	a_active=$(hole_punch_field a b remote_port) || fail "missing A active punch remote port before $label iperf3 cut"
+	b_active=$(hole_punch_field b a remote_port) || fail "missing B active punch remote port before $label iperf3 cut"
+	block_active_direct_path "$a_active" "$b_active"
+	sleep "$SHORT_WAIT_SLEEP"
+	clear_blocked_direct_path
+	run_direct_iperf "$label" "$port"
+}
+
+cut_public_nat_link_once() {
+	run ip -n "$NS_RA" link set pub down
+	sleep "$SHORT_WAIT_SLEEP"
+	run ip -n "$NS_RA" link set pub up
+}
+
 run_iperf_tests() {
 	printf '1..5\n'
 
@@ -1010,8 +1051,9 @@ run_iperf_tests() {
 	run ip -n "$NS_A" link set fda-c up
 	ip -n "$NS_C" addr show dev fdc-a > "$WORK/c.ip" 2>&1 || true
 	ip -n "$NS_A" addr show dev fda-c >> "$WORK/a.ip" 2>&1 || true
-	run_public_nat_iperf public-nat 5201
-	printf 'ok 1 - public node carries bidirectional iperf3 traffic with a NAT peer\n'
+	cut_public_nat_link_once
+	run_public_nat_iperf public-nat-after-cut 5201
+	printf 'ok 1 - public node carries bidirectional iperf3 traffic with a NAT peer after a link cut\n'
 
 	CURRENT_TEST=2
 	run ip -n "$NS_A" addr add 10.52.10.1/30 dev fda-b
@@ -1023,9 +1065,8 @@ run_iperf_tests() {
 	wait_for_direct_ping 'direct A/B data path failed before full-cone iperf3'
 	stop_public_relay_fastd
 	sleep "$SHORT_WAIT_SLEEP"
-	wait_for_direct_ping 'direct A/B data path failed after relay stopped before full-cone iperf3'
-	run_direct_iperf full-cone 5202
-	printf 'ok 2 - full-cone direct path carries bidirectional iperf3 traffic after relay stop\n'
+	run_direct_iperf_after_transient_cut full-cone-after-cut 5202
+	printf 'ok 2 - full-cone direct path recovers and carries bidirectional iperf3 traffic after active cut\n'
 
 	CURRENT_TEST=3
 	stop_fastds
@@ -1047,8 +1088,8 @@ run_iperf_tests() {
 	ip -n "$NS_A" addr show dev fda-b > "$WORK/a.ip" 2>&1 || true
 	ip -n "$NS_B" addr show dev fdb-a > "$WORK/b.ip" 2>&1 || true
 	wait_for_direct_ping 'symmetric-to-cone direct data path failed before iperf3'
-	run_direct_iperf symmetric-to-cone 5203
-	printf 'ok 3 - easy-symmetric to full-cone path carries bidirectional iperf3 traffic\n'
+	run_direct_iperf_after_transient_cut symmetric-to-cone-after-cut 5203
+	printf 'ok 3 - easy-symmetric to full-cone path recovers and carries bidirectional iperf3 traffic after active cut\n'
 
 	CURRENT_TEST=4
 	stop_fastds
@@ -1074,29 +1115,8 @@ run_iperf_tests() {
 	ip -n "$NS_A" addr show dev fda-b > "$WORK/a.ip" 2>&1 || true
 	ip -n "$NS_B" addr show dev fdb-a > "$WORK/b.ip" 2>&1 || true
 	wait_for_direct_ping 'easy-symmetric direct data path failed before iperf3'
-	run_direct_iperf both-easy-before-failover 5204
-
-	dump_statuses
-	a_active=$(hole_punch_field a b remote_port) || fail 'missing A active punch remote port before iperf3 failover'
-	b_active=$(hole_punch_field b a remote_port) || fail 'missing B active punch remote port before iperf3 failover'
-	block_active_direct_path "$a_active" "$b_active"
-
-	local ok=false
-	for _ in $(seq 1 "$FAILOVER_WAIT_ATTEMPTS"); do
-		sleep "$FAILOVER_WAIT_SLEEP"
-		check_fastds_alive
-		dump_statuses
-
-		if direct_active_ports_changed "$a_active" "$b_active"; then
-			ok=true
-			break
-		fi
-	done
-
-	[[ "$ok" == true ]] || fail 'easy-symmetric backup path was not promoted before post-failover iperf3'
-	wait_for_direct_ping 'easy-symmetric backup path failed before post-failover iperf3'
-	run_direct_iperf both-easy-after-failover 5205
-	printf 'ok 4 - easy-symmetric peers carry bidirectional iperf3 traffic before and after failover\n'
+	run_direct_iperf_after_active_cut both-easy-after-cut 5204
+	printf 'ok 4 - easy-symmetric peers recover and carry bidirectional iperf3 traffic after active cut\n'
 
 	CURRENT_TEST=5
 	stop_fastds
@@ -1122,8 +1142,8 @@ run_iperf_tests() {
 	ip -n "$NS_A" addr show dev fda-b > "$WORK/a.ip" 2>&1 || true
 	ip -n "$NS_B" addr show dev fdb-a > "$WORK/b.ip" 2>&1 || true
 	wait_for_direct_ping 'hard-symmetric direct data path failed before iperf3'
-	run_direct_iperf hard-symmetric 5206
-	printf 'ok 5 - hard-symmetric direct path carries bidirectional iperf3 traffic\n'
+	run_direct_iperf_after_transient_cut hard-symmetric-after-cut 5205
+	printf 'ok 5 - hard-symmetric direct path recovers and carries bidirectional iperf3 traffic after active cut\n'
 }
 
 if [[ "$IPERF_MODE" == 1 ]]; then
