@@ -495,6 +495,73 @@ static void test_peer_punch_symmetric_inherits_and_overrides(void **state UNUSED
 	assert_true(fastd_peer_get_punch_symmetric(&peer));
 }
 
+static void test_nat_traversal_inherits_and_overrides(void **state UNUSED) {
+	fastd_peer_group_t group = {
+		.nat_traversal = FASTD_TRISTATE_TRUE,
+		.turn_relay = FASTD_TRISTATE_UNDEF,
+		.turn_servers = (fastd_turn_server_t *)0x1,
+	};
+	fastd_peer_t peer = { .group = &group };
+
+	assert_true(fastd_peer_get_nat_traversal(&peer));
+	assert_true(fastd_peer_get_turn_relay(&peer));
+
+	peer.nat_traversal = FASTD_TRISTATE_FALSE;
+	assert_false(fastd_peer_get_nat_traversal(&peer));
+	assert_false(fastd_peer_get_turn_relay(&peer));
+
+	peer.nat_traversal = FASTD_TRISTATE_TRUE;
+	peer.turn_relay = FASTD_TRISTATE_FALSE;
+	assert_true(fastd_peer_get_nat_traversal(&peer));
+	assert_false(fastd_peer_get_turn_relay(&peer));
+}
+
+static void test_punch_detects_noncurrent_exact_candidate(void **state UNUSED) {
+	fastd_peer_t peer = {};
+	const fastd_peer_address_t current = addr4(0xcb007105, 41000);
+	const fastd_peer_address_t other = addr4(0xcb007105, 41001);
+	bool exact_udp_punch = false;
+	unsigned udp_punch_sockets = 0;
+
+	ctx.now = 1000;
+	VECTOR_ADD(
+		peer.direct_candidates, ((fastd_peer_direct_candidate_t){
+						.remote = current,
+						.timeout = ctx.now + 10000,
+						.priority = 120,
+						.order = 0,
+						.source = DIRECT_CANDIDATE_PUNCH_CONTROL,
+						.exact_udp_punch = true,
+						.udp_punch_sockets = 3,
+					}));
+	VECTOR_ADD(
+		peer.direct_candidates, ((fastd_peer_direct_candidate_t){
+						.remote = other,
+						.timeout = ctx.now + 10000,
+						.priority = 120,
+						.order = 1,
+						.source = DIRECT_CANDIDATE_PUNCH_CONTROL,
+						.exact_udp_punch = true,
+						.udp_punch_sockets = 5,
+					}));
+
+	peer.direct_remote = current;
+	peer.direct_remote_timeout = ctx.now + 10000;
+	peer.direct_remote_source = DIRECT_CANDIDATE_PUNCH_CONTROL;
+	peer.direct_remote_exact_udp = true;
+	peer.direct_remote_udp_punch_sockets = 3;
+
+	assert_true(fastd_peer_is_current_punch_candidate(&peer, &current));
+	assert_false(fastd_peer_is_current_punch_candidate(&peer, &other));
+
+	assert_true(fastd_peer_is_punch_control_candidate(&peer, &other, &exact_udp_punch, &udp_punch_sockets));
+	assert_true(exact_udp_punch);
+	assert_int_equal(udp_punch_sockets, 5);
+	assert_true(fastd_peer_is_punch_candidate(&peer, &other));
+
+	VECTOR_FREE(peer.direct_candidates);
+}
+
 static void test_punch_socket_count_policy(void **state UNUSED) {
 	fastd_peer_t peer = {};
 
@@ -593,6 +660,8 @@ int main(void) {
 		cmocka_unit_test(test_punch_suppresses_failed_endpoint_temporarily),
 		cmocka_unit_test(test_punch_suppression_is_bounded),
 		cmocka_unit_test(test_peer_punch_symmetric_inherits_and_overrides),
+		cmocka_unit_test(test_nat_traversal_inherits_and_overrides),
+		cmocka_unit_test(test_punch_detects_noncurrent_exact_candidate),
 		cmocka_unit_test(test_punch_socket_count_policy),
 		cmocka_unit_test(test_punch_selects_endpoint_command_types),
 	};

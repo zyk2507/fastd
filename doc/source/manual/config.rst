@@ -80,6 +80,21 @@ Example config:
   multiple peers share the same fixed bind socket, enabling port mapping for any of these peers maps the shared
   local UDP port.
 
+| ``nat traversal yes|no;``
+
+  Enables or disables fastd's NAT traversal bundle. This option may be set globally, in peer groups, or in peer
+  sections; peer settings override peer group settings, and peer group settings inherit from their parent group.
+
+  ``nat traversal yes`` enables ``transport auto``, ``hole-punch auto``, symmetric NAT punching, punch-control
+  relay on the root configuration, and NAT keepalives. If TURN servers are configured, peers may also use TURN as a
+  fallback while direct punching is unavailable. The switch does not enable NAT-PMP or UPnP IGD by itself; configure
+  ``port-mapping auto`` explicitly when external router port mappings should be requested.
+
+  ``nat traversal no`` disables inherited NAT traversal behavior for that scope. On a peer, it disables automatic
+  hole punching, symmetric punch strategies, automatic TURN fallback, inherited auto transport, and inherited port
+  mapping from ``nat traversal``. On a peer group, it also returns the inherited transport default to UDP and disables
+  inherited port mapping.
+
 | ``transport udp|tcp|auto;``
 
   Configures the packet transport for peers. The default is ``udp``. This option may be set globally, in peer
@@ -87,8 +102,9 @@ Example config:
   their parent group.
 
   ``udp`` uses the traditional fastd datagram transport. ``tcp`` uses TCP connections on the same configured bind
-  addresses and ports, with fastd packets framed inside the stream. ``auto`` probes TCP first and falls back to UDP
-  if the TCP connection attempt fails.
+  addresses and ports, with fastd packets framed inside the stream. ``auto`` tries all applicable transports and
+  accepts the first authenticated path that is verified by received packets. Direct UDP punch candidates are kept on
+  UDP so that TCP probing does not interfere with predicted NAT ports.
 
   Both peers must use the same concrete transport for a session. New fastd versions announce the actual transport in
   the handshake and ignore handshakes whose announced transport does not match the socket they arrived on. Peers that
@@ -136,10 +152,10 @@ Example config:
 
   Controls symmetric NAT punching strategies. ``punch symmetric`` is enabled by default and allows fastd to try both
   bounded port prediction for easy-symmetric NATs and bounded port scans for ordinary symmetric NATs. A candidate that
-  completes the authenticated fastd handshake is kept as a direct path, but it is only treated as verified after an
-  encrypted packet is received on that path. fastd maintains the active path and at most one backup path; an established
-  backup path is kept until it expires, fails, or a payload-proven candidate needs to be promoted. This option may be
-  overridden in peer sections.
+  completes the authenticated fastd handshake is kept as a direct path. Backup paths are treated as verified after
+  their authenticated backup session is established and are then maintained with keepalives. fastd maintains the
+  active path and at most one backup path; an established backup path is kept until it expires, fails, or a
+  payload-proven candidate needs to be promoted. This option may be overridden in peer sections.
 
 | ``punch keepalive yes|no;``
 | ``punch keepalive interval <seconds>;``
@@ -535,6 +551,12 @@ Example config:
 
   Overrides the inherited hole punching mode for this peer. See the main configuration section for the requirements
   and limitations.
+
+| ``nat traversal yes|no;``
+
+  Enables or disables the NAT traversal bundle for this peer. This is the preferred peer-level shortcut for passive
+  peers that should try direct traversal through a public coordinator without a normal ``remote`` entry. See the main
+  configuration section for the exact options enabled by this bundle and the remaining global punch limits.
 
 | ``punch symmetric yes|no;``
 

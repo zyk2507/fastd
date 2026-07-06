@@ -699,6 +699,7 @@ static json_object *dump_hole_punch(const fastd_peer_t *peer) {
 
 	struct json_object *ret = json_object_new_object();
 	json_object_object_add(ret, "mode", json_object_new_string(hole_punch_mode_name(mode)));
+	json_object_object_add(ret, "nat_traversal", json_object_new_boolean(fastd_peer_get_nat_traversal(peer)));
 	json_object_object_add(ret, "enabled", json_object_new_boolean(mode != HOLE_PUNCH_OFF));
 	json_object_object_add(ret, "established", json_object_new_boolean(established));
 	json_object_object_add(ret, "verified", json_object_new_boolean(verified));
@@ -790,6 +791,7 @@ static json_object *dump_nat(void) {
 /** Dumps punch control status as a JSON object */
 static json_object *dump_punch(void) {
 	struct json_object *ret = json_object_new_object();
+	json_object_object_add(ret, "nat_traversal", json_object_new_boolean(fastd_peer_get_nat_traversal(NULL)));
 	json_object_object_add(ret, "control_relay", json_object_new_boolean(conf.punch_control_relay));
 	json_object_object_add(ret, "symmetric", json_object_new_boolean(conf.punch_symmetric));
 	json_object_object_add(ret, "keepalive", json_object_new_boolean(conf.punch_keepalive));

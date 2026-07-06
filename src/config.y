@@ -100,6 +100,7 @@
 %token TOK_MODE
 %token TOK_MTU
 %token TOK_MULTITAP
+%token TOK_NAT
 %token TOK_NAT_PMP
 %token TOK_NO
 %token TOK_NONE
@@ -137,6 +138,7 @@
 %token TOK_TO
 %token TOK_TOKEN
 %token TOK_TCP
+%token TOK_TRAVERSAL
 %token TOK_TUN
 %token TOK_TURN
 %token TOK_TRANSPORT
@@ -169,6 +171,9 @@
 		fastd_port_mapping_mode_t mode);
 	static bool fastd_config_set_turn_relay(
 		YYLTYPE *loc, fastd_parser_state_t *state, fastd_tristate_t *dest, bool enabled);
+	static void fastd_config_set_nat_traversal(
+		YYLTYPE *loc, fastd_parser_state_t *state, fastd_peer_group_t *group, fastd_peer_t *peer,
+		bool enabled);
 }
 
 
@@ -334,6 +339,9 @@ peer_group_statement:
 		}
 	|	TOK_HOLE_PUNCH hole_punch ';' {
 			state->peer_group->hole_punch = $2;
+		}
+	|	TOK_NAT TOK_TRAVERSAL boolean ';' {
+			fastd_config_set_nat_traversal(&@$, state, state->peer_group, NULL, $3);
 		}
 	|	TOK_TURN TOK_RELAY boolean ';' {
 			if (!fastd_config_set_turn_relay(&@$, state, &state->peer_group->turn_relay, $3))
@@ -638,6 +646,9 @@ peer_statement: TOK_REMOTE peer_remote ';'
 		}
 	|	TOK_HOLE_PUNCH hole_punch ';' {
 			state->peer->hole_punch = $2;
+		}
+	|	TOK_NAT TOK_TRAVERSAL boolean ';' {
+			fastd_config_set_nat_traversal(&@$, state, NULL, state->peer, $3);
 		}
 	|	TOK_PUNCH TOK_SYMMETRIC boolean ';' {
 			state->peer->punch_symmetric = (fastd_tristate_t){ true, $3 };
@@ -1008,4 +1019,38 @@ static bool fastd_config_set_turn_relay(
 
 	*dest = enabled ? FASTD_TRISTATE_TRUE : FASTD_TRISTATE_FALSE;
 	return true;
+}
+
+static void fastd_config_set_nat_traversal(
+	UNUSED YYLTYPE *loc, UNUSED fastd_parser_state_t *state, fastd_peer_group_t *group, fastd_peer_t *peer,
+	bool enabled) {
+	if (peer) {
+		peer->nat_traversal = enabled ? FASTD_TRISTATE_TRUE : FASTD_TRISTATE_FALSE;
+		peer->hole_punch = enabled ? HOLE_PUNCH_AUTO : HOLE_PUNCH_OFF;
+		peer->punch_symmetric = enabled ? FASTD_TRISTATE_TRUE : FASTD_TRISTATE_FALSE;
+		peer->turn_relay = enabled ? FASTD_TRISTATE_UNDEF : FASTD_TRISTATE_FALSE;
+
+		if (enabled)
+			peer->transport = TRANSPORT_AUTO;
+		else {
+			peer->transport = TRANSPORT_UDP;
+			peer->port_mapping = PORT_MAPPING_OFF;
+		}
+
+		return;
+	}
+
+	group->nat_traversal = enabled ? FASTD_TRISTATE_TRUE : FASTD_TRISTATE_FALSE;
+	group->hole_punch = enabled ? HOLE_PUNCH_AUTO : HOLE_PUNCH_OFF;
+	group->turn_relay = enabled ? FASTD_TRISTATE_UNDEF : FASTD_TRISTATE_FALSE;
+	group->transport = enabled ? TRANSPORT_AUTO : TRANSPORT_UDP;
+	if (!enabled)
+		group->port_mapping = PORT_MAPPING_OFF;
+
+	if (group == conf.peer_group) {
+		conf.punch_control_relay = enabled;
+		conf.punch_symmetric = enabled;
+		if (enabled)
+			conf.punch_keepalive = true;
+	}
 }

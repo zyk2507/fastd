@@ -34,6 +34,7 @@ struct fastd_peer_group {
 	fastd_port_mapping_mode_t port_mapping; /**< Automatic port mapping mode for peers in this group */
 	fastd_peer_transport_t transport;       /**< Transport protocol for peers in this group */
 	fastd_hole_punch_mode_t hole_punch;     /**< Hole punching mode for peers in this group */
+	fastd_tristate_t nat_traversal;         /**< Whether peers in this group should use NAT traversal */
 	fastd_tristate_t turn_relay;            /**< Whether peers in this group should use TURN relay */
 	fastd_turn_server_t *turn_servers;      /**< TURN servers for peers in this group */
 
@@ -115,15 +116,28 @@ static inline fastd_hole_punch_mode_t fastd_peer_group_get_hole_punch(const fast
 	return *fastd_peer_group_lookup(group, hole_punch);
 }
 
-/** Returns the inherited TURN relay setting for a peer group */
-static inline bool fastd_peer_group_get_turn_relay(const fastd_peer_group_t *group) {
-	while (group->parent && !group->turn_relay.set)
+/** Returns the inherited NAT traversal setting for a peer group */
+static inline bool fastd_peer_group_get_nat_traversal(const fastd_peer_group_t *group) {
+	while (group->parent && !group->nat_traversal.set)
 		group = group->parent;
 
-	return group->turn_relay.state;
+	return group->nat_traversal.state;
 }
 
 /** Returns the inherited TURN server list for a peer group */
 static inline const fastd_turn_server_t *fastd_peer_group_get_turn_servers(const fastd_peer_group_t *group) {
 	return *fastd_peer_group_lookup(group, turn_servers);
+}
+
+/** Returns the inherited TURN relay setting for a peer group */
+static inline bool fastd_peer_group_get_turn_relay(const fastd_peer_group_t *group) {
+	const fastd_peer_group_t *orig_group = group;
+
+	while (group->parent && !group->turn_relay.set)
+		group = group->parent;
+
+	if (!group->turn_relay.set)
+		return fastd_peer_group_get_nat_traversal(orig_group) && fastd_peer_group_get_turn_servers(orig_group);
+
+	return group->turn_relay.state;
 }

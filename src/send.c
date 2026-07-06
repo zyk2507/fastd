@@ -79,23 +79,23 @@ void fastd_send(
 		return;
 	}
 
-	if (fastd_tcp_send(peer, (fastd_socket_t *)sock, local_addr, remote_addr, buffer, stat_size))
-		return;
-
 	bool current_exact_udp_punch = false;
-	if (!stat_size && peer) {
-		bool exact_udp_punch = false;
-		current_exact_udp_punch =
-			fastd_peer_is_current_punch_control_candidate(peer, remote_addr, &exact_udp_punch, NULL) &&
-			exact_udp_punch;
-	}
+	if (!stat_size && peer)
+		current_exact_udp_punch = fastd_peer_is_current_punch_candidate(peer, remote_addr);
 
 	bool current_socket_matches_punch =
 		fastd_socket_is_hole_punch(sock) && fastd_peer_address_equal(&sock->peer_addr, remote_addr);
 
-	if (!stat_size && fastd_udp_punch_send(peer, sock, remote_addr, buffer) && current_exact_udp_punch &&
-	    !current_socket_matches_punch)
+	if (fastd_tcp_send(peer, (fastd_socket_t *)sock, local_addr, remote_addr, buffer, stat_size))
 		return;
+
+	if (!stat_size && current_exact_udp_punch && !current_socket_matches_punch) {
+		fastd_udp_punch_send(peer, sock, remote_addr, buffer);
+		return;
+	}
+
+	if (!stat_size && !current_exact_udp_punch)
+		fastd_udp_punch_send(peer, sock, remote_addr, buffer);
 
 	if (fastd_turn_send(peer, sock, local_addr, remote_addr, buffer, stat_size))
 		return;

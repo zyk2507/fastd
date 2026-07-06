@@ -194,9 +194,6 @@ static inline bool can_receive_data_transport(const fastd_peer_t *peer, const fa
 	fastd_peer_transport_t actual = get_socket_transport(sock);
 	fastd_peer_transport_t configured = fastd_peer_get_transport(peer);
 
-	if (configured == TRANSPORT_AUTO && peer->transport_probe)
-		return actual == peer->transport_probe;
-
 	return fastd_peer_transport_allows(configured, actual);
 }
 

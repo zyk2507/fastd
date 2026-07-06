@@ -554,7 +554,7 @@ static void init_upnp_igd(fastd_port_mapping_t *mapping) {
 	struct UPNPDev *devlist =
 		upnpDiscover(FASTD_UPNP_DISCOVER_DELAY, NULL, NULL, UPNP_LOCAL_PORT_ANY, 0, 2, &discover_error);
 	if (!devlist) {
-		pr_warn("unable to discover UPnP IGD devices: error %d", discover_error);
+		pr_warn("unable to discover UPnP IGD devices: error %i", discover_error);
 		return;
 	}
 

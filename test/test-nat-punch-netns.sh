@@ -479,7 +479,7 @@ bind 0.0.0.0:10001;
 status socket "$WORK/a.status";
 $(punch_test_limits 3)
 peer "c" { key "$PUB_C"; remote 10.52.0.1 port 10000; transport udp; }
-peer "b" { key "$PUB_B"; transport udp; hole-punch udp; }
+peer "b" { key "$PUB_B"; nat traversal yes; }
 EOF
 
 cat > "$WORK/b.conf" <<EOF
@@ -492,7 +492,7 @@ bind 0.0.0.0:10001;
 status socket "$WORK/b.status";
 $(punch_test_limits 3)
 peer "c" { key "$PUB_C"; remote 10.52.0.1 port 10000; transport udp; }
-peer "a" { key "$PUB_A"; transport udp; hole-punch udp; }
+peer "a" { key "$PUB_A"; nat traversal yes; }
 EOF
 
 write_c_conf() {
@@ -508,10 +508,10 @@ bind 10.52.0.1:10000;
 status socket "$WORK/c.status";
 forward no;
 peer discovery no;
-punch control relay $relay;
+nat traversal $relay;
 $(punch_test_limits 3)
-peer "a" { key "$PUB_A"; transport udp; hole-punch udp; }
-peer "b" { key "$PUB_B"; transport udp; hole-punch udp; }
+peer "a" { key "$PUB_A"; nat traversal yes; }
+peer "b" { key "$PUB_B"; nat traversal yes; }
 EOF
 }
 
@@ -528,7 +528,7 @@ stun server "10.52.0.1" port 3478;
 stun server "10.52.0.1" port 3479;
 $(punch_test_limits)
 peer "c" { key "$PUB_C"; remote 10.52.0.1 port 11000; transport udp; }
-peer "b" { key "$PUB_B"; transport udp; hole-punch udp; punch symmetric yes; }
+peer "b" { key "$PUB_B"; nat traversal yes; }
 EOF
 
 	cat > "$WORK/b.conf" <<EOF
@@ -543,7 +543,7 @@ stun server "10.52.0.1" port 3478;
 stun server "10.52.0.1" port 3479;
 $(punch_test_limits)
 peer "c" { key "$PUB_C"; remote 10.52.0.1 port 11000; transport udp; }
-peer "a" { key "$PUB_A"; transport udp; hole-punch udp; punch symmetric yes; }
+peer "a" { key "$PUB_A"; nat traversal yes; }
 EOF
 
 	cat > "$WORK/c.conf" <<EOF
@@ -556,10 +556,10 @@ bind 10.52.0.1:11000;
 status socket "$WORK/c.status";
 forward no;
 peer discovery no;
-punch control relay yes;
+nat traversal yes;
 $(punch_test_limits)
-peer "a" { key "$PUB_A"; transport udp; hole-punch udp; punch symmetric yes; }
-peer "b" { key "$PUB_B"; transport udp; hole-punch udp; punch symmetric yes; }
+peer "a" { key "$PUB_A"; nat traversal yes; }
+peer "b" { key "$PUB_B"; nat traversal yes; }
 EOF
 }
 
@@ -576,7 +576,7 @@ stun server "10.52.0.1" port 3478;
 stun server "10.52.0.1" port 3479;
 $(punch_test_limits)
 peer "c" { key "$PUB_C"; remote 10.52.0.1 port 12000; transport udp; }
-peer "b" { key "$PUB_B"; transport udp; hole-punch udp; punch symmetric yes; }
+peer "b" { key "$PUB_B"; nat traversal yes; }
 EOF
 
 	cat > "$WORK/b.conf" <<EOF
@@ -591,7 +591,7 @@ stun server "10.52.0.1" port 3478;
 stun server "10.52.0.1" port 3479;
 $(punch_test_limits)
 peer "c" { key "$PUB_C"; remote 10.52.0.1 port 12000; transport udp; }
-peer "a" { key "$PUB_A"; transport udp; hole-punch udp; punch symmetric yes; }
+peer "a" { key "$PUB_A"; nat traversal yes; }
 EOF
 
 	cat > "$WORK/c.conf" <<EOF
@@ -604,10 +604,10 @@ bind 10.52.0.1:12000;
 status socket "$WORK/c.status";
 forward no;
 peer discovery no;
-punch control relay yes;
+nat traversal yes;
 $(punch_test_limits)
-peer "a" { key "$PUB_A"; transport udp; hole-punch udp; punch symmetric yes; }
-peer "b" { key "$PUB_B"; transport udp; hole-punch udp; punch symmetric yes; }
+peer "a" { key "$PUB_A"; nat traversal yes; }
+peer "b" { key "$PUB_B"; nat traversal yes; }
 EOF
 }
 
@@ -622,10 +622,9 @@ bind 0.0.0.0:13001;
 status socket "$WORK/a.status";
 stun server "10.52.0.1" port 3478;
 stun server "10.52.0.1" port 3479;
-punch symmetric yes;
 $(punch_test_limits)
 peer "c" { key "$PUB_C"; remote 10.52.0.1 port 13000; transport udp; }
-peer "b" { key "$PUB_B"; transport udp; hole-punch udp; punch symmetric yes; }
+peer "b" { key "$PUB_B"; nat traversal yes; }
 EOF
 
 	cat > "$WORK/b.conf" <<EOF
@@ -638,10 +637,9 @@ bind 0.0.0.0:13001;
 status socket "$WORK/b.status";
 stun server "10.52.0.1" port 3478;
 stun server "10.52.0.1" port 3479;
-punch symmetric yes;
 $(punch_test_limits)
 peer "c" { key "$PUB_C"; remote 10.52.0.1 port 13000; transport udp; }
-peer "a" { key "$PUB_A"; transport udp; hole-punch udp; punch symmetric yes; }
+peer "a" { key "$PUB_A"; nat traversal yes; }
 EOF
 
 	cat > "$WORK/c.conf" <<EOF
@@ -654,11 +652,10 @@ bind 10.52.0.1:13000;
 status socket "$WORK/c.status";
 forward no;
 peer discovery no;
-punch control relay yes;
-punch symmetric yes;
+nat traversal yes;
 $(punch_test_limits)
-peer "a" { key "$PUB_A"; transport udp; hole-punch udp; punch symmetric yes; }
-peer "b" { key "$PUB_B"; transport udp; hole-punch udp; punch symmetric yes; }
+peer "a" { key "$PUB_A"; nat traversal yes; }
+peer "b" { key "$PUB_B"; nat traversal yes; }
 EOF
 }
 

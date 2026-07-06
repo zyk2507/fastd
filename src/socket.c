@@ -1054,11 +1054,21 @@ static bool tcp_queue(fastd_socket_t *sock, fastd_peer_t *peer, const fastd_buff
 /** Queues an initial handshake on deterministic TCP hole punching candidates */
 static void
 tcp_hole_punch_queue(fastd_peer_t *peer, const fastd_peer_address_t *remote_addr, const fastd_buffer_t *buffer) {
-	if (!peer || fastd_peer_is_established(peer) || !fastd_peer_hole_punch_allows(peer, TRANSPORT_TCP))
+	if (!peer || !fastd_peer_hole_punch_allows(peer, TRANSPORT_TCP))
 		return;
 
 	if (!fastd_peer_transport_allows(fastd_peer_get_transport(peer), TRANSPORT_TCP))
 		return;
+
+	if (fastd_peer_is_punch_candidate(peer, remote_addr))
+		return;
+
+	if (fastd_peer_is_established(peer)) {
+		if (fastd_peer_has_verified_backup_path(peer))
+			return;
+		if (fastd_peer_address_equal(&peer->address, remote_addr))
+			return;
+	}
 
 	if (remote_addr->sa.sa_family != AF_INET)
 		return;
@@ -1108,8 +1118,8 @@ static size_t count_udp_hole_punch_sockets(fastd_peer_t *peer, const fastd_peer_
 }
 
 /** Sends a UDP punch handshake from one socket */
-static bool
-udp_punch_send_from_socket(fastd_socket_t *sock, const fastd_peer_address_t *remote_addr, const fastd_buffer_t *buffer) {
+static bool udp_punch_send_from_socket(
+	fastd_socket_t *sock, const fastd_peer_address_t *remote_addr, const fastd_buffer_t *buffer) {
 	ssize_t ret = sendto(sock->fd.fd, buffer->data, buffer->len, 0, &remote_addr->sa, address_len(remote_addr));
 	if (ret < 0) {
 		pr_debug2_errno("UDP punch sendto");
@@ -1177,9 +1187,9 @@ udp_punch_send_exact(fastd_peer_t *peer, const fastd_peer_address_t *remote_addr
 }
 
 /** Sends handshakes from an ephemeral UDP punch socket array to one endpoint */
-static bool
-udp_punch_send_socket_array(fastd_peer_t *peer, const fastd_peer_address_t *remote_addr, const fastd_buffer_t *buffer,
-			    unsigned socket_count) {
+static bool udp_punch_send_socket_array(
+	fastd_peer_t *peer, const fastd_peer_address_t *remote_addr, const fastd_buffer_t *buffer,
+	unsigned socket_count) {
 	if (socket_count <= 1)
 		return udp_punch_send_exact(peer, remote_addr, buffer);
 
@@ -1221,7 +1231,8 @@ bool fastd_udp_punch_send(
 	bool exact_udp_punch = false;
 	unsigned udp_punch_sockets = 0;
 	if (fastd_peer_is_current_punch_control_candidate(peer, remote_addr, &exact_udp_punch, &udp_punch_sockets))
-		return exact_udp_punch ? udp_punch_send_socket_array(peer, remote_addr, buffer, udp_punch_sockets) : false;
+		return exact_udp_punch ? udp_punch_send_socket_array(peer, remote_addr, buffer, udp_punch_sockets)
+				       : false;
 
 	if (fastd_peer_is_established(peer))
 		return false;
@@ -1257,6 +1268,9 @@ bool fastd_udp_punch_send(
 bool fastd_tcp_send(
 	fastd_peer_t *peer, fastd_socket_t *sock, UNUSED const fastd_peer_address_t *local_addr,
 	const fastd_peer_address_t *remote_addr, const fastd_buffer_t *buffer, size_t stat_size) {
+	if (!stat_size && peer && fastd_peer_is_punch_candidate(peer, remote_addr))
+		return false;
+
 	if (sock && sock->type == SOCKET_TYPE_TCP_CONNECTION) {
 		if (fastd_peer_address_equal(&sock->peer_addr, remote_addr) &&
 		    (!sock->peer || !peer || sock->peer == peer)) {
@@ -1274,6 +1288,9 @@ bool fastd_tcp_send(
 		return false;
 
 	fastd_peer_transport_t transport = fastd_peer_get_transport(peer);
+	bool auto_probe_handshake =
+		!stat_size && transport == TRANSPORT_AUTO && (!sock || sock->type != SOCKET_TYPE_TCP_CONNECTION);
+
 	switch (transport) {
 	case TRANSPORT_TCP:
 		break;
@@ -1309,14 +1326,16 @@ bool fastd_tcp_send(
 	}
 
 	if (!tcp_sock) {
-		fastd_stats_add(peer, STAT_TX_ERROR, stat_size);
-		return true;
+		if (!auto_probe_handshake)
+			fastd_stats_add(peer, STAT_TX_ERROR, stat_size);
+		return !auto_probe_handshake;
 	}
 
 	if (!stat_size)
 		tcp_hole_punch_queue(peer, remote_addr, buffer);
 
-	return tcp_queue(tcp_sock, peer, buffer, stat_size);
+	bool queued = tcp_queue(tcp_sock, peer, buffer, stat_size);
+	return auto_probe_handshake ? false : queued;
 }
 
 /** Accepts all pending TCP connections from a listener */

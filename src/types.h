@@ -99,7 +99,7 @@ typedef enum fastd_peer_transport {
 	TRANSPORT_UNSET = 0, /**< Inherit transport from the peer group */
 	TRANSPORT_UDP,       /**< Use UDP datagrams */
 	TRANSPORT_TCP,       /**< Use TCP streams with fastd packet framing */
-	TRANSPORT_AUTO,      /**< Probe TCP, then fall back to UDP */
+	TRANSPORT_AUTO,      /**< Try all applicable transports */
 } fastd_peer_transport_t;
 
 /** Automatic hole punching mode */

@@ -88,6 +88,7 @@ struct fastd_peer {
 	fastd_port_mapping_mode_t port_mapping; /**< Peer-specific automatic port mapping mode */
 	fastd_peer_transport_t transport;       /**< Peer-specific transport protocol */
 	fastd_hole_punch_mode_t hole_punch;     /**< Peer-specific hole punching mode */
+	fastd_tristate_t nat_traversal;         /**< Peer-specific NAT traversal setting */
 	fastd_tristate_t punch_symmetric;       /**< Peer-specific symmetric NAT punching strategy */
 	fastd_tristate_t turn_relay;            /**< Peer-specific TURN relay setting */
 	fastd_turn_server_t *turn_servers;      /**< Peer-specific TURN servers */
@@ -123,7 +124,7 @@ struct fastd_peer {
 	fastd_timeout_t backup_keepalive_timeout;  /**< Timeout for the next backup path keepalive */
 	bool backup_direct_established; /**< true if the backup path was established using a direct candidate */
 	fastd_peer_direct_candidate_source_t backup_direct_source; /**< Source of the backup direct endpoint */
-	bool backup_path_verified; /**< true if an encrypted packet has been received on the backup path */
+	bool backup_path_verified; /**< true if the backup path has completed an authenticated exchange */
 	VECTOR(fastd_peer_direct_candidate_t) direct_candidates;   /**< Direct endpoint candidates */
 	VECTOR(fastd_peer_punch_suppression_t) punch_suppressions; /**< Failed punch endpoints under cooldown */
 	fastd_timeout_t next_discovery_announce;                   /**< Rate limit for relay endpoint announcements */
@@ -261,6 +262,9 @@ fastd_peer_direct_candidate_count_by_source(const fastd_peer_t *peer, fastd_peer
 bool fastd_peer_is_current_punch_control_candidate(
 	const fastd_peer_t *peer, const fastd_peer_address_t *addr, bool *exact_udp_punch, unsigned *udp_punch_sockets);
 bool fastd_peer_is_current_punch_candidate(const fastd_peer_t *peer, const fastd_peer_address_t *addr);
+bool fastd_peer_is_punch_control_candidate(
+	const fastd_peer_t *peer, const fastd_peer_address_t *addr, bool *exact_udp_punch, unsigned *udp_punch_sockets);
+bool fastd_peer_is_punch_candidate(const fastd_peer_t *peer, const fastd_peer_address_t *addr);
 bool fastd_peer_punch_candidate_suppressed(const fastd_peer_t *peer, const fastd_peer_address_t *addr);
 size_t fastd_peer_punch_suppression_count(const fastd_peer_t *peer);
 bool fastd_peer_send_direct_handshake(fastd_peer_t *peer, const fastd_peer_address_t *addr);
@@ -411,6 +415,14 @@ static inline fastd_hole_punch_mode_t fastd_peer_get_hole_punch(const fastd_peer
 	return fastd_peer_group_get_hole_punch(peer ? peer->group : conf.peer_group);
 }
 
+/** Returns the effective NAT traversal setting for a peer */
+static inline bool fastd_peer_get_nat_traversal(const fastd_peer_t *peer) {
+	if (peer && peer->nat_traversal.set)
+		return peer->nat_traversal.state;
+
+	return fastd_peer_group_get_nat_traversal(peer ? peer->group : conf.peer_group);
+}
+
 /** Returns whether a peer may use deterministic hole punching for a transport */
 static inline bool fastd_peer_hole_punch_allows(const fastd_peer_t *peer, fastd_peer_transport_t transport) {
 	fastd_hole_punch_mode_t mode = fastd_peer_get_hole_punch(peer);
@@ -438,20 +450,26 @@ static inline bool fastd_peer_get_punch_symmetric(const fastd_peer_t *peer) {
 	return conf.punch_symmetric;
 }
 
-/** Returns the effective TURN relay setting for a peer */
-static inline bool fastd_peer_get_turn_relay(const fastd_peer_t *peer) {
-	if (peer && peer->turn_relay.set)
-		return peer->turn_relay.state;
-
-	return fastd_peer_group_get_turn_relay(peer ? peer->group : conf.peer_group);
-}
-
 /** Returns the effective TURN server list for a peer */
 static inline const fastd_turn_server_t *fastd_peer_get_turn_servers(const fastd_peer_t *peer) {
 	if (peer && peer->turn_servers)
 		return peer->turn_servers;
 
 	return fastd_peer_group_get_turn_servers(peer ? peer->group : conf.peer_group);
+}
+
+/** Returns the effective TURN relay setting for a peer */
+static inline bool fastd_peer_get_turn_relay(const fastd_peer_t *peer) {
+	if (peer && peer->turn_relay.set)
+		return peer->turn_relay.state;
+
+	if (peer && peer->nat_traversal.set)
+		return peer->nat_traversal.state && fastd_peer_get_turn_servers(peer);
+
+	if (fastd_peer_get_nat_traversal(peer) && fastd_peer_get_turn_servers(peer))
+		return true;
+
+	return fastd_peer_group_get_turn_relay(peer ? peer->group : conf.peer_group);
 }
 
 /** Returns the MTU to use for a peer */

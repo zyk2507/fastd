@@ -148,6 +148,8 @@ static bool establish_backup(
 		return false;
 	}
 
+	fastd_peer_backup_seen(peer);
+
 	pr_verbose(
 		"new backup session with %P established using method `%s'%s%s%s%s.", peer, method->name,
 		(session_flags & FASTD_SESSION_COMPAT) ? " (compat mode)" : "",

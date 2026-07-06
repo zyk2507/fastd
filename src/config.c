@@ -66,7 +66,8 @@ static void default_config(void) {
 	conf.peer_group->port_mapping = PORT_MAPPING_OFF;
 	conf.peer_group->transport = TRANSPORT_UDP;
 	conf.peer_group->hole_punch = HOLE_PUNCH_OFF;
-	conf.peer_group->turn_relay = FASTD_TRISTATE_FALSE;
+	conf.peer_group->nat_traversal = FASTD_TRISTATE_FALSE;
+	conf.peer_group->turn_relay = FASTD_TRISTATE_UNDEF;
 	conf.punch_symmetric = true;
 	conf.punch_keepalive = true;
 	conf.punch_keepalive_interval = DEFAULT_NAT_KEEPALIVE_INTERVAL;

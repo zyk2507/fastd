@@ -1171,6 +1171,49 @@ bool fastd_peer_is_current_punch_candidate(const fastd_peer_t *peer, const fastd
 	return fastd_peer_is_current_punch_control_candidate(peer, addr, &exact_udp_punch, NULL) && exact_udp_punch;
 }
 
+/** Checks if an address is any punch-control direct candidate */
+bool fastd_peer_is_punch_control_candidate(
+	const fastd_peer_t *peer, const fastd_peer_address_t *addr, bool *exact_udp_punch, unsigned *udp_punch_sockets) {
+	bool found = false;
+	uint8_t priority = 0;
+	uint8_t order = UINT8_MAX;
+	bool best_exact_udp_punch = false;
+	unsigned best_udp_punch_sockets = 0;
+
+	if (!peer || !addr)
+		goto end;
+
+	size_t i;
+	for (i = 0; i < VECTOR_LEN(peer->direct_candidates); i++) {
+		const fastd_peer_direct_candidate_t *candidate = &VECTOR_INDEX(peer->direct_candidates, i);
+		if (candidate->source != DIRECT_CANDIDATE_PUNCH_CONTROL || !direct_candidate_valid(candidate) ||
+		    !fastd_peer_address_equal(&candidate->remote, addr))
+			continue;
+
+		if (!found || candidate->priority > priority || (candidate->priority == priority && candidate->order < order)) {
+			found = true;
+			priority = candidate->priority;
+			order = candidate->order;
+			best_exact_udp_punch = candidate->exact_udp_punch;
+			best_udp_punch_sockets = candidate->udp_punch_sockets;
+		}
+	}
+
+end:
+	if (exact_udp_punch)
+		*exact_udp_punch = best_exact_udp_punch;
+	if (udp_punch_sockets)
+		*udp_punch_sockets = best_udp_punch_sockets;
+
+	return found;
+}
+
+/** Checks if an address is any exact-UDP punch-control direct candidate */
+bool fastd_peer_is_punch_candidate(const fastd_peer_t *peer, const fastd_peer_address_t *addr) {
+	bool exact_udp_punch = false;
+	return fastd_peer_is_punch_control_candidate(peer, addr, &exact_udp_punch, NULL) && exact_udp_punch;
+}
+
 /** Checks if a punch-control candidate endpoint is temporarily suppressed */
 bool fastd_peer_punch_candidate_suppressed(const fastd_peer_t *peer, const fastd_peer_address_t *addr) {
 	size_t i;
@@ -1837,6 +1880,20 @@ static inline void no_valid_address_debug(const fastd_peer_t *peer) {
 	pr_debug("not sending a handshake to %P (no valid address resolved)", peer);
 }
 
+/** Returns the default UDP socket matching a remote address family */
+static fastd_socket_t *default_udp_socket_for_address(const fastd_peer_address_t *addr) {
+	switch (addr->sa.sa_family) {
+	case AF_INET:
+		return ctx.sock_default_v4;
+
+	case AF_INET6:
+		return ctx.sock_default_v6;
+
+	default:
+		return NULL;
+	}
+}
+
 /** Sends a new handshake to a specific peer address */
 static bool send_handshake_address(fastd_peer_t *peer, const fastd_peer_address_t *addr) {
 	fastd_socket_t *sock = peer->sock;
@@ -1875,6 +1932,15 @@ static bool send_handshake_address(fastd_peer_t *peer, const fastd_peer_address_
 		return false;
 	}
 
+	bool current_exact_udp_punch = fastd_peer_is_current_punch_candidate(peer, handshake_addr);
+	if (current_exact_udp_punch) {
+		fastd_socket_t *udp_sock = default_udp_socket_for_address(handshake_addr);
+		if (udp_sock && udp_sock->bound_addr) {
+			sock = udp_sock;
+			local_address = *udp_sock->bound_addr;
+		}
+	}
+
 	if (!fastd_timed_out(peer->last_handshake_timeout) &&
 	    fastd_peer_address_equal(handshake_addr, &peer->last_handshake_address)) {
 		pr_debug("not sending a handshake to %P as we sent one a short time ago", peer);
@@ -1884,6 +1950,20 @@ static bool send_handshake_address(fastd_peer_t *peer, const fastd_peer_address_
 	peer->last_handshake_timeout = ctx.now + MIN_HANDSHAKE_INTERVAL;
 	peer->last_handshake_address = *handshake_addr;
 	conf.protocol->handshake_init(sock, &local_address, handshake_addr, peer, FLAG_INITIAL);
+
+	if (!current_exact_udp_punch && fastd_peer_get_transport(peer) == TRANSPORT_AUTO &&
+	    fastd_peer_hole_punch_allows(peer, TRANSPORT_UDP) && fastd_socket_is_tcp(sock)) {
+		fastd_socket_t *udp_sock = default_udp_socket_for_address(handshake_addr);
+		if (udp_sock && udp_sock->bound_addr) {
+			fastd_peer_transport_t old_probe = peer->transport_probe;
+			fastd_peer_address_t udp_local_address = *udp_sock->bound_addr;
+
+			peer->transport_probe = TRANSPORT_UDP;
+			conf.protocol->handshake_init(udp_sock, &udp_local_address, handshake_addr, peer, FLAG_INITIAL);
+			peer->transport_probe = old_probe;
+		}
+	}
+
 	return true;
 }
 
