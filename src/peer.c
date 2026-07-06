@@ -28,6 +28,8 @@
 #define FASTD_DIRECT_CANDIDATE_ATTEMPT_INTERVAL 5000
 #define FASTD_DIRECT_CANDIDATE_PRIORITY_REALM 80
 #define FASTD_DIRECT_CANDIDATE_PRIORITY_DISCOVERY 100
+#define FASTD_PUNCH_SUPPRESSION_LIMIT 32
+#define FASTD_PUNCH_SUPPRESSION_TIME 60000
 
 
 static bool direct_candidate_valid(const fastd_peer_direct_candidate_t *candidate);
@@ -530,6 +532,7 @@ void fastd_peer_free(fastd_peer_t *peer) {
 
 	VECTOR_FREE(peer->remotes);
 	VECTOR_FREE(peer->direct_candidates);
+	VECTOR_FREE(peer->punch_suppressions);
 	VECTOR_FREE(peer->direct_macs);
 	fastd_turn_server_free(peer->turn_servers);
 
@@ -748,6 +751,11 @@ static bool direct_candidate_valid(const fastd_peer_direct_candidate_t *candidat
 	return candidate->remote.sa.sa_family != AF_UNSPEC && !fastd_timed_out(candidate->timeout);
 }
 
+/** Checks whether a punch suppression entry is still active */
+static bool punch_suppression_valid(const fastd_peer_punch_suppression_t *suppression) {
+	return suppression->remote.sa.sa_family != AF_UNSPEC && !fastd_timed_out(suppression->timeout);
+}
+
 /** Checks whether two direct candidates describe the same endpoint path */
 static bool direct_candidate_equal(
 	const fastd_peer_direct_candidate_t *candidate, fastd_peer_t *relay, const fastd_peer_address_t *remote_addr) {
@@ -762,6 +770,60 @@ static void clear_direct_candidate_cache(fastd_peer_t *peer) {
 	peer->direct_remote_source = DIRECT_CANDIDATE_REALM;
 	peer->direct_remote_exact_udp = false;
 }
+
+/** Removes expired punch suppression entries */
+static void compact_punch_suppressions(fastd_peer_t *peer) {
+	size_t i;
+	for (i = 0; i < VECTOR_LEN(peer->punch_suppressions);) {
+		if (punch_suppression_valid(&VECTOR_INDEX(peer->punch_suppressions, i))) {
+			i++;
+			continue;
+		}
+
+		VECTOR_DELETE(peer->punch_suppressions, i);
+	}
+}
+
+/** Suppresses one failed punch endpoint for a short cooldown period */
+static void suppress_punch_candidate(fastd_peer_t *peer, const fastd_peer_address_t *remote_addr) {
+	compact_punch_suppressions(peer);
+
+	size_t i;
+	for (i = 0; i < VECTOR_LEN(peer->punch_suppressions); i++) {
+		fastd_peer_punch_suppression_t *entry = &VECTOR_INDEX(peer->punch_suppressions, i);
+		if (fastd_peer_address_equal(&entry->remote, remote_addr)) {
+			entry->timeout = ctx.now + FASTD_PUNCH_SUPPRESSION_TIME;
+			return;
+		}
+	}
+
+	if (VECTOR_LEN(peer->punch_suppressions) >= FASTD_PUNCH_SUPPRESSION_LIMIT) {
+		size_t victim = 0;
+		for (i = 1; i < VECTOR_LEN(peer->punch_suppressions); i++) {
+			if (VECTOR_INDEX(peer->punch_suppressions, i).timeout <
+			    VECTOR_INDEX(peer->punch_suppressions, victim).timeout)
+				victim = i;
+		}
+
+		VECTOR_DELETE(peer->punch_suppressions, victim);
+	}
+
+	VECTOR_ADD(
+		peer->punch_suppressions,
+		((fastd_peer_punch_suppression_t){
+			.remote = *remote_addr,
+			.timeout = ctx.now + FASTD_PUNCH_SUPPRESSION_TIME,
+		}));
+}
+
+#ifdef WITH_TESTS
+
+/** Test wrapper for punch endpoint suppression */
+void fastd_peer_test_suppress_punch_candidate(fastd_peer_t *peer, const fastd_peer_address_t *remote_addr) {
+	suppress_punch_candidate(peer, remote_addr);
+}
+
+#endif
 
 /** Updates the cached selected direct candidate */
 static void set_direct_candidate_cache(fastd_peer_t *peer, const fastd_peer_direct_candidate_t *candidate) {
@@ -789,6 +851,7 @@ static void mark_direct_established(
 
 	ctx.punch_direct_success++;
 	peer->punch_success_counted = true;
+	VECTOR_RESIZE(peer->punch_suppressions, 0);
 
 	size_t i;
 	for (i = 0; i < VECTOR_LEN(peer->direct_candidates); i++) {
@@ -807,8 +870,10 @@ static void compact_direct_candidates(fastd_peer_t *peer) {
 		fastd_peer_direct_candidate_t *candidate = &VECTOR_INDEX(peer->direct_candidates, i);
 		if (!direct_candidate_valid(candidate)) {
 			if (!fastd_peer_is_established(peer) && candidate->source == DIRECT_CANDIDATE_PUNCH_CONTROL &&
-			    candidate->attempts)
+			    candidate->attempts) {
 				ctx.punch_direct_failures++;
+				suppress_punch_candidate(peer, &candidate->remote);
+			}
 			VECTOR_DELETE(peer->direct_candidates, i);
 			continue;
 		}
@@ -911,6 +976,30 @@ bool fastd_peer_is_current_punch_candidate(const fastd_peer_t *peer, const fastd
 	return fastd_peer_is_current_punch_control_candidate(peer, addr, &exact_udp_punch) && exact_udp_punch;
 }
 
+/** Checks if a punch-control candidate endpoint is temporarily suppressed */
+bool fastd_peer_punch_candidate_suppressed(const fastd_peer_t *peer, const fastd_peer_address_t *addr) {
+	size_t i;
+	for (i = 0; i < VECTOR_LEN(peer->punch_suppressions); i++) {
+		const fastd_peer_punch_suppression_t *entry = &VECTOR_INDEX(peer->punch_suppressions, i);
+		if (punch_suppression_valid(entry) && fastd_peer_address_equal(&entry->remote, addr))
+			return true;
+	}
+
+	return false;
+}
+
+/** Counts active punch endpoint suppressions */
+size_t fastd_peer_punch_suppression_count(const fastd_peer_t *peer) {
+	size_t count = 0;
+	size_t i;
+	for (i = 0; i < VECTOR_LEN(peer->punch_suppressions); i++) {
+		if (punch_suppression_valid(&VECTOR_INDEX(peer->punch_suppressions, i)))
+			count++;
+	}
+
+	return count;
+}
+
 /** Adds or refreshes a direct endpoint candidate for a peer */
 void fastd_peer_add_direct_candidate_source(
 	fastd_peer_t *peer, fastd_peer_t *relay, const fastd_peer_address_t *remote_addr, const fastd_eth_addr_t *macs,
@@ -1008,6 +1097,12 @@ void fastd_peer_add_direct_candidate(
 /** Adds or refreshes a punch-control direct endpoint for a peer */
 void fastd_peer_add_punch_control_candidate(
 	fastd_peer_t *peer, const fastd_peer_address_t *remote_addr, uint8_t priority, bool exact_udp_punch) {
+	if (!fastd_peer_is_established(peer) && fastd_peer_punch_candidate_suppressed(peer, remote_addr)) {
+		ctx.punch_direct_suppressed++;
+		pr_debug("suppressing punch-control candidate for %P[%I] after recent failures", peer, remote_addr);
+		return;
+	}
+
 	fastd_peer_add_direct_candidate_source(
 		peer, NULL, remote_addr, NULL, 0, DIRECT_CANDIDATE_PUNCH_CONTROL, priority);
 

@@ -277,6 +277,10 @@ static void print_punch_status(json_object *punch) {
 	if (active)
 		printf("           active punch candidates: %lld\n", (long long)active);
 
+	int64_t suppressions = get_int_member(punch, "active_suppressions");
+	if (suppressions)
+		printf("           suppressed punch endpoints: %lld\n", (long long)suppressions);
+
 	json_object *counters = get_object_member(punch, "counters");
 	if (!counters)
 		return;
@@ -286,11 +290,14 @@ static void print_punch_status(json_object *punch) {
 	int64_t handshakes = get_int_member(counters, "direct_handshakes");
 	int64_t success = get_int_member(counters, "direct_success");
 	int64_t failures = get_int_member(counters, "direct_failures");
+	int64_t suppressed = get_int_member(counters, "direct_suppressed");
 	int64_t exact_udp = get_int_member(counters, "udp_exact_tx");
-	if (tx || rx || handshakes || success || failures || exact_udp)
-		printf("           control tx %lld/rx %lld, direct handshakes %lld, success %lld, failures %lld, exact UDP %lld\n",
-		       (long long)tx, (long long)rx, (long long)handshakes, (long long)success, (long long)failures,
-		       (long long)exact_udp);
+	if (tx || rx || handshakes || success || failures || suppressed || exact_udp)
+		printf(
+			"           control tx %lld/rx %lld, direct handshakes %lld, success %lld, failures %lld, "
+			"suppressed %lld, exact UDP %lld\n",
+			(long long)tx, (long long)rx, (long long)handshakes, (long long)success,
+			(long long)failures, (long long)suppressed, (long long)exact_udp);
 }
 
 /** Prints a peer's hole punching status line */
@@ -572,11 +579,15 @@ static json_object *dump_punch(void) {
 	json_object_object_add(ret, "max_packets", json_object_new_int64(conf.punch_max_packets));
 
 	size_t active_candidates = 0;
+	size_t active_suppressions = 0;
 	size_t i;
-	for (i = 0; i < VECTOR_LEN(ctx.peers); i++)
+	for (i = 0; i < VECTOR_LEN(ctx.peers); i++) {
 		active_candidates += fastd_peer_direct_candidate_count_by_source(
 			VECTOR_INDEX(ctx.peers, i), DIRECT_CANDIDATE_PUNCH_CONTROL);
+		active_suppressions += fastd_peer_punch_suppression_count(VECTOR_INDEX(ctx.peers, i));
+	}
 	json_object_object_add(ret, "active_candidates", json_object_new_int64(active_candidates));
+	json_object_object_add(ret, "active_suppressions", json_object_new_int64(active_suppressions));
 
 	struct json_object *counters = json_object_new_object();
 	json_object_object_add(counters, "control_tx", json_object_new_int64(ctx.punch_control_tx));
@@ -584,6 +595,7 @@ static json_object *dump_punch(void) {
 	json_object_object_add(counters, "direct_handshakes", json_object_new_int64(ctx.punch_direct_handshakes));
 	json_object_object_add(counters, "direct_success", json_object_new_int64(ctx.punch_direct_success));
 	json_object_object_add(counters, "direct_failures", json_object_new_int64(ctx.punch_direct_failures));
+	json_object_object_add(counters, "direct_suppressed", json_object_new_int64(ctx.punch_direct_suppressed));
 	json_object_object_add(counters, "udp_exact_tx", json_object_new_int64(ctx.punch_udp_exact_tx));
 	json_object_object_add(ret, "counters", counters);
 

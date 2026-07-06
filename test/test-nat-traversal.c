@@ -5,6 +5,7 @@
 */
 
 #include "nat_detect.h"
+#include "peer.h"
 #include "punch_rpc.h"
 
 #include <setjmp.h>
@@ -364,6 +365,47 @@ static void test_punch_rejects_bad_key_length(void **state UNUSED) {
 	assert_false(fastd_punch_test_parse_endpoint_message((const uint8_t *)&msg, sizeof(msg), NULL, NULL));
 }
 
+static void test_punch_suppresses_failed_endpoint_temporarily(void **state UNUSED) {
+	fastd_peer_t peer = {};
+	const fastd_peer_address_t endpoint = addr4(0xcb007105, 41000);
+
+	ctx.now = 1000;
+	fastd_peer_test_suppress_punch_candidate(&peer, &endpoint);
+
+	assert_true(fastd_peer_punch_candidate_suppressed(&peer, &endpoint));
+	assert_int_equal(fastd_peer_punch_suppression_count(&peer), 1);
+
+	ctx.now += 30000;
+	assert_true(fastd_peer_punch_candidate_suppressed(&peer, &endpoint));
+
+	ctx.now += 31000;
+	assert_false(fastd_peer_punch_candidate_suppressed(&peer, &endpoint));
+	assert_int_equal(fastd_peer_punch_suppression_count(&peer), 0);
+
+	VECTOR_FREE(peer.punch_suppressions);
+}
+
+static void test_punch_suppression_is_bounded(void **state UNUSED) {
+	fastd_peer_t peer = {};
+	size_t i;
+
+	ctx.now = 1000;
+	for (i = 0; i < 40; i++) {
+		fastd_peer_address_t endpoint = addr4(0xcb007105, 41000 + i);
+		fastd_peer_test_suppress_punch_candidate(&peer, &endpoint);
+		ctx.now++;
+	}
+
+	assert_int_equal(fastd_peer_punch_suppression_count(&peer), 32);
+
+	const fastd_peer_address_t evicted = addr4(0xcb007105, 41000);
+	const fastd_peer_address_t retained = addr4(0xcb007105, 41039);
+	assert_false(fastd_peer_punch_candidate_suppressed(&peer, &evicted));
+	assert_true(fastd_peer_punch_candidate_suppressed(&peer, &retained));
+
+	VECTOR_FREE(peer.punch_suppressions);
+}
+
 int main(void) {
 #ifndef WITH_NAT_DETECT
 	printf("1..0 # Skipped: NAT detection not included\n");
@@ -393,6 +435,8 @@ int main(void) {
 		cmocka_unit_test(test_punch_rejects_bad_version),
 		cmocka_unit_test(test_punch_rejects_bad_length),
 		cmocka_unit_test(test_punch_rejects_bad_key_length),
+		cmocka_unit_test(test_punch_suppresses_failed_endpoint_temporarily),
+		cmocka_unit_test(test_punch_suppression_is_bounded),
 	};
 
 	return cmocka_run_group_tests(tests, NULL, NULL);

@@ -56,6 +56,12 @@ typedef struct fastd_peer_direct_candidate {
 	bool exact_udp_punch;                        /**< Send UDP handshakes from a short-lived exact punch socket */
 } fastd_peer_direct_candidate_t;
 
+/** One temporarily suppressed punch endpoint after failed direct attempts */
+typedef struct fastd_peer_punch_suppression {
+	fastd_peer_address_t remote; /**< Suppressed remote endpoint */
+	fastd_timeout_t timeout;     /**< Expiry timeout */
+} fastd_peer_punch_suppression_t;
+
 /** A peer's configuration and state */
 struct fastd_peer {
 	/* The following fields are more or less static configuration: */
@@ -107,6 +113,7 @@ struct fastd_peer {
 	fastd_peer_direct_candidate_source_t direct_remote_source; /**< Source of the cached direct endpoint */
 	bool direct_remote_exact_udp;                            /**< true if cached endpoint uses exact UDP punching */
 	VECTOR(fastd_peer_direct_candidate_t) direct_candidates; /**< Direct endpoint candidates */
+	VECTOR(fastd_peer_punch_suppression_t) punch_suppressions; /**< Failed punch endpoints under cooldown */
 	fastd_timeout_t next_discovery_announce;                 /**< Rate limit for relay endpoint announcements */
 	fastd_peer_address_t punch_endpoint;                     /**< Last endpoint announced through punch control */
 	fastd_nat_type_t punch_nat_type;                         /**< Last NAT type announced through punch control */
@@ -213,7 +220,13 @@ fastd_peer_direct_candidate_count_by_source(const fastd_peer_t *peer, fastd_peer
 bool fastd_peer_is_current_punch_control_candidate(
 	const fastd_peer_t *peer, const fastd_peer_address_t *addr, bool *exact_udp_punch);
 bool fastd_peer_is_current_punch_candidate(const fastd_peer_t *peer, const fastd_peer_address_t *addr);
+bool fastd_peer_punch_candidate_suppressed(const fastd_peer_t *peer, const fastd_peer_address_t *addr);
+size_t fastd_peer_punch_suppression_count(const fastd_peer_t *peer);
 bool fastd_peer_send_direct_handshake(fastd_peer_t *peer, const fastd_peer_address_t *addr);
+
+#ifdef WITH_TESTS
+void fastd_peer_test_suppress_punch_candidate(fastd_peer_t *peer, const fastd_peer_address_t *remote_addr);
+#endif
 
 void fastd_peer_handle_task(fastd_task_t *task);
 void fastd_peer_eth_addr_cleanup(void);

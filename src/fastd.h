@@ -446,6 +446,7 @@ struct fastd_context {
 	uint64_t punch_direct_handshakes; /**< Number of direct handshakes sent from punch control commands */
 	uint64_t punch_direct_success;    /**< Number of direct sessions established from punch control candidates */
 	uint64_t punch_direct_failures;   /**< Number of attempted punch control candidates that expired */
+	uint64_t punch_direct_suppressed; /**< Number of punch control candidates suppressed after recent failures */
 	uint64_t punch_udp_exact_tx;      /**< Number of exact-endpoint UDP punch packets sent */
 
 	bool has_floating; /**< Specifies if any of the configured peers have floating remotes */
