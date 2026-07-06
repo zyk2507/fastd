@@ -60,6 +60,13 @@ test('nat-punch-iperf-symmetric-netns',
 	timeout : 60,
 )
 
+test('hysteria-realm-netns',
+	bash,
+	args : [files('test-hysteria-realm-netns.sh'), fastd_exe.full_path()],
+	protocol : 'tap',
+	timeout : 180,
+)
+
 benchmark_uhash = executable(
 	'benchmark-uhash', 'benchmark-uhash.c',
 	dependencies: test_deps,
