@@ -116,6 +116,38 @@ Example config:
   with ``turn relay yes``, fastd first tries direct hole punching and starts the TURN relay only after the punching
   window has elapsed.
 
+| ``stun server "<host>":<port>;``
+| ``stun server "<host>" port <port>;``
+
+  Adds a global STUN server for periodic NAT type detection. Multiple servers may be configured. This is separate from
+  the optional STUN server embedded in ``realm server``: the global form classifies the local NAT type, public UDP
+  endpoint, observed public port range and easy-symmetric port direction for status output and punch control metadata.
+  It requires fastd to be built with ``nat_detect`` support, which uses libnice's STUN implementation.
+
+| ``punch control relay yes|no;``
+
+  Allows a trusted node with established peer sessions to relay punch control packets between those peers without
+  forwarding tunnel payload traffic. This is useful when two NATed peers both maintain a normal session to a public
+  coordinator and also have each other's public keys configured locally, but do not have normal ``remote`` addresses
+  for each other. The relayed control packets carry endpoint and NAT metadata; authenticated fastd handshakes still
+  decide which peer, if any, may establish a direct session.
+
+| ``punch symmetric yes|no;``
+| ``punch hard-symmetric yes|no;``
+
+  Controls symmetric NAT punching strategies. ``punch symmetric`` is enabled by default and allows bounded port
+  prediction for easy-symmetric NATs. ``punch hard-symmetric`` is disabled by default and enables bounded port scans
+  for ordinary symmetric NATs; enable it only for peers that need it, because it increases short-lived UDP socket and
+  punch packet usage. Both options may be overridden in peer sections.
+
+| ``punch max sockets <1-256>;``
+| ``punch max packet <1-4096>;``
+| ``punch max packets <1-4096>;``
+
+  Sets global punch control limits. ``punch max sockets`` limits the number of predicted or probed UDP sockets used for
+  one symmetric punch command; the default is 25. ``punch max packet`` and ``punch max packets`` are equivalent aliases
+  that limit the number of punch control packets a relay sends during one maintenance interval; the default is 256.
+
 | ``turn relay yes|no;``
 | ``turn server "<address>" port <port> [user "<username>" password "<password>"];``
 
@@ -477,6 +509,11 @@ Example config:
 
   Overrides the inherited hole punching mode for this peer. See the main configuration section for the requirements
   and limitations.
+
+| ``punch symmetric yes|no;``
+| ``punch hard-symmetric yes|no;``
+
+  Overrides the corresponding global symmetric NAT punching strategy for this peer.
 
 | ``remote <IPv4 address>:<port>;``
 | ``remote <IPv6 address>:<port>;``

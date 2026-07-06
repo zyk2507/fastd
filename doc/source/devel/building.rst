@@ -26,7 +26,7 @@ Optional:
 * OpenSSL/libcrypto (if ``cipher_aes128-ctr`` is enabled)
 * libnatpmp (if ``natpmp`` is enabled)
 * miniupnpc (if ``upnp`` is enabled)
-* libnice (if ``turn`` is enabled)
+* libnice (if ``turn`` or ``nat_detect`` is enabled)
 
 Building
 ~~~~~~~~
@@ -55,8 +55,8 @@ without any additional arguments will show all available variables. Settings can
 be passed to ``meson setup`` or ``meson configure`` using ``-DVARIABLE=VALUE``.
 
 Optional NAT traversal features can be controlled with ``-Dnatpmp=auto|enabled|disabled``,
-``-Dupnp=auto|enabled|disabled`` and ``-Dturn=auto|enabled|disabled``. TURN relay support uses
-libnice.
+``-Dupnp=auto|enabled|disabled``, ``-Dturn=auto|enabled|disabled`` and
+``-Dnat_detect=auto|enabled|disabled``. TURN relay support and NAT detection through STUN use libnice.
 
 Payload compression support can be controlled with ``-Dzstd=auto|enabled|disabled``.
 
@@ -75,7 +75,8 @@ Require all optional NAT traversal dependencies to be present:
 
 ::
 
-    meson setup fastd-build -Dbuildtype=release -Dnatpmp=enabled -Dupnp=enabled -Dturn=enabled
+    meson setup fastd-build -Dbuildtype=release -Dnatpmp=enabled -Dupnp=enabled -Dturn=enabled \
+        -Dnat_detect=enabled
     meson compile -C fastd-build
 
 Require zstd compression support:
@@ -85,12 +86,12 @@ Require zstd compression support:
     meson setup fastd-build -Dbuildtype=release -Dzstd=enabled
     meson compile -C fastd-build
 
-Build without status socket, compression, NAT-PMP, UPnP IGD or TURN support:
+Build without status socket, compression, NAT-PMP, UPnP IGD, TURN or NAT detection support:
 
 ::
 
     meson setup fastd-build -Dbuildtype=release -Dstatus_socket=disabled -Dzstd=disabled \
-        -Dnatpmp=disabled -Dupnp=disabled -Dturn=disabled
+        -Dnatpmp=disabled -Dupnp=disabled -Dturn=disabled -Dnat_detect=disabled
     meson compile -C fastd-build
 
 Validation

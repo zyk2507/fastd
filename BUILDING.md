@@ -24,7 +24,8 @@ Common optional libraries:
 - OpenSSL/libcrypto for `aes128-ctr` support
 - libnatpmp for NAT-PMP port mapping, controlled by `-Dnatpmp=auto|enabled|disabled`
 - miniupnpc for UPnP IGD port mapping, controlled by `-Dupnp=auto|enabled|disabled`
-- libnice for TURN relay support, controlled by `-Dturn=auto|enabled|disabled`
+- libnice for TURN relay and NAT detection through STUN, controlled by
+  `-Dturn=auto|enabled|disabled` and `-Dnat_detect=auto|enabled|disabled`
 
 Use `meson configure build` after setup to see the full option list.
 
@@ -60,7 +61,8 @@ meson setup build \
   -Dbuildtype=release \
   -Dnatpmp=enabled \
   -Dupnp=enabled \
-  -Dturn=enabled
+  -Dturn=enabled \
+  -Dnat_detect=enabled
 meson compile -C build
 ```
 
@@ -71,7 +73,7 @@ meson setup build -Dbuildtype=release -Dzstd=enabled
 meson compile -C build
 ```
 
-Build a minimal binary without status socket, zstd, NAT-PMP, UPnP IGD, or TURN:
+Build a minimal binary without status socket, zstd, NAT-PMP, UPnP IGD, TURN, or NAT detection:
 
 ```sh
 meson setup build-minimal \
@@ -80,7 +82,8 @@ meson setup build-minimal \
   -Dzstd=disabled \
   -Dnatpmp=disabled \
   -Dupnp=disabled \
-  -Dturn=disabled
+  -Dturn=disabled \
+  -Dnat_detect=disabled
 meson compile -C build-minimal
 ```
 
