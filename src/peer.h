@@ -115,6 +115,14 @@ struct fastd_peer {
 	fastd_peer_direct_candidate_source_t direct_remote_source; /**< Source of the cached direct endpoint */
 	bool direct_remote_exact_udp;                            /**< true if cached endpoint uses exact UDP punching */
 	unsigned direct_remote_udp_punch_sockets;                /**< Number of cached UDP punch sockets to use */
+	fastd_socket_t *backup_sock;                             /**< Socket for an established backup path */
+	fastd_peer_address_t backup_local_address;               /**< Local address used by the backup path */
+	fastd_peer_address_t backup_address;                     /**< Remote address of the backup path */
+	fastd_timeout_t backup_reset_timeout;                    /**< Timeout after which the backup path is dropped */
+	fastd_timeout_t backup_keepalive_timeout;                /**< Timeout for the next backup path keepalive */
+	bool backup_direct_established; /**< true if the backup path was established using a direct candidate */
+	fastd_peer_direct_candidate_source_t backup_direct_source; /**< Source of the backup direct endpoint */
+	bool backup_path_verified; /**< true if an encrypted packet has been received on the backup path */
 	VECTOR(fastd_peer_direct_candidate_t) direct_candidates; /**< Direct endpoint candidates */
 	VECTOR(fastd_peer_punch_suppression_t) punch_suppressions; /**< Failed punch endpoints under cooldown */
 	fastd_timeout_t next_discovery_announce;                 /**< Rate limit for relay endpoint announcements */
@@ -127,6 +135,8 @@ struct fastd_peer {
 	fastd_timeout_t next_punch_announce;  /**< Rate limit for local punch metadata announcements */
 	fastd_timeout_t next_punch_relay;     /**< Rate limit for relay-generated punch commands */
 	bool punch_success_counted;           /**< true if the current punch-control session has been counted */
+	fastd_peer_address_t payload_candidate_address; /**< Direct candidate that has carried payload data */
+	fastd_timeout_t payload_candidate_timeout;      /**< Timeout for the payload-proven candidate */
 	VECTOR(fastd_eth_addr_t) direct_macs; /**< MAC addresses that should prefer this direct peer */
 
 	fastd_peer_state_t state; /**< The peer's state */
@@ -144,6 +154,7 @@ struct fastd_peer {
 
 	fastd_timeout_t reset_timeout;     /**< The timeout after which the peer is reset */
 	fastd_timeout_t keepalive_timeout; /**< The timeout after which a keepalive is sent to the peer */
+	fastd_timeout_t active_path_timeout; /**< Timeout while the active transport path is considered verified */
 
 	fastd_stats_t stats; /**< Traffic statistics */
 
@@ -194,6 +205,25 @@ bool fastd_peer_matches_address(const fastd_peer_t *peer, const fastd_peer_addre
 bool fastd_peer_claim_address(
 	fastd_peer_t *peer, fastd_socket_t *sock, const fastd_peer_address_t *local_addr,
 	const fastd_peer_address_t *remote_addr, bool force);
+bool fastd_peer_claim_backup_path(
+	fastd_peer_t *peer, fastd_socket_t *sock, const fastd_peer_address_t *local_addr,
+	const fastd_peer_address_t *remote_addr);
+void fastd_peer_clear_backup_path(fastd_peer_t *peer);
+bool fastd_peer_has_backup_path(const fastd_peer_t *peer);
+bool fastd_peer_is_backup_path(
+	const fastd_peer_t *peer, const fastd_socket_t *sock, const fastd_peer_address_t *local_addr,
+	const fastd_peer_address_t *remote_addr);
+fastd_peer_t *fastd_peer_find_backup_path(
+	const fastd_socket_t *sock, const fastd_peer_address_t *local_addr, const fastd_peer_address_t *remote_addr);
+bool fastd_peer_promote_backup_path(fastd_peer_t *peer);
+void fastd_peer_backup_seen(fastd_peer_t *peer);
+void fastd_peer_clear_backup_keepalive(fastd_peer_t *peer);
+bool fastd_peer_get_direct_candidate_source(
+	const fastd_peer_t *peer, const fastd_peer_address_t *remote_addr,
+	fastd_peer_direct_candidate_source_t *source);
+bool fastd_peer_send_backup_handshake(fastd_peer_t *peer);
+void fastd_peer_note_payload_candidate(fastd_peer_t *peer, const fastd_peer_address_t *remote_addr);
+bool fastd_peer_is_payload_candidate(const fastd_peer_t *peer, const fastd_peer_address_t *remote_addr);
 void fastd_peer_reset_socket(fastd_peer_t *peer);
 void fastd_peer_schedule_handshake(fastd_peer_t *peer, int delay);
 void fastd_peer_transport_failed(fastd_peer_t *peer, fastd_peer_transport_t transport);

@@ -435,6 +435,8 @@ static void print_punch_table(json_object *punch) {
 	add_key_value_row(table, "Symmetric punch", onoff(get_bool_member(punch, "symmetric")));
 	format_counter(value, get_int_member(punch, "max_sockets"));
 	add_key_value_row(table, "Max sockets", value);
+	format_counter(value, get_int_member(punch, "max_attempts"));
+	add_key_value_row(table, "Max attempts", value);
 	format_counter(value, get_int_member(punch, "max_packets"));
 	add_key_value_row(table, "Max packets", value);
 	format_counter(value, get_int_member(punch, "active_candidates"));
@@ -565,12 +567,13 @@ static void print_hole_punch_table(json_object *peers) {
 	size_t row = ft_cur_row(table);
 	ft_write_ln(
 		table, "Peer", "State", "Mode", "Transport", "Local port", "Remote port", "Direct candidates",
-		"Punch candidates", "Symmetric");
+		"Punch candidates", "Backup", "Symmetric");
 	mark_header_row(table, row);
 	ft_set_cell_prop(table, FT_ANY_ROW, 4, FT_CPROP_TEXT_ALIGN, FT_ALIGNED_RIGHT);
 	ft_set_cell_prop(table, FT_ANY_ROW, 5, FT_CPROP_TEXT_ALIGN, FT_ALIGNED_RIGHT);
 	ft_set_cell_prop(table, FT_ANY_ROW, 6, FT_CPROP_TEXT_ALIGN, FT_ALIGNED_RIGHT);
 	ft_set_cell_prop(table, FT_ANY_ROW, 7, FT_CPROP_TEXT_ALIGN, FT_ALIGNED_RIGHT);
+	ft_set_cell_prop(table, FT_ANY_ROW, 8, FT_CPROP_TEXT_ALIGN, FT_ALIGNED_RIGHT);
 
 	json_object_object_foreach(peers, key, peer) {
 		json_object *hole_punch = get_object_member(peer, "hole_punch");
@@ -581,16 +584,25 @@ static void print_hole_punch_table(json_object *peers) {
 		bool enabled = get_bool_member(hole_punch, "enabled");
 		const char *state = established ? "established" : (enabled ? "enabled" : "off");
 
-		char local_port[32], remote_port[32], direct_candidates[32], punch_candidates[32];
+		char local_port[32], remote_port[32], direct_candidates[32], punch_candidates[32], backup[64];
 		format_peer_port(local_port, hole_punch, "local_port");
 		format_peer_port(remote_port, hole_punch, "remote_port");
 		format_counter(direct_candidates, get_int_member(hole_punch, "direct_candidates"));
 		format_counter(punch_candidates, get_int_member(hole_punch, "punch_control_candidates"));
+		if (get_bool_member(hole_punch, "backup_established")) {
+			char backup_remote_port[32];
+			format_peer_port(backup_remote_port, hole_punch, "backup_remote_port");
+			snprintf(
+				backup, sizeof(backup), "%s:%s",
+				value_or_dash(get_string_member(hole_punch, "backup_transport")), backup_remote_port);
+		} else {
+			snprintf(backup, sizeof(backup), "-");
+		}
 
 		ft_write_ln(
 			table, peer_display_name(key, peer), state, value_or_dash(get_string_member(hole_punch, "mode")),
 			value_or_dash(get_string_member(hole_punch, "transport")), local_port, remote_port,
-			direct_candidates, punch_candidates, onoff(get_bool_member(hole_punch, "symmetric")));
+			direct_candidates, punch_candidates, backup, onoff(get_bool_member(hole_punch, "symmetric")));
 	}
 
 	print_status_table("Hole Punch", table);
@@ -673,12 +685,15 @@ static const char *hole_punch_mode_name(fastd_hole_punch_mode_t mode) {
 static json_object *dump_hole_punch(const fastd_peer_t *peer) {
 	fastd_hole_punch_mode_t mode = fastd_peer_get_hole_punch(peer);
 	bool established =
-		fastd_peer_is_established(peer) && (fastd_socket_is_hole_punch(peer->sock) || peer->direct_established);
+		fastd_peer_is_established(peer) && fastd_socket_is_open(peer->sock) &&
+		(fastd_socket_is_hole_punch(peer->sock) || peer->direct_established);
+	bool backup_established = fastd_peer_has_backup_path(peer);
 
 	struct json_object *ret = json_object_new_object();
 	json_object_object_add(ret, "mode", json_object_new_string(hole_punch_mode_name(mode)));
 	json_object_object_add(ret, "enabled", json_object_new_boolean(mode != HOLE_PUNCH_OFF));
 	json_object_object_add(ret, "established", json_object_new_boolean(established));
+	json_object_object_add(ret, "backup_established", json_object_new_boolean(backup_established));
 	json_object_object_add(ret, "symmetric", json_object_new_boolean(fastd_peer_get_punch_symmetric(peer)));
 	json_object_object_add(
 		ret, "direct_candidates", json_object_new_int64(fastd_peer_direct_candidate_count(peer)));
@@ -692,13 +707,29 @@ static json_object *dump_hole_punch(const fastd_peer_t *peer) {
 			ret, "transport", json_object_new_string(fastd_socket_is_tcp(peer->sock) ? "tcp" : "udp"));
 		json_object_object_add(
 			ret, "local_port",
-			json_object_new_int(ntohs(fastd_peer_address_get_port(peer->sock->bound_addr))));
+			json_object_new_int(ntohs(fastd_peer_address_get_port(&peer->local_address))));
 		json_object_object_add(
 			ret, "remote_port", json_object_new_int(ntohs(fastd_peer_address_get_port(&peer->address))));
 	} else {
 		json_object_object_add(ret, "transport", NULL);
 		json_object_object_add(ret, "local_port", NULL);
 		json_object_object_add(ret, "remote_port", NULL);
+	}
+
+	if (backup_established) {
+		json_object_object_add(
+			ret, "backup_transport",
+			json_object_new_string(fastd_socket_is_tcp(peer->backup_sock) ? "tcp" : "udp"));
+		json_object_object_add(
+			ret, "backup_local_port",
+			json_object_new_int(ntohs(fastd_peer_address_get_port(&peer->backup_local_address))));
+		json_object_object_add(
+			ret, "backup_remote_port",
+			json_object_new_int(ntohs(fastd_peer_address_get_port(&peer->backup_address))));
+	} else {
+		json_object_object_add(ret, "backup_transport", NULL);
+		json_object_object_add(ret, "backup_local_port", NULL);
+		json_object_object_add(ret, "backup_remote_port", NULL);
 	}
 
 	return ret;
@@ -753,6 +784,7 @@ static json_object *dump_punch(void) {
 	json_object_object_add(ret, "symmetric", json_object_new_boolean(conf.punch_symmetric));
 	json_object_object_add(ret, "max_sockets", json_object_new_int64(conf.punch_max_sockets));
 	json_object_object_add(ret, "max_packets", json_object_new_int64(conf.punch_max_packets));
+	json_object_object_add(ret, "max_attempts", json_object_new_int64(conf.punch_max_attempts));
 
 	size_t active_candidates = 0;
 	size_t active_suppressions = 0;

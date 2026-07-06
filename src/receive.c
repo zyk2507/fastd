@@ -201,15 +201,20 @@ static inline bool can_receive_data_transport(const fastd_peer_t *peer, const fa
 }
 
 /** Returns true the peer is non-null and has an established connection with the correct local address */
-static inline bool
-can_receive_data(const fastd_peer_t *peer, const fastd_socket_t *sock, const fastd_peer_address_t *local_addr) {
+static inline bool can_receive_data(
+	const fastd_peer_t *peer, const fastd_socket_t *sock, const fastd_peer_address_t *local_addr,
+	const fastd_peer_address_t *remote_addr) {
 	if (!peer || !fastd_peer_is_established(peer))
 		return false;
 
 	if (!can_receive_data_transport(peer, sock))
 		return false;
 
-	return fastd_peer_address_equal(&peer->local_address, local_addr);
+	if (fastd_peer_address_equal(&peer->address, remote_addr))
+		return true;
+
+	return fastd_peer_address_equal(&peer->local_address, local_addr) ||
+	       fastd_peer_is_backup_path(peer, sock, local_addr, remote_addr);
 }
 
 /** Determines if packets from unknown addresses are accepted */
@@ -249,7 +254,8 @@ void fastd_receive_packet(
 		sock = sock->parent;
 
 	if (sock->peer) {
-		if (!fastd_peer_address_equal(&sock->peer->address, remote_addr)) {
+		if (!fastd_peer_address_equal(&sock->peer->address, remote_addr) &&
+		    !fastd_peer_is_backup_path(sock->peer, sock, local_addr, remote_addr)) {
 			pr_debug2("ignoring packet from %I on dynamic socket of %P", remote_addr, sock->peer);
 			fastd_buffer_free(buffer);
 			return;
@@ -268,6 +274,8 @@ void fastd_receive_packet(
 		peer = sock->hole_punch_peer;
 	} else {
 		peer = fastd_peer_hashtable_lookup(remote_addr);
+		if (!peer)
+			peer = fastd_peer_find_backup_path(sock, local_addr, remote_addr);
 	}
 
 	if (peer && !fastd_peer_transport_allows(fastd_peer_get_transport(peer), get_socket_transport(sock))) {
@@ -297,13 +305,25 @@ void fastd_receive_packet(
 	}
 
 	if (is_data_packet(packet_type)) {
-		if (can_receive_data(peer, sock, local_addr)) {
+		if (can_receive_data(peer, sock, local_addr, remote_addr)) {
 			/* Consumes the buffer */
-			conf.protocol->handle_recv(peer, buffer);
+			conf.protocol->handle_recv(sock, local_addr, remote_addr, peer, buffer);
 			return;
 		}
 
 		if (peer && fastd_peer_is_established(peer)) {
+			if (!backoff_unknown(*remote_addr) &&
+			    (sock->hole_punch_peer == peer ||
+			     fastd_peer_get_direct_candidate_source(peer, remote_addr, NULL))) {
+				unsigned flags = packet_type == PACKET_DATA_COMPAT ? 0 : FLAG_L2TP_SUPPORT;
+				fastd_peer_note_payload_candidate(peer, remote_addr);
+				pr_debug(
+					"payload data from %P[%I] arrived on an inactive direct path, sending handshake",
+					peer, remote_addr);
+				conf.protocol->handshake_init(sock, local_addr, remote_addr, peer, flags);
+				goto end_free;
+			}
+
 			pr_debug(
 				"ignoring payload data from %P[%I] on inactive address or transport", peer,
 				remote_addr);

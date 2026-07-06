@@ -73,6 +73,8 @@ typedef struct protocol_session {
 struct fastd_protocol_peer_state {
 	protocol_session_t old_session; /**< An old, not yet invalidated session */
 	protocol_session_t session;     /**< The newest session */
+	protocol_session_t backup_old_session; /**< An old backup path session */
+	protocol_session_t backup_session;     /**< The newest backup path session */
 
 	uint64_t last_serial; /**< The serial number of the ephemeral keypair used for the last session establishment */
 
@@ -88,6 +90,9 @@ void fastd_protocol_ec25519_fhmqvc_maintenance(void);
 void fastd_protocol_ec25519_fhmqvc_init_peer_state(fastd_peer_t *peer);
 void fastd_protocol_ec25519_fhmqvc_reset_peer_state(fastd_peer_t *peer);
 void fastd_protocol_ec25519_fhmqvc_free_peer_state(fastd_peer_t *peer);
+bool fastd_protocol_ec25519_fhmqvc_promote_backup_path(fastd_peer_t *peer);
+void fastd_protocol_ec25519_fhmqvc_drop_backup_path(fastd_peer_t *peer);
+void fastd_protocol_ec25519_fhmqvc_send_backup_keepalive(fastd_peer_t *peer);
 
 void fastd_protocol_ec25519_fhmqvc_handshake_init(
 	fastd_socket_t *sock, const fastd_peer_address_t *local_addr, const fastd_peer_address_t *remote_addr,

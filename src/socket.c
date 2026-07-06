@@ -35,8 +35,25 @@ static bool tcp_queue(fastd_socket_t *sock, fastd_peer_t *peer, const fastd_buff
 
 /** Defers freeing a closed dynamic socket until the current poll batch has drained */
 static void defer_socket_free(fastd_socket_t *sock) {
+	if (!sock || sock->deferred_free)
+		return;
+
+	sock->deferred_free = true;
 	sock->fd.type = POLL_TYPE_UNSPEC;
 	VECTOR_ADD(ctx.deferred_socks, sock);
+}
+
+/** Frees a dynamic socket after the current poll batch has drained */
+void fastd_socket_free_dynamic(fastd_socket_t *sock) {
+	if (!sock)
+		return;
+
+	if (sock->type == SOCKET_TYPE_TCP_CONNECTION && sock->tcp_handling) {
+		sock->tcp_closed = true;
+		return;
+	}
+
+	defer_socket_free(sock);
 }
 
 /** Frees dynamic sockets whose file descriptors have already been closed */
@@ -138,7 +155,7 @@ static void free_dynamic_socket(fastd_socket_t *sock) {
 		return;
 	}
 
-	free(sock);
+	fastd_socket_free_dynamic(sock);
 }
 
 /** Closes a TCP connection and optionally resets its peer */
@@ -157,6 +174,10 @@ static void close_tcp_connection(fastd_socket_t *sock, bool reset_peer) {
 			fastd_peer_reset(peer);
 		else if (reset_peer)
 			fastd_peer_transport_failed(peer, TRANSPORT_TCP);
+	} else if (peer && peer->backup_sock == sock) {
+		sock->peer = NULL;
+		peer->backup_sock = NULL;
+		conf.protocol->drop_backup_path(peer);
 	}
 
 	fastd_socket_close(sock);
@@ -864,6 +885,16 @@ void fastd_socket_close(fastd_socket_t *sock) {
 		tcp_free_output(sock);
 	}
 
+	if (sock->peer) {
+		if (sock->peer->sock == sock)
+			sock->peer->sock = NULL;
+
+		if (sock->peer->backup_sock == sock)
+			sock->peer->backup_sock = NULL;
+
+		sock->peer = NULL;
+	}
+
 	if (sock->fd.fd >= 0) {
 		if (!fastd_poll_fd_close(&sock->fd))
 			pr_error_errno("closing socket: close");
@@ -886,6 +917,11 @@ void fastd_socket_error(const fastd_socket_t *sock) {
 	int error;
 	socklen_t errlen = sizeof(error);
 	getsockopt(sock->fd.fd, SOL_SOCKET, SO_ERROR, &error, &errlen);
+}
+
+/** Returns true if a socket can still be used for I/O */
+bool fastd_socket_is_open(const fastd_socket_t *sock) {
+	return sock && sock->fd.fd >= 0 && sock->bound_addr;
 }
 
 /** Returns true if the socket is a TCP connection */
@@ -1173,7 +1209,7 @@ udp_punch_send_socket_array(fastd_peer_t *peer, const fastd_peer_address_t *remo
 bool fastd_udp_punch_send(
 	fastd_peer_t *peer, UNUSED const fastd_socket_t *base_sock, const fastd_peer_address_t *remote_addr,
 	const fastd_buffer_t *buffer) {
-	if (!peer || fastd_peer_is_established(peer) || !fastd_peer_hole_punch_allows(peer, TRANSPORT_UDP))
+	if (!peer || !fastd_peer_hole_punch_allows(peer, TRANSPORT_UDP))
 		return false;
 
 	if (!fastd_peer_transport_allows(fastd_peer_get_transport(peer), TRANSPORT_UDP))
@@ -1186,6 +1222,9 @@ bool fastd_udp_punch_send(
 	unsigned udp_punch_sockets = 0;
 	if (fastd_peer_is_current_punch_control_candidate(peer, remote_addr, &exact_udp_punch, &udp_punch_sockets))
 		return exact_udp_punch ? udp_punch_send_socket_array(peer, remote_addr, buffer, udp_punch_sockets) : false;
+
+	if (fastd_peer_is_established(peer))
+		return false;
 
 	uint16_t ports[FASTD_HOLE_PUNCH_NUM_PORTS * FASTD_HOLE_PUNCH_BUCKETS];
 	size_t n_ports = fastd_hole_punch_generate_ports(ports, array_size(ports), time(NULL));
@@ -1430,6 +1469,9 @@ static void tcp_read(fastd_socket_t *sock) {
 
 /** Handles events on a socket */
 void fastd_socket_handle(fastd_socket_t *sock, bool input, bool output, bool error) {
+	if (!fastd_socket_is_open(sock))
+		return;
+
 	switch (sock->type) {
 	case SOCKET_TYPE_UDP:
 		if (error)

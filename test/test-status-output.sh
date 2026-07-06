@@ -68,6 +68,7 @@ method "salsa2012+umac";
 secret "$SEC";
 bind 127.0.0.1:0;
 status socket "$WORK/status.sock";
+punch max attempts 3;
 peer "dummy" { key "$PUB"; hole-punch udp; }
 EOF
 
@@ -105,6 +106,9 @@ if "\u2554" not in text or "\u2566" not in text:
 
 if "dummy" not in text or "1 total, 0 established" not in text:
     raise SystemExit("peer summary not rendered")
+
+if "Max attempts" not in text:
+    raise SystemExit("punch attempt limit not rendered")
 PY
 
 printf 'ok 1 - human status uses libfort tables\n'
@@ -113,5 +117,13 @@ CURRENT_TEST=2
 "$FASTD" --status-socket "$WORK/status.sock" --status --json > "$WORK/status.json" ||
 	fail 'JSON status query failed'
 python3 -m json.tool "$WORK/status.json" >/dev/null || fail 'JSON status output is invalid'
+python3 - "$WORK/status.json" <<'PY' || fail 'JSON status does not expose punch max_attempts'
+import json
+import sys
+
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+if (doc.get("punch") or {}).get("max_attempts") != 3:
+    raise SystemExit("unexpected max_attempts")
+PY
 
 printf 'ok 2 - JSON status output remains parseable\n'

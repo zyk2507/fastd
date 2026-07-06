@@ -135,18 +135,23 @@ Example config:
 | ``punch symmetric yes|no;``
 
   Controls symmetric NAT punching strategies. ``punch symmetric`` is enabled by default and allows fastd to try both
-  bounded port prediction for easy-symmetric NATs and bounded port scans for ordinary symmetric NATs. The first
-  candidate that completes the authenticated fastd handshake becomes the active direct path; the remaining candidates
-  stay available until they expire and can be retried if the active path fails. This option may be overridden in peer
-  sections.
+  bounded port prediction for easy-symmetric NATs and bounded port scans for ordinary symmetric NATs. A candidate that
+  completes the authenticated fastd handshake is kept as a direct path, but it is only treated as verified after an
+  encrypted packet is received on that path. fastd maintains the active path and at most one backup path; once a backup
+  path is authenticated, later candidates from the same punch round are ignored until that backup expires, fails, or a
+  payload-proven candidate needs to be promoted. This option may be overridden in peer sections.
 
 | ``punch max sockets <1-256>;``
+| ``punch max attempts <1-64>;``
 | ``punch max packet <1-4096>;``
 | ``punch max packets <1-4096>;``
 
   Sets global punch control limits. ``punch max sockets`` limits the number of predicted or probed UDP sockets used for
-  one symmetric punch command; the default is 25. ``punch max packet`` and ``punch max packets`` are equivalent aliases
-  that limit the number of punch control packets a relay sends during one maintenance interval; the default is 256.
+  one symmetric punch command; the default is 25. ``punch max attempts`` limits how often one punch-control endpoint is
+  selected for handshake attempts before it is left alone; the default is 1. Once a peer has an active path and an
+  authenticated backup path, fastd maintains those paths instead of replacing the backup with later unverified candidates.
+  ``punch max packet`` and ``punch max packets`` are equivalent aliases that limit the number of punch control packets a
+  relay sends during one maintenance interval; the default is 256.
 
 | ``turn relay yes|no;``
 | ``turn server "<address>" port <port> [user "<username>" password "<password>"];``

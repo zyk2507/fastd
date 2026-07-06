@@ -46,6 +46,7 @@ static const keyword_t keywords[] = {
 	{ "any", TOK_ANY },
 	{ "as", TOK_AS },
 	{ "async", TOK_ASYNC },
+	{ "attempts", TOK_ATTEMPTS },
 	{ "auto", TOK_AUTO },
 	{ "bind", TOK_BIND },
 	{ "capabilities", TOK_CAPABILITIES },

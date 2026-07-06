@@ -84,13 +84,24 @@ struct fastd_protocol {
 
 
 	/** Handles a received payload packet (performs decryption and validity check, etc.) */
-	void (*handle_recv)(fastd_peer_t *peer, fastd_buffer_t *buffer);
+	void (*handle_recv)(
+		fastd_socket_t *sock, const fastd_peer_address_t *local_addr, const fastd_peer_address_t *remote_addr,
+		fastd_peer_t *peer, fastd_buffer_t *buffer);
 
 	/** Sends a payload data packet to the given peer */
 	void (*send)(fastd_peer_t *peer, fastd_buffer_t *buffer);
 
 	/** Sends an authenticated internal control packet to the given peer */
 	void (*send_control)(fastd_peer_t *peer, fastd_buffer_t *buffer);
+
+	/** Promotes an established backup path to the active peer path */
+	bool (*promote_backup_path)(fastd_peer_t *peer);
+
+	/** Drops an established backup path */
+	void (*drop_backup_path)(fastd_peer_t *peer);
+
+	/** Sends a keepalive on an established backup path */
+	void (*send_backup_keepalive)(fastd_peer_t *peer);
 
 
 	/** Initializes the protocol state for a peer */
@@ -201,6 +212,7 @@ struct fastd_socket {
 	fastd_peer_address_t peer_addr;   /**< Remote address of a TCP connection */
 	fastd_peer_t *hole_punch_peer;    /**< Peer this unclaimed hole punching socket belongs to */
 	bool hole_punch;                  /**< Whether this socket was created by active hole punching */
+	bool deferred_free;               /**< Whether this dynamic socket is already queued for deferred free */
 
 	uint8_t tcp_header[4]; /**< Partial TCP frame length prefix */
 	size_t tcp_header_len; /**< Number of TCP frame prefix bytes read */
@@ -329,6 +341,7 @@ struct fastd_config {
 	bool punch_symmetric;       /**< Enables symmetric NAT punch prediction and bounded scans */
 	unsigned punch_max_sockets; /**< Maximum predicted or probed sockets per punch command */
 	unsigned punch_max_packets; /**< Maximum punch control messages relayed per maintenance interval */
+	unsigned punch_max_attempts; /**< Maximum handshake attempts for one punch-control endpoint */
 	fastd_realm_config_t realm; /**< External rendezvous configuration for peer hole punching */
 	VECTOR(fastd_stun_server_t) stun_servers; /**< Global STUN servers used for NAT type detection */
 
@@ -539,6 +552,7 @@ fastd_socket_t *fastd_socket_open_offload(fastd_socket_t *sock, const fastd_peer
 void fastd_socket_close(fastd_socket_t *sock);
 void fastd_socket_error(const fastd_socket_t *sock);
 void fastd_socket_handle(fastd_socket_t *sock, bool input, bool output, bool error);
+bool fastd_socket_is_open(const fastd_socket_t *sock);
 bool fastd_socket_is_tcp(const fastd_socket_t *sock);
 bool fastd_socket_is_hole_punch(const fastd_socket_t *sock);
 void fastd_socket_update_tcp_listeners(void);
@@ -553,6 +567,7 @@ void fastd_hole_punch_close_peer(fastd_peer_t *peer);
 void fastd_udp_punch_maintenance(void);
 void fastd_udp_punch_cleanup(void);
 void fastd_socket_free_deferred(void);
+void fastd_socket_free_dynamic(fastd_socket_t *sock);
 void fastd_tcp_maintenance(void);
 void fastd_tcp_cleanup(void);
 

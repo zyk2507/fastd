@@ -61,6 +61,7 @@ static void sha256_list(uint32_t out[FASTD_SHA256_HASH_WORDS], const uint32_t *c
 		0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
 		0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
 	};
+	static const uint32_t padding_block[FASTD_SHA256_BLOCK_WORDS] = {};
 
 	uint32_t h[8] = {
 		0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
@@ -71,8 +72,11 @@ static void sha256_list(uint32_t out[FASTD_SHA256_HASH_WORDS], const uint32_t *c
 	while (left >= -8) {
 		uint32_t w[64], v[8];
 
-		copy_words(w, *(in++), &left);
-		copy_words(w + 8, *(in++), &left);
+		const uint32_t *block = (left > 0) ? *(in++) : padding_block;
+		copy_words(w, block, &left);
+
+		block = (left > 0) ? *(in++) : padding_block;
+		copy_words(w + 8, block, &left);
 
 		if (left < -8)
 			w[15] = len << 3;

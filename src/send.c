@@ -73,11 +73,25 @@ void fastd_send(
 	if (!sock)
 		exit_bug("send: sock == NULL");
 
+	if (!fastd_socket_is_open(sock)) {
+		pr_debug2("not sending packet on a closed socket");
+		fastd_stats_add(peer, STAT_TX_ERROR, stat_size);
+		return;
+	}
+
 	if (fastd_tcp_send(peer, (fastd_socket_t *)sock, local_addr, remote_addr, buffer, stat_size))
 		return;
 
-	if (!stat_size)
-		fastd_udp_punch_send(peer, sock, remote_addr, buffer);
+	bool current_exact_udp_punch = false;
+	if (!stat_size && peer) {
+		bool exact_udp_punch = false;
+		current_exact_udp_punch =
+			fastd_peer_is_current_punch_control_candidate(peer, remote_addr, &exact_udp_punch, NULL) &&
+			exact_udp_punch;
+	}
+
+	if (!stat_size && fastd_udp_punch_send(peer, sock, remote_addr, buffer) && current_exact_udp_punch)
+		return;
 
 	if (fastd_turn_send(peer, sock, local_addr, remote_addr, buffer, stat_size))
 		return;

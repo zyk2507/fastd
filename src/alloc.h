@@ -57,6 +57,9 @@ static inline void *fastd_alloc_array(size_t members, size_t size) {
    Terminates the process on failure.
 */
 static inline void *fastd_alloc_aligned(size_t size, size_t align) {
+	if (!size)
+		size = 1;
+
 	void *ret;
 	int err = posix_memalign(&ret, align, size);
 	if (err)

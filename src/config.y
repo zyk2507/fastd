@@ -48,6 +48,7 @@
 %token TOK_ANY
 %token TOK_AS
 %token TOK_ASYNC
+%token TOK_ATTEMPTS
 %token TOK_AUTO
 %token TOK_BIND
 %token TOK_CAPABILITIES
@@ -258,6 +259,13 @@ statement:	peer_group_statement
 				YYERROR;
 			}
 			conf.punch_max_packets = $4;
+		}
+	|	TOK_PUNCH TOK_MAX TOK_ATTEMPTS TOK_UINT ';' {
+			if (!$4 || $4 > 64) {
+				fastd_config_error(&@$, state, "invalid punch attempt limit");
+				YYERROR;
+			}
+			conf.punch_max_attempts = $4;
 		}
 	;
 

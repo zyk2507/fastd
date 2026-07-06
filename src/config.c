@@ -70,6 +70,7 @@ static void default_config(void) {
 	conf.punch_symmetric = true;
 	conf.punch_max_sockets = 25;
 	conf.punch_max_packets = 256;
+	conf.punch_max_attempts = 1;
 }
 
 /** Handles the configuration of a handshake protocol */

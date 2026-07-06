@@ -86,6 +86,8 @@ void fastd_protocol_ec25519_fhmqvc_reset_peer_state(fastd_peer_t *peer) {
 
 	reset_session(&peer->protocol_state->old_session);
 	reset_session(&peer->protocol_state->session);
+	reset_session(&peer->protocol_state->backup_old_session);
+	reset_session(&peer->protocol_state->backup_session);
 }
 
 /** Frees the protocol-specific state */
@@ -93,6 +95,8 @@ void fastd_protocol_ec25519_fhmqvc_free_peer_state(fastd_peer_t *peer) {
 	if (peer->protocol_state) {
 		reset_session(&peer->protocol_state->old_session);
 		reset_session(&peer->protocol_state->session);
+		reset_session(&peer->protocol_state->backup_old_session);
+		reset_session(&peer->protocol_state->backup_session);
 
 		free(peer->protocol_state);
 	}

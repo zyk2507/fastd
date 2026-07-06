@@ -56,55 +56,123 @@ static void derive_key(
 	fastd_hkdf_sha256_expand(out, blocks, &prk, info, sizeof(info));
 }
 
-/** Marks the active session as superseded and moves it to the \e old_session field of the protocol peer state */
-static inline void supersede_session(fastd_peer_t *peer, const fastd_method_info_t *method) {
-	if (is_session_valid(&peer->protocol_state->session) && !is_session_valid(&peer->protocol_state->old_session)) {
-		if (peer->protocol_state->old_session.method)
-			peer->protocol_state->old_session.method->provider->session_free(
-				peer->protocol_state->old_session.method_state);
-		peer->protocol_state->old_session = peer->protocol_state->session;
+/** Marks a session as superseded and moves it to the corresponding old-session slot */
+static inline void supersede_session(
+	fastd_peer_t *peer, protocol_session_t *session, protocol_session_t *old_session,
+	const fastd_method_info_t *method) {
+	if (is_session_valid(session) && !is_session_valid(old_session)) {
+		if (old_session->method)
+			old_session->method->provider->session_free(old_session->method_state);
+		*old_session = *session;
 	} else {
-		if (peer->protocol_state->session.method)
-			peer->protocol_state->session.method->provider->session_free(
-				peer->protocol_state->session.method_state);
+		if (session->method)
+			session->method->provider->session_free(session->method_state);
 	}
 
-	if (peer->protocol_state->old_session.method) {
-		if (peer->protocol_state->old_session.method != method) {
+	if (old_session->method) {
+		if (old_session->method != method) {
 			pr_debug("method of %P has changed, terminating old session", peer);
-			peer->protocol_state->old_session.method->provider->session_free(
-				peer->protocol_state->old_session.method_state);
-			peer->protocol_state->old_session = (protocol_session_t){};
+			old_session->method->provider->session_free(old_session->method_state);
+			*old_session = (protocol_session_t){};
 		} else {
-			peer->protocol_state->old_session.method->provider->session_superseded(
-				peer->protocol_state->old_session.method_state);
+			old_session->method->provider->session_superseded(old_session->method_state);
 		}
 	}
 }
 
-/** Initalizes a new session with a peer using a specified method */
-static inline bool new_session(
-	fastd_peer_t *peer, const fastd_method_info_t *method, unsigned session_flags, const aligned_int256_t *A,
-	const aligned_int256_t *B, const aligned_int256_t *X, const aligned_int256_t *Y, const aligned_int256_t *sigma,
-	const uint32_t *salt, uint64_t serial, fastd_compression_algorithm_t compression) {
+/** Initalizes a new path session with a peer using a specified method */
+static inline bool new_path_session(
+	fastd_peer_t *peer, protocol_session_t *session, protocol_session_t *old_session,
+	const fastd_method_info_t *method, unsigned session_flags, const aligned_int256_t *A,
+	const aligned_int256_t *B, const aligned_int256_t *X, const aligned_int256_t *Y,
+	const aligned_int256_t *sigma, const uint32_t *salt, uint64_t serial,
+	fastd_compression_algorithm_t compression) {
 
-	supersede_session(peer, method);
+	supersede_session(peer, session, old_session, method);
 
 	size_t blocks = block_count(method->provider->key_length(method->method), sizeof(fastd_sha256_t));
 	fastd_sha256_t secret[blocks ?: 1];
 	derive_key(secret, blocks, salt, method->name, A, B, X, Y, sigma);
 
-	peer->protocol_state->session.method_state =
-		method->provider->session_init(peer, method->method, (const uint8_t *)secret, session_flags);
+	session->method_state = method->provider->session_init(peer, method->method, (const uint8_t *)secret, session_flags);
 
-	if (!peer->protocol_state->session.method_state)
+	if (!session->method_state)
 		return false;
 
-	peer->protocol_state->session.handshakes_cleaned = false;
-	peer->protocol_state->session.refreshing = false;
-	peer->protocol_state->session.method = method;
-	peer->protocol_state->session.compression = compression;
+	session->handshakes_cleaned = false;
+	session->refreshing = false;
+	session->method = method;
+	session->compression = compression;
 	peer->protocol_state->last_serial = serial;
+
+	return true;
+}
+
+/** Initalizes a new active session with a peer using a specified method */
+static inline bool new_session(
+	fastd_peer_t *peer, const fastd_method_info_t *method, unsigned session_flags, const aligned_int256_t *A,
+	const aligned_int256_t *B, const aligned_int256_t *X, const aligned_int256_t *Y, const aligned_int256_t *sigma,
+	const uint32_t *salt, uint64_t serial, fastd_compression_algorithm_t compression) {
+	return new_path_session(
+		peer, &peer->protocol_state->session, &peer->protocol_state->old_session, method, session_flags, A, B,
+		X, Y, sigma, salt, serial, compression);
+}
+
+/** Initalizes a new backup session with a peer using a specified method */
+static inline bool new_backup_session(
+	fastd_peer_t *peer, const fastd_method_info_t *method, unsigned session_flags, const aligned_int256_t *A,
+	const aligned_int256_t *B, const aligned_int256_t *X, const aligned_int256_t *Y, const aligned_int256_t *sigma,
+	const uint32_t *salt, uint64_t serial, fastd_compression_algorithm_t compression) {
+	return new_path_session(
+		peer, &peer->protocol_state->backup_session, &peer->protocol_state->backup_old_session, method,
+		session_flags, A, B, X, Y, sigma, salt, serial, compression);
+}
+
+/** Establishes a backup path with a peer after a successful handshake */
+static bool establish_backup(
+	fastd_peer_t *peer, const fastd_method_info_t *method, fastd_socket_t *sock,
+	const fastd_peer_address_t *local_addr, const fastd_peer_address_t *remote_addr, unsigned session_flags,
+	const aligned_int256_t *A, const aligned_int256_t *B, const aligned_int256_t *X, const aligned_int256_t *Y,
+	const aligned_int256_t *sigma, const uint32_t *salt, uint64_t serial,
+	fastd_compression_algorithm_t compression) {
+	pr_verbose("%I authenticated as backup path for %P", remote_addr, peer);
+
+	if (!fastd_peer_claim_backup_path(peer, sock, local_addr, remote_addr)) {
+		pr_debug("can't establish backup session with %P[%I]", peer, remote_addr);
+		return false;
+	}
+
+	if (!new_backup_session(peer, method, session_flags, A, B, X, Y, sigma, salt, serial, compression)) {
+		pr_error("failed to initialize backup method session for %P (method `%s')", peer, method->name);
+		fastd_protocol_ec25519_fhmqvc_drop_backup_path(peer);
+		return false;
+	}
+
+	pr_verbose(
+		"new backup session with %P established using method `%s'%s%s%s%s.", peer, method->name,
+		(session_flags & FASTD_SESSION_COMPAT) ? " (compat mode)" : "",
+		compression == COMPRESSION_NONE ? "" : ", compression `",
+		compression == COMPRESSION_NONE ? "" : fastd_compression_get_name(compression),
+		compression == COMPRESSION_NONE ? "" : "'");
+
+	if (fastd_peer_is_payload_candidate(peer, remote_addr)) {
+		pr_debug("promoting payload-proven backup path with %P[%I]", peer, remote_addr);
+
+		if (!fastd_protocol_ec25519_fhmqvc_promote_backup_path(peer))
+			return false;
+
+		if (session_flags & FASTD_SESSION_INITIATOR)
+			fastd_peer_schedule_handshake_default(peer);
+		else
+			fastd_protocol_ec25519_fhmqvc_send_empty(peer, &peer->protocol_state->session);
+
+		return true;
+	}
+
+	if (session_flags & FASTD_SESSION_INITIATOR)
+		fastd_peer_schedule_handshake_default(peer);
+
+	fastd_protocol_ec25519_fhmqvc_send_backup_keepalive(peer);
 
 	return true;
 }
@@ -116,10 +184,26 @@ static bool establish(
 	const aligned_int256_t *A, const aligned_int256_t *B, const aligned_int256_t *X, const aligned_int256_t *Y,
 	const aligned_int256_t *sigma, const uint32_t *salt, uint64_t serial,
 	fastd_compression_algorithm_t compression) {
-	if (serial <= peer->protocol_state->last_serial) {
+	bool alternate_direct_path =
+		fastd_peer_is_established(peer) && !fastd_peer_address_equal(&peer->address, remote_addr) &&
+		fastd_peer_get_direct_candidate_source(peer, remote_addr, NULL);
+
+	if (serial < peer->protocol_state->last_serial ||
+	    (serial == peer->protocol_state->last_serial && !alternate_direct_path)) {
 		pr_debug("ignoring handshake from %P[%I] because of handshake key reuse", peer, remote_addr);
 		return false;
 	}
+
+	if (fastd_peer_is_established(peer) && !fastd_peer_address_equal(&peer->address, remote_addr) &&
+	    !alternate_direct_path) {
+		pr_debug("ignoring non-candidate alternate path from %P[%I]", peer, remote_addr);
+		return false;
+	}
+
+	if (fastd_peer_is_established(peer) && !fastd_peer_address_equal(&peer->address, remote_addr))
+		return establish_backup(
+			peer, method, sock, local_addr, remote_addr, session_flags, A, B, X, Y, sigma, salt, serial,
+			compression);
 
 	pr_verbose("%I authenticated as %P", remote_addr, peer);
 
@@ -153,8 +237,8 @@ static bool establish(
 
 	if (session_flags & FASTD_SESSION_INITIATOR)
 		fastd_peer_schedule_handshake_default(peer);
-	else
-		fastd_protocol_ec25519_fhmqvc_send_empty(peer, &peer->protocol_state->session);
+
+	fastd_protocol_ec25519_fhmqvc_send_empty(peer, &peer->protocol_state->session);
 
 	return true;
 }
@@ -682,7 +766,8 @@ void fastd_protocol_ec25519_fhmqvc_handshake_handle(
 		return;
 	}
 
-	if (!fastd_timed_out(peer->establish_handshake_timeout)) {
+	if (!fastd_timed_out(peer->establish_handshake_timeout) &&
+	    (!fastd_peer_is_established(peer) || fastd_peer_address_equal(&peer->address, remote_addr))) {
 		pr_debug("received repeated handshakes from %P[%I], ignoring", peer, remote_addr);
 		return;
 	}
