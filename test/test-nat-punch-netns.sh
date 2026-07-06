@@ -209,6 +209,26 @@ sys.exit(0)
 PY
 }
 
+hard_symmetric_nat_types_seen() {
+	python3 - "$WORK/a.json" "$WORK/b.json" <<'PY'
+import json
+import sys
+
+try:
+    a = json.load(open(sys.argv[1]))
+    b = json.load(open(sys.argv[2]))
+except Exception:
+    sys.exit(1)
+
+if (a.get("nat") or {}).get("type") != "symmetric":
+    sys.exit(1)
+if (b.get("nat") or {}).get("type") != "symmetric":
+    sys.exit(1)
+
+sys.exit(0)
+PY
+}
+
 make_public_link() {
 	local ns=$1 ifname=$2 host=$3
 	local peer="${host}p"
@@ -440,6 +460,63 @@ peer "b" { key "$PUB_B"; transport udp; hole-punch udp; punch symmetric yes; }
 EOF
 }
 
+write_hard_symmetric_confs() {
+	cat > "$WORK/a.conf" <<EOF
+mode multitap;
+interface "fda-%n";
+persist interface no;
+method "salsa2012+umac";
+secret "$SEC_A";
+bind 0.0.0.0:13001;
+status socket "$WORK/a.status";
+stun server "10.52.0.1" port 3478;
+stun server "10.52.0.1" port 3479;
+punch symmetric yes;
+punch hard-symmetric no;
+punch max sockets 25;
+punch max packets 800;
+peer "c" { key "$PUB_C"; remote 10.52.0.1 port 13000; transport udp; }
+peer "b" { key "$PUB_B"; transport udp; hole-punch udp; punch symmetric yes; punch hard-symmetric no; }
+EOF
+
+	cat > "$WORK/b.conf" <<EOF
+mode multitap;
+interface "fdb-%n";
+persist interface no;
+method "salsa2012+umac";
+secret "$SEC_B";
+bind 0.0.0.0:13001;
+status socket "$WORK/b.status";
+stun server "10.52.0.1" port 3478;
+stun server "10.52.0.1" port 3479;
+punch symmetric yes;
+punch hard-symmetric no;
+punch max sockets 25;
+punch max packets 800;
+peer "c" { key "$PUB_C"; remote 10.52.0.1 port 13000; transport udp; }
+peer "a" { key "$PUB_A"; transport udp; hole-punch udp; punch symmetric yes; punch hard-symmetric no; }
+EOF
+
+	cat > "$WORK/c.conf" <<EOF
+mode multitap;
+interface "fdc-%n";
+persist interface no;
+method "salsa2012+umac";
+secret "$SEC_C";
+bind 10.52.0.1:13000;
+status socket "$WORK/c.status";
+forward no;
+peer discovery no;
+punch control relay yes;
+punch symmetric yes;
+punch hard-symmetric no;
+punch max sockets 25;
+punch max packets 800;
+peer "a" { key "$PUB_A"; transport udp; hole-punch udp; punch symmetric yes; punch hard-symmetric no; }
+peer "b" { key "$PUB_B"; transport udp; hole-punch udp; punch symmetric yes; punch hard-symmetric no; }
+EOF
+}
+
 start_fake_stun() {
 	local mode=${1:-symmetric_to_cone}
 
@@ -468,6 +545,18 @@ def stop(signum, frame):
 
 def mapped_endpoint(source):
     ip, port = source
+
+    if MODE == "hard_both" and ip == "10.52.0.2":
+        sequence = (43100, 43250, 43180, 43320, 43140, 43290)
+        counter = easy_counters.get(ip, 0)
+        easy_counters[ip] = counter + 1
+        return ip, sequence[counter % len(sequence)]
+
+    if MODE == "hard_both" and ip == "10.52.0.3":
+        sequence = (44100, 44270, 44150, 44310, 44190, 44230)
+        counter = easy_counters.get(ip, 0)
+        easy_counters[ip] = counter + 1
+        return ip, sequence[counter % len(sequence)]
 
     if ip == "10.52.0.2":
         counter = easy_counters.get(ip, 0)
@@ -619,7 +708,29 @@ wait_for_both_easy_symmetric_path() {
 	return 1
 }
 
-printf '1..5\n'
+wait_for_hard_symmetric_no_direct_path() {
+	local saw_expected_state=false
+
+	for _ in $(seq 1 40); do
+		sleep 0.5
+		check_fastds_alive
+		dump_statuses
+
+		if [[ -f "$WORK/a.json" && -f "$WORK/b.json" && -f "$WORK/c.json" ]] &&
+			direct_hole_punched; then
+			return 1
+		fi
+
+		if [[ -f "$WORK/a.json" && -f "$WORK/b.json" && -f "$WORK/c.json" ]] &&
+			hard_symmetric_nat_types_seen && punch_results_seen; then
+			saw_expected_state=true
+		fi
+	done
+
+	[[ "$saw_expected_state" == true ]]
+}
+
+printf '1..6\n'
 
 CURRENT_TEST=1
 write_c_conf no
@@ -768,3 +879,18 @@ if [[ "$ok" != true ]]; then
 fi
 
 printf 'ok 5 - easy-symmetric NAT peers punch directly with predicted port ranges\n'
+
+CURRENT_TEST=6
+stop_fastds
+stop_stun
+start_fake_stun hard_both
+run ip netns exec "$NS_RA" nft insert rule ip nat postrouting ip saddr 10.52.1.2 ip daddr 10.52.0.1 udp dport 13000 snat to 10.52.0.2:43100
+run ip netns exec "$NS_RB" nft insert rule ip nat postrouting ip saddr 10.52.2.2 ip daddr 10.52.0.1 udp dport 13000 snat to 10.52.0.3:44100
+write_hard_symmetric_confs
+start_fastds
+
+if ! wait_for_hard_symmetric_no_direct_path; then
+	fail 'hard-symmetric peers established a direct path or did not exchange punch results'
+fi
+
+printf 'ok 6 - hard-symmetric peers do not direct-connect while guarded mode is disabled\n'
