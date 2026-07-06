@@ -42,11 +42,11 @@ bool fastd_method_is_nonce_valid(
 	*age = 0;
 
 	for (i = 0; i < COMMON_NONCEBYTES; i++) {
-		*age <<= 8;
+		*age *= 256;
 		*age += session->receive_nonce[i] - nonce[i];
 	}
 
-	*age >>= 1;
+	*age /= 2;
 
 	if (*age >= 0) {
 		if (fastd_timed_out(session->reorder_timeout))

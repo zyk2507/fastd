@@ -132,6 +132,15 @@
 /** The time after which a keepalive should be sent */
 #define KEEPALIVE_TIMEOUT 20000		/* 20 seconds */
 
+/** The default NAT traversal keepalive interval */
+#define DEFAULT_NAT_KEEPALIVE_INTERVAL 25000 /* 25 seconds */
+
+/** The default interval between local punch NAT metadata announcements */
+#define DEFAULT_PUNCH_ANNOUNCE_INTERVAL 15000 /* 15 seconds */
+
+/** The default interval between relay-generated punch commands */
+#define DEFAULT_PUNCH_RELAY_INTERVAL 10000 /* 10 seconds */
+
 /** The time after with a peer is reset if no traffic is received from it */
 #define PEER_STALE_TIME 90000		/* 90 seconds */
 

@@ -90,7 +90,11 @@ void fastd_send(
 			exact_udp_punch;
 	}
 
-	if (!stat_size && fastd_udp_punch_send(peer, sock, remote_addr, buffer) && current_exact_udp_punch)
+	bool current_socket_matches_punch =
+		fastd_socket_is_hole_punch(sock) && fastd_peer_address_equal(&sock->peer_addr, remote_addr);
+
+	if (!stat_size && fastd_udp_punch_send(peer, sock, remote_addr, buffer) && current_exact_udp_punch &&
+	    !current_socket_matches_punch)
 		return;
 
 	if (fastd_turn_send(peer, sock, local_addr, remote_addr, buffer, stat_size))

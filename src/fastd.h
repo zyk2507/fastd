@@ -335,14 +335,20 @@ struct fastd_config {
 #ifdef USE_PACKET_MARK
 	uint32_t packet_mark; /**< The configured packet mark (or 0) */
 #endif
-	bool forward;               /**< Specifies if packet forwarding is enable */
-	bool peer_discovery;        /**< Enables relay-assisted endpoint discovery for direct peer connections */
-	bool punch_control_relay;   /**< Relays punch control messages without forwarding data-plane packets */
-	bool punch_symmetric;       /**< Enables symmetric NAT punch prediction and bounded scans */
-	unsigned punch_max_sockets; /**< Maximum predicted or probed sockets per punch command */
-	unsigned punch_max_packets; /**< Maximum punch control messages relayed per maintenance interval */
-	unsigned punch_max_attempts; /**< Maximum handshake attempts for one punch-control endpoint */
-	fastd_realm_config_t realm; /**< External rendezvous configuration for peer hole punching */
+	bool forward;                      /**< Specifies if packet forwarding is enable */
+	bool peer_discovery;               /**< Enables relay-assisted endpoint discovery for direct peer connections */
+	bool punch_control_relay;          /**< Relays punch control messages without forwarding data-plane packets */
+	bool punch_symmetric;              /**< Enables symmetric NAT punch prediction and bounded scans */
+	bool punch_keepalive;              /**< Enables periodic keepalives for NAT traversal paths */
+	unsigned punch_keepalive_interval; /**< NAT traversal keepalive interval in milliseconds */
+	unsigned punch_maintenance_interval; /**< Periodic maintenance interval in milliseconds */
+	unsigned punch_announce_interval;    /**< Minimum interval between local punch NAT metadata announcements */
+	unsigned punch_relay_interval;       /**< Minimum interval between relay-generated punch commands */
+	unsigned punch_max_sockets;          /**< Maximum predicted or probed sockets per punch command */
+	unsigned punch_max_packets;          /**< Maximum punch control messages relayed per maintenance interval */
+	unsigned punch_max_attempts;         /**< Maximum handshake attempts for one punch-control endpoint */
+	unsigned punch_max_backups;          /**< Maximum accepted backup paths kept alive for one peer */
+	fastd_realm_config_t realm;          /**< External rendezvous configuration for peer hole punching */
 	VECTOR(fastd_stun_server_t) stun_servers; /**< Global STUN servers used for NAT type detection */
 
 	fastd_drop_caps_t drop_caps; /**< Specifies if and when to drop capabilities */

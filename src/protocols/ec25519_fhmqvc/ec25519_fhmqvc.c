@@ -17,6 +17,9 @@
 #include "../../discovery.h"
 
 
+#define FASTD_ACTIVE_PATH_INITIAL_GRACE 2000
+
+
 /** Converts a private or public key from a hexadecimal string representation to a uint8 array */
 static inline bool read_key(uint8_t key[32], const char *hexkey) {
 	if ((strlen(hexkey) != 64) || (strspn(hexkey, "0123456789abcdefABCDEF") != 64))
@@ -141,6 +144,8 @@ static void session_send_path_flags(
 		return;
 	}
 
+	bool keepalive = !flags && !buffer->len;
+
 	if (!flags && buffer->len && session->compression != COMPRESSION_NONE)
 		buffer = fastd_compress_payload(buffer);
 
@@ -156,7 +161,8 @@ static void session_send_path_flags(
 	fastd_send(sock, local_addr, remote_addr, peer, send_buffer, stat_size);
 	fastd_buffer_free(send_buffer);
 
-	if (session->method->provider->flags & METHOD_FORCE_KEEPALIVE)
+	if (!keepalive && (fastd_peer_nat_traversal_keepalive_enabled(peer) ||
+			   (session->method->provider->flags & METHOD_FORCE_KEEPALIVE)))
 		return;
 
 	if (backup_path)
@@ -172,6 +178,91 @@ static void send_backup_empty(fastd_peer_t *peer, protocol_session_t *session) {
 		fastd_buffer_alloc(0, alignto(session->method->provider->encrypt_headroom, 8)), session, 0, 0, true);
 }
 
+/** Sends bounded backup probes to inactive direct candidates */
+static void send_backup_candidate_probes(fastd_peer_t *peer, protocol_session_t *session) {
+	if (fastd_peer_has_verified_backup_path(peer) || !conf.punch_max_backups)
+		return;
+
+	fastd_socket_t *sock = peer->backup_sock ? peer->backup_sock : peer->sock;
+	if (!sock)
+		return;
+
+	size_t sent = 0;
+	size_t i;
+	for (i = 0; i < VECTOR_LEN(peer->direct_candidates) && sent < conf.punch_max_backups; i++) {
+		const fastd_peer_direct_candidate_t *candidate = &VECTOR_INDEX(peer->direct_candidates, i);
+
+		if (candidate->remote.sa.sa_family == AF_UNSPEC || fastd_timed_out(candidate->timeout))
+			continue;
+		if (fastd_peer_address_equal(&candidate->remote, &peer->address) ||
+		    fastd_peer_address_equal(&candidate->remote, &peer->backup_address))
+			continue;
+
+		session_send_path_flags(
+			peer, sock, &peer->backup_local_address, &candidate->remote,
+			fastd_buffer_alloc(0, alignto(session->method->provider->encrypt_headroom, 8)), session, 0, 0,
+			true);
+		sent++;
+	}
+}
+
+/** Tries to decrypt a packet with the sessions of one transport path */
+static bool decrypt_path_session(
+	fastd_peer_t *peer, bool backup_path, fastd_buffer_t *buffer, fastd_buffer_t **recv_buffer,
+	protocol_session_t **recv_session, bool *recv_current_session, bool *reordered, uint8_t *flags) {
+	protocol_session_t *old_session =
+		backup_path ? &peer->protocol_state->backup_old_session : &peer->protocol_state->old_session;
+	protocol_session_t *session =
+		backup_path ? &peer->protocol_state->backup_session : &peer->protocol_state->session;
+
+	if (!is_session_valid(session))
+		return false;
+
+	*recv_buffer = NULL;
+	*recv_session = NULL;
+	*recv_current_session = false;
+	*reordered = false;
+	*flags = 0;
+
+	if (is_session_valid(old_session)) {
+		*recv_buffer =
+			old_session->method->provider->decrypt(old_session->method_state, buffer, reordered, flags);
+		if (*recv_buffer) {
+			*recv_session = old_session;
+			return true;
+		}
+	}
+
+	*recv_buffer = session->method->provider->decrypt(session->method_state, buffer, reordered, flags);
+	if (!*recv_buffer)
+		return false;
+
+	*recv_session = session;
+	*recv_current_session = true;
+
+	if (old_session->method) {
+		pr_debug("invalidating old %s session with %P", backup_path ? "backup" : "active", peer);
+		reset_protocol_session(old_session);
+	}
+
+	if (!session->handshakes_cleaned) {
+		pr_debug("cleaning left %s handshakes with %P", backup_path ? "backup" : "active", peer);
+		if (!backup_path)
+			fastd_peer_unschedule_handshake(peer);
+		session->handshakes_cleaned = true;
+
+		if (session->method->provider->session_is_initiator(session->method_state)) {
+			if (backup_path)
+				send_backup_empty(peer, session);
+			else
+				fastd_protocol_ec25519_fhmqvc_send_empty(peer, session);
+		}
+	}
+
+	check_session_refresh(peer, session, backup_path);
+	return true;
+}
+
 /** Drops an established backup path */
 void fastd_protocol_ec25519_fhmqvc_drop_backup_path(fastd_peer_t *peer) {
 	if (peer->protocol_state) {
@@ -182,10 +273,27 @@ void fastd_protocol_ec25519_fhmqvc_drop_backup_path(fastd_peer_t *peer) {
 	fastd_peer_clear_backup_path(peer);
 }
 
+/** Checks whether the active path is still within its verified health window */
+static bool active_path_verified(const fastd_peer_t *peer) {
+	return peer->active_path_timeout != FASTD_TIMEOUT_INV && !fastd_timed_out(peer->active_path_timeout);
+}
+
+/** Checks whether a newly established active path is still within its initial verification grace */
+static bool active_path_initial_grace(const fastd_peer_t *peer) {
+	return peer->active_path_timeout == FASTD_TIMEOUT_INV && peer->established &&
+	       ctx.now < peer->established + FASTD_ACTIVE_PATH_INITIAL_GRACE;
+}
+
 /** Promotes an established backup path to the active path */
 bool fastd_protocol_ec25519_fhmqvc_promote_backup_path(fastd_peer_t *peer) {
 	if (!peer->protocol_state || !fastd_peer_has_backup_path(peer) || peer->offload ||
 	    !is_session_valid(&peer->protocol_state->backup_session))
+		return false;
+
+	bool old_active_verified = active_path_verified(peer);
+	bool backup_verified = fastd_peer_has_verified_backup_path(peer);
+	bool backup_payload_candidate = fastd_peer_is_payload_candidate(peer, &peer->backup_address);
+	if (fastd_peer_is_established(peer) && !backup_verified && (old_active_verified || !backup_payload_candidate))
 		return false;
 
 	bool was_established = fastd_peer_is_established(peer);
@@ -202,10 +310,21 @@ bool fastd_protocol_ec25519_fhmqvc_promote_backup_path(fastd_peer_t *peer) {
 	peer->protocol_state->backup_old_session = old_active_old_session;
 	peer->protocol_state->backup_session = old_active_session;
 
+	reset_protocol_session(&peer->protocol_state->old_session);
+
+	if (!old_active_verified) {
+		reset_protocol_session(&peer->protocol_state->backup_old_session);
+		reset_protocol_session(&peer->protocol_state->backup_session);
+		fastd_peer_clear_backup_path(peer);
+	}
+
 	if (!was_established && !fastd_peer_set_established(peer, NULL)) {
 		fastd_peer_reset(peer);
 		return false;
 	}
+
+	if (was_established && is_session_valid(&peer->protocol_state->session))
+		fastd_protocol_ec25519_fhmqvc_send_empty(peer, &peer->protocol_state->session);
 
 	return true;
 }
@@ -220,79 +339,52 @@ void fastd_protocol_ec25519_fhmqvc_send_backup_keepalive(fastd_peer_t *peer) {
 
 	pr_debug2("sending backup keepalive to %P", peer);
 	send_backup_empty(peer, &peer->protocol_state->backup_session);
+	send_backup_candidate_probes(peer, &peer->protocol_state->backup_session);
 }
 
 /** Handles a payload packet received from a peer */
 static void protocol_handle_recv(
 	fastd_socket_t *sock, const fastd_peer_address_t *local_addr, const fastd_peer_address_t *remote_addr,
 	fastd_peer_t *peer, fastd_buffer_t *buffer) {
-	bool backup_path = fastd_peer_is_backup_path(peer, sock, local_addr, remote_addr);
-
-	if (!peer->protocol_state || !check_session(peer, backup_path))
+	if (!peer->protocol_state)
 		goto fail;
 
-	protocol_session_t *old_session =
-		backup_path ? &peer->protocol_state->backup_old_session : &peer->protocol_state->old_session;
-	protocol_session_t *session =
-		backup_path ? &peer->protocol_state->backup_session : &peer->protocol_state->session;
+	bool backup_path = fastd_peer_is_backup_path(peer, sock, local_addr, remote_addr);
+	bool direct_candidate = fastd_peer_get_direct_candidate_source(peer, remote_addr, NULL);
+	bool refresh_active_path = !backup_path;
 	fastd_buffer_t *recv_buffer = NULL;
 	protocol_session_t *recv_session = NULL;
+	bool recv_current_session = false;
 	bool reordered = false;
 	uint8_t flags = 0;
 
 	fastd_buffer_zero_pad(buffer);
 
-	if (is_session_valid(old_session)) {
-		recv_buffer =
-			old_session->method->provider->decrypt(old_session->method_state, buffer, &reordered, &flags);
-		if (recv_buffer)
-			recv_session = old_session;
-	}
+	if (!decrypt_path_session(
+		    peer, backup_path, buffer, &recv_buffer, &recv_session, &recv_current_session, &reordered,
+		    &flags)) {
+		if (direct_candidate && decrypt_path_session(
+						peer, !backup_path, buffer, &recv_buffer, &recv_session,
+						&recv_current_session, &reordered, &flags)) {
+			backup_path = !backup_path;
+			pr_debug2(
+				"payload data from %P[%I] decrypted with alternate %s session", peer, remote_addr,
+				backup_path ? "backup" : "active");
+		} else {
+			if (!check_session(peer, backup_path))
+				goto fail;
 
-	if (!recv_buffer) {
-		recv_buffer = session->method->provider->decrypt(session->method_state, buffer, &reordered, &flags);
-		if (!recv_buffer) {
 			pr_debug2("verification failed for packet received from %P", peer);
 			goto fail;
 		}
-		recv_session = session;
-
-		if (old_session->method) {
-			pr_debug("invalidating old %s session with %P", backup_path ? "backup" : "active", peer);
-			reset_protocol_session(old_session);
-		}
-
-		if (!session->handshakes_cleaned) {
-			pr_debug("cleaning left %s handshakes with %P", backup_path ? "backup" : "active", peer);
-			if (!backup_path)
-				fastd_peer_unschedule_handshake(peer);
-			session->handshakes_cleaned = true;
-
-			if (session->method->provider->session_is_initiator(session->method_state)) {
-				if (backup_path)
-					send_backup_empty(peer, session);
-				else
-					fastd_protocol_ec25519_fhmqvc_send_empty(peer, session);
-			}
-		}
-
-		check_session_refresh(peer, session, backup_path);
 	}
 
-	if (!backup_path &&
-	    (!fastd_peer_address_equal(&peer->local_address, local_addr) || peer->sock != sock) &&
+	if (!backup_path && (!fastd_peer_address_equal(&peer->local_address, local_addr) || peer->sock != sock) &&
 	    fastd_peer_address_equal(&peer->address, remote_addr)) {
 		if (!fastd_peer_claim_address(peer, sock, local_addr, remote_addr, true)) {
 			fastd_buffer_free(recv_buffer);
 			return;
 		}
-	}
-
-	if (backup_path) {
-		fastd_peer_backup_seen(peer);
-	} else {
-		fastd_peer_seen(peer);
-		peer->active_path_timeout = ctx.now + KEEPALIVE_TIMEOUT;
 	}
 
 	if (flags & ~FASTD_METHOD_FLAG_CONTROL) {
@@ -301,12 +393,69 @@ static void protocol_handle_recv(
 		return;
 	}
 
+	if (backup_path && direct_candidate && recv_current_session &&
+	    !fastd_peer_is_backup_path(peer, sock, local_addr, remote_addr)) {
+		fastd_peer_note_payload_candidate(peer, remote_addr);
+		pr_debug("payload data from %P[%I] decrypted on an alternate backup session", peer, remote_addr);
+
+		bool active_path_unverified =
+			!active_path_initial_grace(peer) &&
+			(peer->active_path_timeout == FASTD_TIMEOUT_INV || fastd_timed_out(peer->active_path_timeout));
+		bool active_path_failed = !fastd_peer_is_established(peer) || fastd_timed_out(peer->reset_timeout);
+
+		if (!fastd_peer_claim_backup_path(peer, sock, local_addr, remote_addr)) {
+			fastd_buffer_free(recv_buffer);
+			return;
+		}
+
+		fastd_peer_backup_seen(peer);
+
+		if ((active_path_unverified || active_path_failed) &&
+		    fastd_protocol_ec25519_fhmqvc_promote_backup_path(peer)) {
+			backup_path = false;
+			recv_session = &peer->protocol_state->session;
+		}
+	}
+
+	if (!backup_path && !fastd_peer_address_equal(&peer->address, remote_addr) && direct_candidate) {
+		fastd_peer_note_payload_candidate(peer, remote_addr);
+		pr_debug("payload data from %P[%I] decrypted on an inactive direct path", peer, remote_addr);
+
+		bool active_path_unhealthy =
+			(!active_path_initial_grace(peer) && peer->active_path_timeout == FASTD_TIMEOUT_INV) ||
+			fastd_timed_out(peer->active_path_timeout) || !fastd_peer_is_established(peer) ||
+			fastd_timed_out(peer->reset_timeout);
+
+		if (active_path_unhealthy && !fastd_peer_has_verified_backup_path(peer)) {
+			pr_debug("switching active path for %P to inactive direct path %I", peer, remote_addr);
+			if (!fastd_peer_claim_address(peer, sock, local_addr, remote_addr, true)) {
+				fastd_buffer_free(recv_buffer);
+				return;
+			}
+		} else if (fastd_peer_has_verified_backup_path(peer)) {
+			refresh_active_path = false;
+		}
+	}
+
+	if (backup_path) {
+		fastd_peer_backup_seen(peer);
+	} else {
+		fastd_peer_seen(peer);
+		if (refresh_active_path)
+			peer->active_path_timeout = ctx.now + (fastd_peer_nat_traversal_keepalive_enabled(peer)
+								       ? conf.punch_keepalive_interval
+								       : KEEPALIVE_TIMEOUT);
+	}
+
 	fastd_compression_algorithm_t compression = recv_session->compression;
-	bool active_path_unverified = (peer->active_path_timeout == FASTD_TIMEOUT_INV);
+	bool backup_payload = backup_path && recv_buffer->len && !(flags & FASTD_METHOD_FLAG_CONTROL) &&
+			      fastd_peer_has_verified_backup_path(peer);
+	bool active_path_unverified =
+		peer->active_path_timeout == FASTD_TIMEOUT_INV && !active_path_initial_grace(peer);
 	bool active_path_stale = !active_path_unverified && fastd_timed_out(peer->active_path_timeout);
-	bool backup_should_promote = backup_path &&
-				     (!fastd_peer_is_established(peer) || fastd_timed_out(peer->reset_timeout) ||
-				      active_path_unverified || active_path_stale);
+	bool backup_should_promote =
+		backup_path && (backup_payload || !fastd_peer_is_established(peer) ||
+				fastd_timed_out(peer->reset_timeout) || active_path_unverified || active_path_stale);
 
 	if (backup_should_promote) {
 		if (!fastd_protocol_ec25519_fhmqvc_promote_backup_path(peer)) {

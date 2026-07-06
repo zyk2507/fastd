@@ -23,10 +23,9 @@
 #define FASTD_PUNCH_SEND_HARD_SYM 5
 #define FASTD_PUNCH_BOTH_EASY_SYM 6
 
-#define FASTD_PUNCH_ANNOUNCE_INTERVAL 15000
-#define FASTD_PUNCH_RELAY_INTERVAL 10000
 #define FASTD_PUNCH_CANDIDATE_PRIORITY 120
 #define FASTD_PUNCH_EASY_SYM_MAX_STEP 8
+#define FASTD_PUNCH_NAT_INFO_GRACE 2000
 
 static const uint8_t fastd_punch_magic[4] = { 'f', 'p', 'c', 'h' };
 
@@ -190,9 +189,22 @@ static bool nat_type_is_easy_symmetric(fastd_nat_type_t nat_type) {
 	return nat_type == FASTD_NAT_SYMMETRIC_EASY_INC || nat_type == FASTD_NAT_SYMMETRIC_EASY_DEC;
 }
 
+/** Returns true if punching this NAT type needs the receiver's NAT metadata as well */
+static bool nat_type_needs_dest_nat_info(fastd_nat_type_t nat_type) {
+	return nat_type == FASTD_NAT_SYMMETRIC || nat_type_is_easy_symmetric(nat_type);
+}
+
 /** Returns true if a peer has fresh punch NAT metadata */
 static bool peer_has_fresh_punch_nat_info(const fastd_peer_t *peer) {
 	return peer->punch_endpoint.sa.sa_family != AF_UNSPEC && !fastd_timed_out(peer->punch_timeout);
+}
+
+/** Returns true while a newly established symmetric-punch peer may still publish NAT metadata */
+static bool peer_waiting_for_punch_nat_info(const fastd_peer_t *peer) {
+	if (!fastd_peer_get_punch_symmetric(peer) || peer_has_fresh_punch_nat_info(peer))
+		return false;
+
+	return peer->established && ctx.now < peer->established + FASTD_PUNCH_NAT_INFO_GRACE;
 }
 
 /** Returns true for endpoint punch command message types */
@@ -230,8 +242,8 @@ static const char *punch_command_type_name(uint8_t type) {
 }
 
 /** Selects the most specific endpoint punch command type for a relayed endpoint */
-static uint8_t punch_endpoint_command_type(
-	const fastd_peer_t *dest, const fastd_peer_t *subject, fastd_nat_type_t subject_nat_type) {
+static uint8_t
+punch_endpoint_command_type(const fastd_peer_t *dest, const fastd_peer_t *subject, fastd_nat_type_t subject_nat_type) {
 	if (!fastd_peer_get_punch_symmetric(subject))
 		return FASTD_PUNCH_SEND_CONE;
 
@@ -300,7 +312,7 @@ static void send_local_nat_info(fastd_peer_t *dest) {
 	if (!fastd_timed_out(dest->next_punch_announce))
 		return;
 
-	dest->next_punch_announce = ctx.now + FASTD_PUNCH_ANNOUNCE_INTERVAL;
+	dest->next_punch_announce = ctx.now + conf.punch_announce_interval;
 
 	fastd_nat_status_t status;
 	if (!fastd_nat_get_status(&status) || !status.available)
@@ -391,7 +403,7 @@ add_endpoint_candidate(fastd_peer_address_t *out, size_t out_len, size_t count, 
 /** Builds concrete endpoint candidates for a remote peer's NAT metadata */
 static size_t build_endpoint_candidates(
 	fastd_peer_address_t *out, size_t out_len, const fastd_peer_address_t *endpoint, fastd_nat_type_t nat_type,
-	int port_delta, unsigned max_sockets, bool symmetric) {
+	int port_delta, unsigned max_sockets, bool symmetric, bool paired_easy_symmetric) {
 	if (!out_len)
 		return 0;
 
@@ -425,12 +437,13 @@ static size_t build_endpoint_candidates(
 	if (nat_type != FASTD_NAT_SYMMETRIC_EASY_INC && nat_type != FASTD_NAT_SYMMETRIC_EASY_DEC)
 		return add_endpoint_candidate(out, out_len, 0, endpoint);
 
-	int direction = nat_type == FASTD_NAT_SYMMETRIC_EASY_INC ? 1 : -1;
 	int step = easy_symmetric_step(port_delta);
+	int direction = nat_type == FASTD_NAT_SYMMETRIC_EASY_INC ? 1 : -1;
+	int start_port = base_port + (paired_easy_symmetric ? direction * step : 0);
 
 	unsigned i;
 	for (i = 0; i < count; i++) {
-		int port = base_port + direction * step * (int)i;
+		int port = start_port + direction * step * (int)i;
 		if (port <= 0 || port > 65535)
 			continue;
 
@@ -448,7 +461,14 @@ static size_t build_endpoint_candidates(
 size_t fastd_punch_test_build_endpoint_candidates(
 	fastd_peer_address_t *out, size_t out_len, const fastd_peer_address_t *endpoint, fastd_nat_type_t nat_type,
 	int port_delta, unsigned max_sockets, bool symmetric) {
-	return build_endpoint_candidates(out, out_len, endpoint, nat_type, port_delta, max_sockets, symmetric);
+	return build_endpoint_candidates(out, out_len, endpoint, nat_type, port_delta, max_sockets, symmetric, false);
+}
+
+/** Test wrapper for paired easy-symmetric endpoint prediction */
+size_t fastd_punch_test_build_paired_endpoint_candidates(
+	fastd_peer_address_t *out, size_t out_len, const fastd_peer_address_t *endpoint, fastd_nat_type_t nat_type,
+	int port_delta, unsigned max_sockets, bool symmetric) {
+	return build_endpoint_candidates(out, out_len, endpoint, nat_type, port_delta, max_sockets, symmetric, true);
 }
 
 /** Test wrapper for punch control message parsing */
@@ -498,10 +518,10 @@ bool fastd_punch_test_is_endpoint_command_type(uint8_t type) {
 /** Sends one concrete endpoint candidate as a punching command */
 static bool relay_one_endpoint_to_peer(
 	fastd_peer_t *dest, fastd_peer_t *subject, const fastd_peer_address_t *endpoint, fastd_nat_type_t nat_type,
-	uint8_t command_type) {
+	uint8_t command_type, uint8_t order) {
 	return send_endpoint_message(
-		dest, command_type, conf.protocol->get_peer_key(subject), conf.protocol->key_length(),
-		endpoint, nat_type, subject->punch_min_port, subject->punch_max_port, subject->punch_port_delta, 0);
+		dest, command_type, conf.protocol->get_peer_key(subject), conf.protocol->key_length(), endpoint,
+		nat_type, subject->punch_min_port, subject->punch_max_port, subject->punch_port_delta, order);
 }
 
 /** Sends a punch command result back to the peer that requested it */
@@ -526,22 +546,32 @@ static size_t relay_endpoint_to_peer(fastd_peer_t *dest, fastd_peer_t *subject, 
 	if (!get_peer_endpoint(subject, &endpoint, &nat_type))
 		return 0;
 
+	if (nat_type == FASTD_NAT_UNKNOWN && peer_waiting_for_punch_nat_info(subject))
+		return 0;
+
+	if (fastd_peer_get_punch_symmetric(subject) && nat_type_needs_dest_nat_info(nat_type) &&
+	    !peer_has_fresh_punch_nat_info(dest))
+		return 0;
+
 	unsigned count = conf.punch_max_sockets;
 	if (!count)
 		count = 1;
 	if (count > limit)
 		count = limit;
 
+	uint8_t command_type = punch_endpoint_command_type(dest, subject, nat_type);
+	bool paired_easy_symmetric = command_type == FASTD_PUNCH_BOTH_EASY_SYM;
+
 	fastd_peer_address_t *candidates = fastd_new_array(count, fastd_peer_address_t);
 	size_t n_candidates = build_endpoint_candidates(
 		candidates, count, &endpoint, nat_type, subject->punch_port_delta, conf.punch_max_sockets,
-		fastd_peer_get_punch_symmetric(subject));
+		fastd_peer_get_punch_symmetric(subject), paired_easy_symmetric);
 
-	uint8_t command_type = punch_endpoint_command_type(dest, subject, nat_type);
 	size_t sent = 0;
 	size_t i;
 	for (i = 0; i < n_candidates; i++) {
-		if (relay_one_endpoint_to_peer(dest, subject, &candidates[i], nat_type, command_type))
+		uint8_t order = i > UINT8_MAX ? UINT8_MAX : (uint8_t)i;
+		if (relay_one_endpoint_to_peer(dest, subject, &candidates[i], nat_type, command_type, order))
 			sent++;
 	}
 
@@ -570,7 +600,7 @@ static void relay_peer_endpoints(void) {
 			sent += relay_endpoint_to_peer(dest, subject, conf.punch_max_packets - sent);
 		}
 
-		subject->next_punch_relay = ctx.now + FASTD_PUNCH_RELAY_INTERVAL;
+		subject->next_punch_relay = ctx.now + conf.punch_relay_interval;
 	}
 }
 
@@ -621,17 +651,25 @@ static void handle_send_endpoint_command(fastd_peer_t *sender, const fastd_punch
 		return;
 	}
 
+	peer->punch_endpoint = endpoint;
+	peer->punch_nat_type = payload->nat_type;
+	peer->punch_min_port = be16toh(payload->min_port);
+	peer->punch_max_port = be16toh(payload->max_port);
+	peer->punch_port_delta = (int16_t)be16toh(payload->port_delta);
+	peer->punch_timeout = ctx.now + PEER_STALE_TIME;
+
 	unsigned udp_punch_sockets = punch_udp_socket_count(peer, payload->nat_type);
 	bool exact_udp_punch = udp_punch_sockets > 0;
 	bool accepted = fastd_peer_add_punch_control_candidate(
-		peer, &endpoint, FASTD_PUNCH_CANDIDATE_PRIORITY, exact_udp_punch, udp_punch_sockets);
+		peer, &endpoint, FASTD_PUNCH_CANDIDATE_PRIORITY, exact_udp_punch, udp_punch_sockets, payload->reserved);
 
 	if (!accepted) {
 		send_punch_result(sender, key, key_len, &endpoint, FASTD_PUNCH_RESULT_SUPPRESSED);
 		return;
 	}
 
-	if (fastd_peer_send_direct_handshake(peer, &endpoint)) {
+	if (fastd_peer_is_current_punch_control_candidate(peer, &endpoint, NULL, NULL) &&
+	    fastd_peer_send_direct_handshake(peer, &endpoint)) {
 		ctx.punch_direct_handshakes++;
 		send_punch_result(sender, key, key_len, &endpoint, FASTD_PUNCH_RESULT_HANDSHAKE);
 	} else {
@@ -639,8 +677,7 @@ static void handle_send_endpoint_command(fastd_peer_t *sender, const fastd_punch
 	}
 
 	pr_debug(
-		"received punch %s command from %P for %P[%I]", punch_command_type_name(type), sender, peer,
-		&endpoint);
+		"received punch %s command from %P for %P[%I]", punch_command_type_name(type), sender, peer, &endpoint);
 }
 
 /** Handles a punch command result from another peer */
@@ -664,7 +701,9 @@ static void handle_result(fastd_peer_t *sender, const fastd_punch_endpoint_t *pa
 		if (subject)
 			pr_debug("received punch accepted result from %P for %P[%I]", sender, subject, &endpoint);
 		else
-			pr_debug("received punch accepted result from %P for unknown key endpoint %I", sender, &endpoint);
+			pr_debug(
+				"received punch accepted result from %P for unknown key endpoint %I", sender,
+				&endpoint);
 		break;
 
 	case FASTD_PUNCH_RESULT_HANDSHAKE:
@@ -672,7 +711,9 @@ static void handle_result(fastd_peer_t *sender, const fastd_punch_endpoint_t *pa
 		if (subject)
 			pr_debug("received punch handshake result from %P for %P[%I]", sender, subject, &endpoint);
 		else
-			pr_debug("received punch handshake result from %P for unknown key endpoint %I", sender, &endpoint);
+			pr_debug(
+				"received punch handshake result from %P for unknown key endpoint %I", sender,
+				&endpoint);
 		break;
 
 	case FASTD_PUNCH_RESULT_SUPPRESSED:
@@ -680,12 +721,16 @@ static void handle_result(fastd_peer_t *sender, const fastd_punch_endpoint_t *pa
 		if (subject)
 			pr_debug("received punch suppressed result from %P for %P[%I]", sender, subject, &endpoint);
 		else
-			pr_debug("received punch suppressed result from %P for unknown key endpoint %I", sender, &endpoint);
+			pr_debug(
+				"received punch suppressed result from %P for unknown key endpoint %I", sender,
+				&endpoint);
 		break;
 
 	case FASTD_PUNCH_RESULT_NO_PEER:
 		ctx.punch_result_no_peer++;
-		pr_debug("received punch no-peer result from %P for key length %zu endpoint %I", sender, key_len, &endpoint);
+		pr_debug(
+			"received punch no-peer result from %P for key length %zu endpoint %I", sender, key_len,
+			&endpoint);
 		break;
 
 	default:

@@ -480,7 +480,7 @@ static inline void init(int argc, char *argv[]) {
 	init_config(&status_fd);
 
 	fastd_update_time();
-	fastd_task_schedule(&ctx.next_maintenance, TASK_TYPE_MAINTENANCE, ctx.now + MAINTENANCE_INTERVAL);
+	fastd_task_schedule(&ctx.next_maintenance, TASK_TYPE_MAINTENANCE, ctx.now + conf.punch_maintenance_interval);
 
 	fastd_receive_unknown_init();
 

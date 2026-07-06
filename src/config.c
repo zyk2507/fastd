@@ -68,9 +68,15 @@ static void default_config(void) {
 	conf.peer_group->hole_punch = HOLE_PUNCH_OFF;
 	conf.peer_group->turn_relay = FASTD_TRISTATE_FALSE;
 	conf.punch_symmetric = true;
+	conf.punch_keepalive = true;
+	conf.punch_keepalive_interval = DEFAULT_NAT_KEEPALIVE_INTERVAL;
+	conf.punch_maintenance_interval = MAINTENANCE_INTERVAL;
+	conf.punch_announce_interval = DEFAULT_PUNCH_ANNOUNCE_INTERVAL;
+	conf.punch_relay_interval = DEFAULT_PUNCH_RELAY_INTERVAL;
 	conf.punch_max_sockets = 25;
 	conf.punch_max_packets = 256;
 	conf.punch_max_attempts = 1;
+	conf.punch_max_backups = 25;
 }
 
 /** Handles the configuration of a handshake protocol */

@@ -60,6 +60,32 @@ BR="${PREFIX}br"
 PIDS=()
 STUN_PID=
 
+FAST_WAIT_ATTEMPTS=28
+FAST_WAIT_SLEEP=0.2
+SHORT_WAIT_ATTEMPTS=6
+SHORT_WAIT_SLEEP=0.2
+PING_WAIT_ATTEMPTS=8
+PING_WAIT_SLEEP=0.1
+PING_TIMEOUT=0.4
+FAILOVER_WAIT_ATTEMPTS=18
+FAILOVER_WAIT_SLEEP=0.2
+TEST_PUNCH_KEEPALIVE=2
+
+punch_test_limits() {
+	local maintenance=${1:-2}
+
+	cat <<EOF
+punch keepalive interval $TEST_PUNCH_KEEPALIVE;
+punch maintenance interval $maintenance;
+punch announce interval 1;
+punch relay interval 1;
+punch max backups 25;
+punch max attempts 4;
+punch max sockets 25;
+punch max packets 800;
+EOF
+}
+
 stop_fastds() {
 	for pid in "${PIDS[@]}"; do
 		kill "$pid" >/dev/null 2>&1 || true
@@ -96,11 +122,11 @@ run() {
 }
 
 ping_direct() {
-	ip netns exec "$NS_A" ping -I fda-b -n -c 1 -W 1 10.52.10.2 >> "$WORK/a.ping" 2>&1
+	ip netns exec "$NS_A" ping -I fda-b -n -c 1 -W "$PING_TIMEOUT" 10.52.10.2 >> "$WORK/a.ping" 2>&1
 }
 
 ping_public_nat() {
-	ip netns exec "$NS_C" ping -I fdc-a -n -c 1 -W 1 10.52.20.2 >> "$WORK/c.ping" 2>&1
+	ip netns exec "$NS_C" ping -I fdc-a -n -c 1 -W "$PING_TIMEOUT" 10.52.20.2 >> "$WORK/c.ping" 2>&1
 }
 
 check_fastds_alive() {
@@ -173,6 +199,113 @@ def direct_connection(doc, name, public_ip):
     return "established" in connection and address.startswith(public_ip + ":")
 
 sys.exit(0 if direct_connection(a, "b", "10.52.0.3") and direct_connection(b, "a", "10.52.0.2") else 1)
+PY
+}
+
+direct_backups_ready() {
+	python3 - "$WORK/a.json" "$WORK/b.json" <<'PY'
+import json
+import sys
+
+try:
+    a = json.load(open(sys.argv[1]))
+    b = json.load(open(sys.argv[2]))
+except Exception:
+    sys.exit(1)
+
+def find_peer(doc, name):
+    for peer in doc.get("peers", {}).values():
+        if peer.get("name") == name:
+            return peer
+    return {}
+
+def backup_ready(doc, name):
+    peer = find_peer(doc, name)
+    connection = peer.get("connection") or {}
+    hole_punch = peer.get("hole_punch") or {}
+    return (
+        "established" in connection
+        and hole_punch.get("established")
+        and hole_punch.get("backup_established")
+        and hole_punch.get("backup_verified")
+        and hole_punch.get("transport") == "udp"
+        and hole_punch.get("backup_transport") == "udp"
+        and hole_punch.get("remote_port") != hole_punch.get("backup_remote_port")
+    )
+
+sys.exit(0 if backup_ready(a, "b") and backup_ready(b, "a") else 1)
+PY
+}
+
+hole_punch_field() {
+	local node=$1 peer=$2 field=$3
+
+	python3 - "$WORK/$node.json" "$peer" "$field" <<'PY'
+import json
+import sys
+
+doc = json.load(open(sys.argv[1]))
+peer_name = sys.argv[2]
+field = sys.argv[3]
+
+for peer in doc.get("peers", {}).values():
+    if peer.get("name") == peer_name:
+        value = (peer.get("hole_punch") or {}).get(field)
+        if value is None:
+            sys.exit(1)
+        print(value)
+        sys.exit(0)
+
+sys.exit(1)
+PY
+}
+
+block_active_direct_path() {
+	local a_active=$1 b_active=$2
+
+	run ip netns exec "$NS_RA" nft add table ip failover
+	run ip netns exec "$NS_RA" nft 'add chain ip failover prerouting { type filter hook prerouting priority -200; policy accept; }'
+	run ip netns exec "$NS_RA" nft add rule ip failover prerouting iifname pub ip saddr 10.52.0.3 ip daddr 10.52.0.2 udp sport "$a_active" udp dport "$b_active" drop
+	run ip netns exec "$NS_RB" nft add table ip failover
+	run ip netns exec "$NS_RB" nft 'add chain ip failover prerouting { type filter hook prerouting priority -200; policy accept; }'
+	run ip netns exec "$NS_RB" nft add rule ip failover prerouting iifname pub ip saddr 10.52.0.2 ip daddr 10.52.0.3 udp sport "$b_active" udp dport "$a_active" drop
+}
+
+direct_active_ports_changed() {
+	local a_active=$1 b_active=$2
+
+	python3 - "$WORK/a.json" "$WORK/b.json" "$a_active" "$b_active" <<'PY'
+import json
+import sys
+
+try:
+    a = json.load(open(sys.argv[1]))
+    b = json.load(open(sys.argv[2]))
+    old_a = int(sys.argv[3])
+    old_b = int(sys.argv[4])
+except Exception:
+    sys.exit(1)
+
+def find_peer(doc, name):
+    for peer in doc.get("peers", {}).values():
+        if peer.get("name") == name:
+            return peer
+    return {}
+
+def active_changed(doc, name, old_remote_port):
+    peer = find_peer(doc, name)
+    connection = peer.get("connection") or {}
+    hole_punch = peer.get("hole_punch") or {}
+    remote_port = hole_punch.get("remote_port")
+    return (
+        "established" in connection
+        and hole_punch.get("established")
+        and hole_punch.get("transport") == "udp"
+        and isinstance(remote_port, int)
+        and remote_port != old_remote_port
+    )
+
+sys.exit(0 if active_changed(a, "b", old_a) and active_changed(b, "a", old_b) else 1)
 PY
 }
 
@@ -344,8 +477,7 @@ method "salsa2012+umac";
 secret "$SEC_A";
 bind 0.0.0.0:10001;
 status socket "$WORK/a.status";
-punch max sockets 25;
-punch max packets 800;
+$(punch_test_limits 3)
 peer "c" { key "$PUB_C"; remote 10.52.0.1 port 10000; transport udp; }
 peer "b" { key "$PUB_B"; transport udp; hole-punch udp; }
 EOF
@@ -358,8 +490,7 @@ method "salsa2012+umac";
 secret "$SEC_B";
 bind 0.0.0.0:10001;
 status socket "$WORK/b.status";
-punch max sockets 25;
-punch max packets 800;
+$(punch_test_limits 3)
 peer "c" { key "$PUB_C"; remote 10.52.0.1 port 10000; transport udp; }
 peer "a" { key "$PUB_A"; transport udp; hole-punch udp; }
 EOF
@@ -378,8 +509,7 @@ status socket "$WORK/c.status";
 forward no;
 peer discovery no;
 punch control relay $relay;
-punch max sockets 25;
-punch max packets 800;
+$(punch_test_limits 3)
 peer "a" { key "$PUB_A"; transport udp; hole-punch udp; }
 peer "b" { key "$PUB_B"; transport udp; hole-punch udp; }
 EOF
@@ -396,8 +526,7 @@ bind 0.0.0.0:11001;
 status socket "$WORK/a.status";
 stun server "10.52.0.1" port 3478;
 stun server "10.52.0.1" port 3479;
-punch max sockets 25;
-punch max packets 800;
+$(punch_test_limits)
 peer "c" { key "$PUB_C"; remote 10.52.0.1 port 11000; transport udp; }
 peer "b" { key "$PUB_B"; transport udp; hole-punch udp; punch symmetric yes; }
 EOF
@@ -412,8 +541,7 @@ bind 0.0.0.0:11001;
 status socket "$WORK/b.status";
 stun server "10.52.0.1" port 3478;
 stun server "10.52.0.1" port 3479;
-punch max sockets 25;
-punch max packets 800;
+$(punch_test_limits)
 peer "c" { key "$PUB_C"; remote 10.52.0.1 port 11000; transport udp; }
 peer "a" { key "$PUB_A"; transport udp; hole-punch udp; punch symmetric yes; }
 EOF
@@ -429,8 +557,7 @@ status socket "$WORK/c.status";
 forward no;
 peer discovery no;
 punch control relay yes;
-punch max sockets 25;
-punch max packets 800;
+$(punch_test_limits)
 peer "a" { key "$PUB_A"; transport udp; hole-punch udp; punch symmetric yes; }
 peer "b" { key "$PUB_B"; transport udp; hole-punch udp; punch symmetric yes; }
 EOF
@@ -447,8 +574,7 @@ bind 0.0.0.0:12001;
 status socket "$WORK/a.status";
 stun server "10.52.0.1" port 3478;
 stun server "10.52.0.1" port 3479;
-punch max sockets 25;
-punch max packets 800;
+$(punch_test_limits)
 peer "c" { key "$PUB_C"; remote 10.52.0.1 port 12000; transport udp; }
 peer "b" { key "$PUB_B"; transport udp; hole-punch udp; punch symmetric yes; }
 EOF
@@ -463,8 +589,7 @@ bind 0.0.0.0:12001;
 status socket "$WORK/b.status";
 stun server "10.52.0.1" port 3478;
 stun server "10.52.0.1" port 3479;
-punch max sockets 25;
-punch max packets 800;
+$(punch_test_limits)
 peer "c" { key "$PUB_C"; remote 10.52.0.1 port 12000; transport udp; }
 peer "a" { key "$PUB_A"; transport udp; hole-punch udp; punch symmetric yes; }
 EOF
@@ -480,8 +605,7 @@ status socket "$WORK/c.status";
 forward no;
 peer discovery no;
 punch control relay yes;
-punch max sockets 25;
-punch max packets 800;
+$(punch_test_limits)
 peer "a" { key "$PUB_A"; transport udp; hole-punch udp; punch symmetric yes; }
 peer "b" { key "$PUB_B"; transport udp; hole-punch udp; punch symmetric yes; }
 EOF
@@ -499,8 +623,7 @@ status socket "$WORK/a.status";
 stun server "10.52.0.1" port 3478;
 stun server "10.52.0.1" port 3479;
 punch symmetric yes;
-punch max sockets 25;
-punch max packets 800;
+$(punch_test_limits)
 peer "c" { key "$PUB_C"; remote 10.52.0.1 port 13000; transport udp; }
 peer "b" { key "$PUB_B"; transport udp; hole-punch udp; punch symmetric yes; }
 EOF
@@ -516,8 +639,7 @@ status socket "$WORK/b.status";
 stun server "10.52.0.1" port 3478;
 stun server "10.52.0.1" port 3479;
 punch symmetric yes;
-punch max sockets 25;
-punch max packets 800;
+$(punch_test_limits)
 peer "c" { key "$PUB_C"; remote 10.52.0.1 port 13000; transport udp; }
 peer "a" { key "$PUB_A"; transport udp; hole-punch udp; punch symmetric yes; }
 EOF
@@ -534,8 +656,7 @@ forward no;
 peer discovery no;
 punch control relay yes;
 punch symmetric yes;
-punch max sockets 25;
-punch max packets 800;
+$(punch_test_limits)
 peer "a" { key "$PUB_A"; transport udp; hole-punch udp; punch symmetric yes; }
 peer "b" { key "$PUB_B"; transport udp; hole-punch udp; punch symmetric yes; }
 EOF
@@ -662,6 +783,13 @@ start_fastds() {
 	ip netns exec "$NS_C" "$FASTD" --config "$WORK/c.conf" --log-level verbose > "$WORK/c.log" 2>&1 &
 	PID_C=$!
 	PIDS=("$PID_C")
+
+	for _ in $(seq 1 "$SHORT_WAIT_ATTEMPTS"); do
+		[[ -S "$WORK/c.status" ]] && break
+		check_fastds_alive
+		sleep "$SHORT_WAIT_SLEEP"
+	done
+
 	ip netns exec "$NS_A" "$FASTD" --config "$WORK/a.conf" --log-level verbose > "$WORK/a.log" 2>&1 &
 	PIDS+=("$!")
 	ip netns exec "$NS_B" "$FASTD" --config "$WORK/b.conf" --log-level verbose > "$WORK/b.log" 2>&1 &
@@ -671,8 +799,8 @@ start_fastds() {
 wait_without_direct_path() {
 	local saw_status=false
 
-	for _ in $(seq 1 16); do
-		sleep 0.5
+	for _ in $(seq 1 6); do
+		sleep "$SHORT_WAIT_SLEEP"
 		check_fastds_alive
 		dump_statuses
 
@@ -688,8 +816,8 @@ wait_without_direct_path() {
 }
 
 wait_for_direct_path() {
-	for _ in $(seq 1 120); do
-		sleep 0.5
+	for _ in $(seq 1 "$FAST_WAIT_ATTEMPTS"); do
+		sleep "$FAST_WAIT_SLEEP"
 		check_fastds_alive
 		dump_statuses
 
@@ -703,8 +831,8 @@ wait_for_direct_path() {
 }
 
 wait_for_symmetric_to_cone_path() {
-	for _ in $(seq 1 120); do
-		sleep 0.5
+	for _ in $(seq 1 "$FAST_WAIT_ATTEMPTS"); do
+		sleep "$FAST_WAIT_SLEEP"
 		check_fastds_alive
 		dump_statuses
 
@@ -718,13 +846,13 @@ wait_for_symmetric_to_cone_path() {
 }
 
 wait_for_both_easy_symmetric_path() {
-	for _ in $(seq 1 120); do
-		sleep 0.5
+	for _ in $(seq 1 "$FAST_WAIT_ATTEMPTS"); do
+		sleep "$FAST_WAIT_SLEEP"
 		check_fastds_alive
 		dump_statuses
 
 		if [[ -f "$WORK/a.json" && -f "$WORK/b.json" && -f "$WORK/c.json" ]] &&
-			both_easy_nat_types_seen && direct_hole_punched && punch_results_seen; then
+			both_easy_nat_types_seen && direct_hole_punched && direct_backups_ready && punch_results_seen; then
 			return 0
 		fi
 	done
@@ -733,8 +861,8 @@ wait_for_both_easy_symmetric_path() {
 }
 
 wait_for_hard_symmetric_path() {
-	for _ in $(seq 1 40); do
-		sleep 0.5
+	for _ in $(seq 1 "$FAST_WAIT_ATTEMPTS"); do
+		sleep "$FAST_WAIT_SLEEP"
 		check_fastds_alive
 		dump_statuses
 
@@ -772,12 +900,12 @@ ip -n "$NS_C" addr show dev fdc-a > "$WORK/c.ip" 2>&1 || true
 ip -n "$NS_A" addr show dev fda-c >> "$WORK/a.ip" 2>&1 || true
 
 ok=false
-for _ in $(seq 1 5); do
+for _ in $(seq 1 "$PING_WAIT_ATTEMPTS"); do
 	if ping_public_nat; then
 		ok=true
 		break
 	fi
-	sleep 0.5
+	sleep "$PING_WAIT_SLEEP"
 done
 
 if [[ "$ok" != true ]]; then
@@ -795,21 +923,21 @@ run ip -n "$NS_B" link set fdb-a up
 ip -n "$NS_A" addr show dev fda-b > "$WORK/a.ip" 2>&1 || true
 ip -n "$NS_B" addr show dev fdb-a > "$WORK/b.ip" 2>&1 || true
 
-for _ in $(seq 1 5); do
+for _ in $(seq 1 "$PING_WAIT_ATTEMPTS"); do
 	ping_direct && break
-	sleep 0.5
+	sleep "$PING_WAIT_SLEEP"
 done
 
 kill "$PID_C" >/dev/null 2>&1 || true
-sleep 1
+sleep "$SHORT_WAIT_SLEEP"
 
 ok=false
-for _ in $(seq 1 10); do
+for _ in $(seq 1 "$PING_WAIT_ATTEMPTS"); do
 	if ping_direct; then
 		ok=true
 		break
 	fi
-	sleep 0.5
+	sleep "$PING_WAIT_SLEEP"
 done
 
 if [[ "$ok" != true ]]; then
@@ -823,7 +951,7 @@ CURRENT_TEST=4
 stop_fastds
 start_fake_stun
 run ip netns exec "$NS_RA" nft insert rule ip nat postrouting ip saddr 10.52.1.2 ip daddr 10.52.0.1 udp dport 11000 snat to 10.52.0.2:41100
-run ip netns exec "$NS_RA" nft insert rule ip nat postrouting ip saddr 10.52.1.2 ip daddr 10.52.0.3 udp dport 11001 snat to 10.52.0.2:41100-41163
+run ip netns exec "$NS_RA" nft insert rule ip nat postrouting ip saddr 10.52.1.2 ip daddr 10.52.0.3 udp dport 11001 snat to 10.52.0.2:41100-41124
 run ip netns exec "$NS_RB" nft add rule ip nat prerouting iifname pub udp dport 11001 dnat to 10.52.2.2:11001
 write_symmetric_to_cone_confs
 start_fastds
@@ -838,15 +966,15 @@ run ip -n "$NS_A" link set fda-b up
 run ip -n "$NS_B" link set fdb-a up
 ip -n "$NS_A" addr show dev fda-b > "$WORK/a.ip" 2>&1 || true
 ip -n "$NS_B" addr show dev fdb-a > "$WORK/b.ip" 2>&1 || true
-sleep 1
+sleep "$SHORT_WAIT_SLEEP"
 
 ok=false
-for _ in $(seq 1 20); do
+for _ in $(seq 1 "$PING_WAIT_ATTEMPTS"); do
 	if ping_direct; then
 		ok=true
 		break
 	fi
-	sleep 0.5
+	sleep "$PING_WAIT_SLEEP"
 done
 
 if [[ "$ok" != true ]]; then
@@ -879,15 +1007,15 @@ run ip -n "$NS_A" link set fda-b up
 run ip -n "$NS_B" link set fdb-a up
 ip -n "$NS_A" addr show dev fda-b > "$WORK/a.ip" 2>&1 || true
 ip -n "$NS_B" addr show dev fdb-a > "$WORK/b.ip" 2>&1 || true
-sleep 1
+sleep "$SHORT_WAIT_SLEEP"
 
 ok=false
-for _ in $(seq 1 20); do
+for _ in $(seq 1 "$PING_WAIT_ATTEMPTS"); do
 	if ping_direct; then
 		ok=true
 		break
 	fi
-	sleep 0.5
+	sleep "$PING_WAIT_SLEEP"
 done
 
 if [[ "$ok" != true ]]; then
@@ -895,7 +1023,43 @@ if [[ "$ok" != true ]]; then
 	fail 'easy-symmetric to easy-symmetric direct data path failed'
 fi
 
-printf 'ok 5 - easy-symmetric NAT peers punch directly with predicted port ranges\n'
+dump_statuses
+a_active=$(hole_punch_field a b remote_port) || fail 'missing A active punch remote port before failover'
+b_active=$(hole_punch_field b a remote_port) || fail 'missing B active punch remote port before failover'
+block_active_direct_path "$a_active" "$b_active"
+
+ok=false
+for _ in $(seq 1 "$FAILOVER_WAIT_ATTEMPTS"); do
+	sleep "$FAILOVER_WAIT_SLEEP"
+	check_fastds_alive
+	dump_statuses
+
+	if direct_active_ports_changed "$a_active" "$b_active"; then
+		ok=true
+		break
+	fi
+done
+
+if [[ "$ok" != true ]]; then
+	dump_statuses
+	fail 'easy-symmetric backup path was not promoted after the active path was blocked'
+fi
+
+ok=false
+for _ in $(seq 1 "$PING_WAIT_ATTEMPTS"); do
+	if ping_direct; then
+		ok=true
+		break
+	fi
+	sleep "$PING_WAIT_SLEEP"
+done
+
+if [[ "$ok" != true ]]; then
+	dump_statuses
+	fail 'easy-symmetric backup path failed after promotion'
+fi
+
+printf 'ok 5 - easy-symmetric NAT peers punch directly, keep a backup path, and fail over\n'
 
 CURRENT_TEST=6
 stop_fastds
@@ -920,15 +1084,15 @@ run ip -n "$NS_A" link set fda-b up
 run ip -n "$NS_B" link set fdb-a up
 ip -n "$NS_A" addr show dev fda-b > "$WORK/a.ip" 2>&1 || true
 ip -n "$NS_B" addr show dev fdb-a > "$WORK/b.ip" 2>&1 || true
-sleep 1
+sleep "$SHORT_WAIT_SLEEP"
 
 ok=false
-for _ in $(seq 1 20); do
+for _ in $(seq 1 "$PING_WAIT_ATTEMPTS"); do
 	if ping_direct; then
 		ok=true
 		break
 	fi
-	sleep 0.5
+	sleep "$PING_WAIT_SLEEP"
 done
 
 if [[ "$ok" != true ]]; then

@@ -45,11 +45,13 @@
 %token <addr6_scoped> TOK_ADDR6_SCOPED
 
 %token TOK_ADDRESSES
+%token TOK_ANNOUNCE
 %token TOK_ANY
 %token TOK_AS
 %token TOK_ASYNC
 %token TOK_ATTEMPTS
 %token TOK_AUTO
+%token TOK_BACKUPS
 %token TOK_BIND
 %token TOK_CAPABILITIES
 %token TOK_CIPHER
@@ -80,15 +82,18 @@
 %token TOK_INCLUDE
 %token TOK_INFO
 %token TOK_INTERFACE
+%token TOK_INTERVAL
 %token TOK_IP
 %token TOK_IPV4
 %token TOK_IPV6
 %token TOK_KEY
+%token TOK_KEEPALIVE
 %token TOK_L2TP
 %token TOK_LEVEL
 %token TOK_LIMIT
 %token TOK_LOG
 %token TOK_MAC
+%token TOK_MAINTENANCE
 %token TOK_MARK
 %token TOK_MAX
 %token TOK_METHOD
@@ -239,6 +244,41 @@ statement:	peer_group_statement
 			pr_warn("'punch hard-symmetric' is deprecated, use 'punch symmetric' instead");
 			conf.punch_symmetric = $3;
 		}
+	|	TOK_PUNCH TOK_KEEPALIVE boolean ';' {
+			conf.punch_keepalive = $3;
+		}
+	|	TOK_PUNCH TOK_KEEPALIVE TOK_INTERVAL TOK_UINT ';' {
+			if (!$4 || $4 > UINT_MAX / 1000) {
+				fastd_config_error(&@$, state, "invalid punch keepalive interval");
+				YYERROR;
+			}
+
+			conf.punch_keepalive_interval = $4 * 1000;
+		}
+	|	TOK_PUNCH TOK_MAINTENANCE TOK_INTERVAL TOK_UINT ';' {
+			if (!$4 || $4 > UINT_MAX / 1000) {
+				fastd_config_error(&@$, state, "invalid punch maintenance interval");
+				YYERROR;
+			}
+
+			conf.punch_maintenance_interval = $4 * 1000;
+		}
+	|	TOK_PUNCH TOK_ANNOUNCE TOK_INTERVAL TOK_UINT ';' {
+			if (!$4 || $4 > UINT_MAX / 1000) {
+				fastd_config_error(&@$, state, "invalid punch announce interval");
+				YYERROR;
+			}
+
+			conf.punch_announce_interval = $4 * 1000;
+		}
+	|	TOK_PUNCH TOK_RELAY TOK_INTERVAL TOK_UINT ';' {
+			if (!$4 || $4 > UINT_MAX / 1000) {
+				fastd_config_error(&@$, state, "invalid punch relay interval");
+				YYERROR;
+			}
+
+			conf.punch_relay_interval = $4 * 1000;
+		}
 	|	TOK_PUNCH TOK_MAX TOK_SOCKETS TOK_UINT ';' {
 			if (!$4 || $4 > 256) {
 				fastd_config_error(&@$, state, "invalid punch socket limit");
@@ -267,7 +307,14 @@ statement:	peer_group_statement
 			}
 			conf.punch_max_attempts = $4;
 		}
-	;
+	|	TOK_PUNCH TOK_MAX TOK_BACKUPS TOK_UINT ';' {
+			if (!$4 || $4 > 256) {
+				fastd_config_error(&@$, state, "invalid punch backup path limit");
+				YYERROR;
+			}
+			conf.punch_max_backups = $4;
+		}
+		;
 
 peer_group_statement:
 		TOK_PEER peer '{' peer_conf '}' peer_after

@@ -433,6 +433,12 @@ static void print_punch_table(json_object *punch) {
 	char value[32];
 	add_key_value_row(table, "Control relay", onoff(get_bool_member(punch, "control_relay")));
 	add_key_value_row(table, "Symmetric punch", onoff(get_bool_member(punch, "symmetric")));
+	format_counter(value, get_int_member(punch, "maintenance_interval"));
+	add_key_value_row(table, "Maintenance interval", value);
+	format_counter(value, get_int_member(punch, "announce_interval"));
+	add_key_value_row(table, "Announce interval", value);
+	format_counter(value, get_int_member(punch, "relay_interval"));
+	add_key_value_row(table, "Relay interval", value);
 	format_counter(value, get_int_member(punch, "max_sockets"));
 	add_key_value_row(table, "Max sockets", value);
 	format_counter(value, get_int_member(punch, "max_attempts"));
@@ -447,10 +453,9 @@ static void print_punch_table(json_object *punch) {
 	json_object *counters = get_object_member(punch, "counters");
 	if (counters) {
 		static const char *const names[] = {
-			"control_tx",		"control_rx",		"direct_handshakes",
-			"direct_success",	"direct_failures",	"direct_suppressed",
-			"udp_exact_tx",		"result_tx",		"result_rx",
-			"result_accepted",	"result_handshake",	"result_suppressed",
+			"control_tx",      "control_rx",        "direct_handshakes", "direct_success",
+			"direct_failures", "direct_suppressed", "udp_exact_tx",      "result_tx",
+			"result_rx",       "result_accepted",   "result_handshake",  "result_suppressed",
 			"result_no_peer",
 		};
 
@@ -550,7 +555,8 @@ static void print_connection_table(json_object *peers) {
 
 		char *macs = join_string_array(get_array_member(connection, "mac_addresses"));
 		ft_write_ln(
-			table, peer_display_name(key, peer), connected, value_or_dash(get_string_member(connection, "transport")),
+			table, peer_display_name(key, peer), connected,
+			value_or_dash(get_string_member(connection, "transport")),
 			value_or_dash(get_string_member(connection, "method")), rx, tx, macs);
 		free(macs);
 	}
@@ -600,7 +606,8 @@ static void print_hole_punch_table(json_object *peers) {
 		}
 
 		ft_write_ln(
-			table, peer_display_name(key, peer), state, value_or_dash(get_string_member(hole_punch, "mode")),
+			table, peer_display_name(key, peer), state,
+			value_or_dash(get_string_member(hole_punch, "mode")),
 			value_or_dash(get_string_member(hole_punch, "transport")), local_port, remote_port,
 			direct_candidates, punch_candidates, backup, onoff(get_bool_member(hole_punch, "symmetric")));
 	}
@@ -684,16 +691,19 @@ static const char *hole_punch_mode_name(fastd_hole_punch_mode_t mode) {
 /** Dumps a peer's hole punching status as a JSON object */
 static json_object *dump_hole_punch(const fastd_peer_t *peer) {
 	fastd_hole_punch_mode_t mode = fastd_peer_get_hole_punch(peer);
-	bool established =
-		fastd_peer_is_established(peer) && fastd_socket_is_open(peer->sock) &&
-		(fastd_socket_is_hole_punch(peer->sock) || peer->direct_established);
+	bool established = fastd_peer_is_established(peer) && fastd_socket_is_open(peer->sock) &&
+			   (fastd_socket_is_hole_punch(peer->sock) || peer->direct_established);
+	bool verified = peer->active_path_timeout != FASTD_TIMEOUT_INV && !fastd_timed_out(peer->active_path_timeout);
 	bool backup_established = fastd_peer_has_backup_path(peer);
+	bool backup_verified = fastd_peer_has_verified_backup_path(peer);
 
 	struct json_object *ret = json_object_new_object();
 	json_object_object_add(ret, "mode", json_object_new_string(hole_punch_mode_name(mode)));
 	json_object_object_add(ret, "enabled", json_object_new_boolean(mode != HOLE_PUNCH_OFF));
 	json_object_object_add(ret, "established", json_object_new_boolean(established));
+	json_object_object_add(ret, "verified", json_object_new_boolean(verified));
 	json_object_object_add(ret, "backup_established", json_object_new_boolean(backup_established));
+	json_object_object_add(ret, "backup_verified", json_object_new_boolean(backup_verified));
 	json_object_object_add(ret, "symmetric", json_object_new_boolean(fastd_peer_get_punch_symmetric(peer)));
 	json_object_object_add(
 		ret, "direct_candidates", json_object_new_int64(fastd_peer_direct_candidate_count(peer)));
@@ -782,9 +792,16 @@ static json_object *dump_punch(void) {
 	struct json_object *ret = json_object_new_object();
 	json_object_object_add(ret, "control_relay", json_object_new_boolean(conf.punch_control_relay));
 	json_object_object_add(ret, "symmetric", json_object_new_boolean(conf.punch_symmetric));
+	json_object_object_add(ret, "keepalive", json_object_new_boolean(conf.punch_keepalive));
+	json_object_object_add(ret, "keepalive_interval", json_object_new_int64(conf.punch_keepalive_interval / 1000));
+	json_object_object_add(
+		ret, "maintenance_interval", json_object_new_int64(conf.punch_maintenance_interval / 1000));
+	json_object_object_add(ret, "announce_interval", json_object_new_int64(conf.punch_announce_interval / 1000));
+	json_object_object_add(ret, "relay_interval", json_object_new_int64(conf.punch_relay_interval / 1000));
 	json_object_object_add(ret, "max_sockets", json_object_new_int64(conf.punch_max_sockets));
 	json_object_object_add(ret, "max_packets", json_object_new_int64(conf.punch_max_packets));
 	json_object_object_add(ret, "max_attempts", json_object_new_int64(conf.punch_max_attempts));
+	json_object_object_add(ret, "max_backups", json_object_new_int64(conf.punch_max_backups));
 
 	size_t active_candidates = 0;
 	size_t active_suppressions = 0;
