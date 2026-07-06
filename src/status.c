@@ -433,7 +433,6 @@ static void print_punch_table(json_object *punch) {
 	char value[32];
 	add_key_value_row(table, "Control relay", onoff(get_bool_member(punch, "control_relay")));
 	add_key_value_row(table, "Symmetric punch", onoff(get_bool_member(punch, "symmetric")));
-	add_key_value_row(table, "Hard-symmetric punch", onoff(get_bool_member(punch, "hard_symmetric")));
 	format_counter(value, get_int_member(punch, "max_sockets"));
 	add_key_value_row(table, "Max sockets", value);
 	format_counter(value, get_int_member(punch, "max_packets"));
@@ -566,7 +565,7 @@ static void print_hole_punch_table(json_object *peers) {
 	size_t row = ft_cur_row(table);
 	ft_write_ln(
 		table, "Peer", "State", "Mode", "Transport", "Local port", "Remote port", "Direct candidates",
-		"Punch candidates", "Symmetric", "Hard symmetric");
+		"Punch candidates", "Symmetric");
 	mark_header_row(table, row);
 	ft_set_cell_prop(table, FT_ANY_ROW, 4, FT_CPROP_TEXT_ALIGN, FT_ALIGNED_RIGHT);
 	ft_set_cell_prop(table, FT_ANY_ROW, 5, FT_CPROP_TEXT_ALIGN, FT_ALIGNED_RIGHT);
@@ -591,8 +590,7 @@ static void print_hole_punch_table(json_object *peers) {
 		ft_write_ln(
 			table, peer_display_name(key, peer), state, value_or_dash(get_string_member(hole_punch, "mode")),
 			value_or_dash(get_string_member(hole_punch, "transport")), local_port, remote_port,
-			direct_candidates, punch_candidates, onoff(get_bool_member(hole_punch, "symmetric")),
-			onoff(get_bool_member(hole_punch, "hard_symmetric")));
+			direct_candidates, punch_candidates, onoff(get_bool_member(hole_punch, "symmetric")));
 	}
 
 	print_status_table("Hole Punch", table);
@@ -683,8 +681,6 @@ static json_object *dump_hole_punch(const fastd_peer_t *peer) {
 	json_object_object_add(ret, "established", json_object_new_boolean(established));
 	json_object_object_add(ret, "symmetric", json_object_new_boolean(fastd_peer_get_punch_symmetric(peer)));
 	json_object_object_add(
-		ret, "hard_symmetric", json_object_new_boolean(fastd_peer_get_punch_hard_symmetric(peer)));
-	json_object_object_add(
 		ret, "direct_candidates", json_object_new_int64(fastd_peer_direct_candidate_count(peer)));
 	json_object_object_add(
 		ret, "punch_control_candidates",
@@ -755,7 +751,6 @@ static json_object *dump_punch(void) {
 	struct json_object *ret = json_object_new_object();
 	json_object_object_add(ret, "control_relay", json_object_new_boolean(conf.punch_control_relay));
 	json_object_object_add(ret, "symmetric", json_object_new_boolean(conf.punch_symmetric));
-	json_object_object_add(ret, "hard_symmetric", json_object_new_boolean(conf.punch_hard_symmetric));
 	json_object_object_add(ret, "max_sockets", json_object_new_int64(conf.punch_max_sockets));
 	json_object_object_add(ret, "max_packets", json_object_new_int64(conf.punch_max_packets));
 

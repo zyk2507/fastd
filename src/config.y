@@ -235,7 +235,8 @@ statement:	peer_group_statement
 			conf.punch_symmetric = $3;
 		}
 	|	TOK_PUNCH TOK_HARD_SYMMETRIC boolean ';' {
-			conf.punch_hard_symmetric = $3;
+			pr_warn("'punch hard-symmetric' is deprecated, use 'punch symmetric' instead");
+			conf.punch_symmetric = $3;
 		}
 	|	TOK_PUNCH TOK_MAX TOK_SOCKETS TOK_UINT ';' {
 			if (!$4 || $4 > 256) {
@@ -587,7 +588,8 @@ peer_statement: TOK_REMOTE peer_remote ';'
 			state->peer->punch_symmetric = (fastd_tristate_t){ true, $3 };
 		}
 	|	TOK_PUNCH TOK_HARD_SYMMETRIC boolean ';' {
-			state->peer->punch_hard_symmetric = (fastd_tristate_t){ true, $3 };
+			pr_warn("'punch hard-symmetric' is deprecated, use 'punch symmetric' instead");
+			state->peer->punch_symmetric = (fastd_tristate_t){ true, $3 };
 		}
 	|	TOK_TURN TOK_RELAY boolean ';' {
 			if (!fastd_config_set_turn_relay(&@$, state, &state->peer->turn_relay, $3))

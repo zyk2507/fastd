@@ -133,12 +133,12 @@ Example config:
   decide which peer, if any, may establish a direct session.
 
 | ``punch symmetric yes|no;``
-| ``punch hard-symmetric yes|no;``
 
-  Controls symmetric NAT punching strategies. ``punch symmetric`` is enabled by default and allows bounded port
-  prediction for easy-symmetric NATs. ``punch hard-symmetric`` is disabled by default and enables bounded port scans
-  for ordinary symmetric NATs; enable it only for peers that need it, because it increases short-lived UDP socket and
-  punch packet usage. Both options may be overridden in peer sections.
+  Controls symmetric NAT punching strategies. ``punch symmetric`` is enabled by default and allows fastd to try both
+  bounded port prediction for easy-symmetric NATs and bounded port scans for ordinary symmetric NATs. The first
+  candidate that completes the authenticated fastd handshake becomes the active direct path; the remaining candidates
+  stay available until they expire and can be retried if the active path fails. This option may be overridden in peer
+  sections.
 
 | ``punch max sockets <1-256>;``
 | ``punch max packet <1-4096>;``
@@ -511,9 +511,8 @@ Example config:
   and limitations.
 
 | ``punch symmetric yes|no;``
-| ``punch hard-symmetric yes|no;``
 
-  Overrides the corresponding global symmetric NAT punching strategy for this peer.
+  Overrides the global symmetric NAT punching strategy for this peer.
 
 | ``remote <IPv4 address>:<port>;``
 | ``remote <IPv6 address>:<port>;``

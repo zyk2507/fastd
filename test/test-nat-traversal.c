@@ -239,7 +239,7 @@ static void test_punch_uses_exact_endpoint_when_symmetric_disabled(void **state 
 	fastd_peer_address_t out[4];
 
 	size_t n = fastd_punch_test_build_endpoint_candidates(
-		out, array_size(out), &endpoint, FASTD_NAT_SYMMETRIC_EASY_INC, 4, 4, false, false);
+		out, array_size(out), &endpoint, FASTD_NAT_SYMMETRIC_EASY_INC, 4, 4, false);
 
 	assert_int_equal(n, 1);
 	assert_port4(&out[0], 41000);
@@ -250,7 +250,7 @@ static void test_punch_predicts_easy_symmetric_inc(void **state UNUSED) {
 	fastd_peer_address_t out[4];
 
 	size_t n = fastd_punch_test_build_endpoint_candidates(
-		out, array_size(out), &endpoint, FASTD_NAT_SYMMETRIC_EASY_INC, 4, 4, true, false);
+		out, array_size(out), &endpoint, FASTD_NAT_SYMMETRIC_EASY_INC, 4, 4, true);
 
 	assert_int_equal(n, 4);
 	assert_port4(&out[0], 41000);
@@ -264,7 +264,7 @@ static void test_punch_predicts_easy_symmetric_dec(void **state UNUSED) {
 	fastd_peer_address_t out[4];
 
 	size_t n = fastd_punch_test_build_endpoint_candidates(
-		out, array_size(out), &endpoint, FASTD_NAT_SYMMETRIC_EASY_DEC, -3, 4, true, false);
+		out, array_size(out), &endpoint, FASTD_NAT_SYMMETRIC_EASY_DEC, -3, 4, true);
 
 	assert_int_equal(n, 4);
 	assert_port4(&out[0], 41000);
@@ -278,7 +278,7 @@ static void test_punch_clamps_easy_symmetric_step(void **state UNUSED) {
 	fastd_peer_address_t out[3];
 
 	size_t n = fastd_punch_test_build_endpoint_candidates(
-		out, array_size(out), &endpoint, FASTD_NAT_SYMMETRIC_EASY_INC, 100, 3, true, false);
+		out, array_size(out), &endpoint, FASTD_NAT_SYMMETRIC_EASY_INC, 100, 3, true);
 
 	assert_int_equal(n, 3);
 	assert_port4(&out[0], 41000);
@@ -286,12 +286,12 @@ static void test_punch_clamps_easy_symmetric_step(void **state UNUSED) {
 	assert_port4(&out[2], 41016);
 }
 
-static void test_punch_scans_hard_symmetric_when_enabled(void **state UNUSED) {
+static void test_punch_scans_hard_symmetric_when_symmetric_enabled(void **state UNUSED) {
 	const fastd_peer_address_t endpoint = addr4(0xcb007105, 41000);
 	fastd_peer_address_t out[5];
 
 	size_t n = fastd_punch_test_build_endpoint_candidates(
-		out, array_size(out), &endpoint, FASTD_NAT_SYMMETRIC, 0, 5, true, true);
+		out, array_size(out), &endpoint, FASTD_NAT_SYMMETRIC, 0, 5, true);
 
 	assert_int_equal(n, 5);
 	assert_port4(&out[0], 40998);
@@ -301,12 +301,12 @@ static void test_punch_scans_hard_symmetric_when_enabled(void **state UNUSED) {
 	assert_port4(&out[4], 41002);
 }
 
-static void test_punch_keeps_hard_symmetric_exact_when_disabled(void **state UNUSED) {
+static void test_punch_keeps_hard_symmetric_exact_when_symmetric_disabled(void **state UNUSED) {
 	const fastd_peer_address_t endpoint = addr4(0xcb007105, 41000);
 	fastd_peer_address_t out[5];
 
 	size_t n = fastd_punch_test_build_endpoint_candidates(
-		out, array_size(out), &endpoint, FASTD_NAT_SYMMETRIC, 0, 5, true, false);
+		out, array_size(out), &endpoint, FASTD_NAT_SYMMETRIC, 0, 5, false);
 
 	assert_int_equal(n, 1);
 	assert_port4(&out[0], 41000);
@@ -317,7 +317,7 @@ static void test_punch_skips_out_of_range_predicted_ports(void **state UNUSED) {
 	fastd_peer_address_t out[4];
 
 	size_t n = fastd_punch_test_build_endpoint_candidates(
-		out, array_size(out), &endpoint, FASTD_NAT_SYMMETRIC_EASY_INC, 4, 4, true, false);
+		out, array_size(out), &endpoint, FASTD_NAT_SYMMETRIC_EASY_INC, 4, 4, true);
 
 	assert_int_equal(n, 1);
 	assert_port4(&out[0], 65534);
@@ -328,7 +328,7 @@ static void test_punch_respects_output_limit(void **state UNUSED) {
 	fastd_peer_address_t out[2];
 
 	size_t n = fastd_punch_test_build_endpoint_candidates(
-		out, array_size(out), &endpoint, FASTD_NAT_SYMMETRIC_EASY_INC, 1, 5, true, false);
+		out, array_size(out), &endpoint, FASTD_NAT_SYMMETRIC_EASY_INC, 1, 5, true);
 
 	assert_int_equal(n, 2);
 	assert_port4(&out[0], 41000);
@@ -454,24 +454,23 @@ static void test_peer_punch_symmetric_inherits_and_overrides(void **state UNUSED
 	fastd_peer_t peer = {};
 
 	conf.punch_symmetric = true;
-	conf.punch_hard_symmetric = false;
 	assert_true(fastd_peer_get_punch_symmetric(&peer));
-	assert_false(fastd_peer_get_punch_hard_symmetric(&peer));
 
 	peer.punch_symmetric = FASTD_TRISTATE_FALSE;
-	peer.punch_hard_symmetric = FASTD_TRISTATE_TRUE;
 	assert_false(fastd_peer_get_punch_symmetric(&peer));
-	assert_true(fastd_peer_get_punch_hard_symmetric(&peer));
 
 	conf.punch_symmetric = false;
-	conf.punch_hard_symmetric = false;
+	peer.punch_symmetric = FASTD_TRISTATE_UNDEF;
+	assert_false(fastd_peer_get_punch_symmetric(&peer));
+
+	peer.punch_symmetric = FASTD_TRISTATE_TRUE;
+	assert_true(fastd_peer_get_punch_symmetric(&peer));
 }
 
 static void test_punch_socket_count_policy(void **state UNUSED) {
 	fastd_peer_t peer = {};
 
 	conf.punch_symmetric = true;
-	conf.punch_hard_symmetric = false;
 	conf.punch_max_sockets = 25;
 
 	assert_int_equal(
@@ -480,17 +479,15 @@ static void test_punch_socket_count_policy(void **state UNUSED) {
 		1);
 	assert_int_equal(
 		fastd_punch_test_udp_socket_count_for_nat(&peer, FASTD_NAT_SYMMETRIC, false, FASTD_NAT_UNKNOWN),
-		0);
-
-	peer.punch_hard_symmetric = FASTD_TRISTATE_TRUE;
-	assert_int_equal(
-		fastd_punch_test_udp_socket_count_for_nat(&peer, FASTD_NAT_SYMMETRIC, false, FASTD_NAT_UNKNOWN),
 		1);
 
-	peer.punch_hard_symmetric = FASTD_TRISTATE_UNDEF;
 	assert_int_equal(
 		fastd_punch_test_udp_socket_count_for_nat(
 			&peer, FASTD_NAT_FULL_CONE, true, FASTD_NAT_SYMMETRIC_EASY_DEC),
+		25);
+	assert_int_equal(
+		fastd_punch_test_udp_socket_count_for_nat(
+			&peer, FASTD_NAT_FULL_CONE, true, FASTD_NAT_SYMMETRIC),
 		25);
 
 	peer.punch_symmetric = FASTD_TRISTATE_FALSE;
@@ -500,7 +497,6 @@ static void test_punch_socket_count_policy(void **state UNUSED) {
 		0);
 
 	conf.punch_symmetric = false;
-	conf.punch_hard_symmetric = false;
 }
 
 static void test_punch_selects_endpoint_command_types(void **state UNUSED) {
@@ -509,7 +505,6 @@ static void test_punch_selects_endpoint_command_types(void **state UNUSED) {
 
 	ctx.now = 1000;
 	conf.punch_symmetric = true;
-	conf.punch_hard_symmetric = false;
 
 	assert_int_equal(
 		fastd_punch_test_endpoint_command_type(&dest, &subject, FASTD_NAT_FULL_CONE),
@@ -518,12 +513,10 @@ static void test_punch_selects_endpoint_command_types(void **state UNUSED) {
 		fastd_punch_test_endpoint_command_type(&dest, &subject, FASTD_NAT_SYMMETRIC_EASY_INC),
 		TEST_PUNCH_SEND_EASY_SYM);
 
-	subject.punch_hard_symmetric = FASTD_TRISTATE_TRUE;
 	assert_int_equal(
 		fastd_punch_test_endpoint_command_type(&dest, &subject, FASTD_NAT_SYMMETRIC),
 		TEST_PUNCH_SEND_HARD_SYM);
 
-	subject.punch_hard_symmetric = FASTD_TRISTATE_UNDEF;
 	dest.punch_endpoint = addr4(0xcb007107, 43000);
 	dest.punch_nat_type = FASTD_NAT_SYMMETRIC_EASY_DEC;
 	dest.punch_timeout = ctx.now + 1000;
@@ -535,9 +528,11 @@ static void test_punch_selects_endpoint_command_types(void **state UNUSED) {
 	assert_int_equal(
 		fastd_punch_test_endpoint_command_type(&dest, &subject, FASTD_NAT_SYMMETRIC_EASY_INC),
 		TEST_PUNCH_SEND_CONE);
+	assert_int_equal(
+		fastd_punch_test_endpoint_command_type(&dest, &subject, FASTD_NAT_SYMMETRIC),
+		TEST_PUNCH_SEND_CONE);
 
 	conf.punch_symmetric = false;
-	conf.punch_hard_symmetric = false;
 }
 
 int main(void) {
@@ -560,8 +555,8 @@ int main(void) {
 		cmocka_unit_test(test_punch_predicts_easy_symmetric_inc),
 		cmocka_unit_test(test_punch_predicts_easy_symmetric_dec),
 		cmocka_unit_test(test_punch_clamps_easy_symmetric_step),
-		cmocka_unit_test(test_punch_scans_hard_symmetric_when_enabled),
-		cmocka_unit_test(test_punch_keeps_hard_symmetric_exact_when_disabled),
+		cmocka_unit_test(test_punch_scans_hard_symmetric_when_symmetric_enabled),
+		cmocka_unit_test(test_punch_keeps_hard_symmetric_exact_when_symmetric_disabled),
 		cmocka_unit_test(test_punch_skips_out_of_range_predicted_ports),
 		cmocka_unit_test(test_punch_respects_output_limit),
 		cmocka_unit_test(test_punch_parses_valid_message),

@@ -87,8 +87,7 @@ struct fastd_peer {
 	fastd_port_mapping_mode_t port_mapping; /**< Peer-specific automatic port mapping mode */
 	fastd_peer_transport_t transport;       /**< Peer-specific transport protocol */
 	fastd_hole_punch_mode_t hole_punch;     /**< Peer-specific hole punching mode */
-	fastd_tristate_t punch_symmetric;       /**< Peer-specific symmetric NAT punching mode */
-	fastd_tristate_t punch_hard_symmetric;  /**< Peer-specific hard-symmetric NAT punching mode */
+	fastd_tristate_t punch_symmetric;       /**< Peer-specific symmetric NAT punching strategy */
 	fastd_tristate_t turn_relay;            /**< Peer-specific TURN relay setting */
 	fastd_turn_server_t *turn_servers;      /**< Peer-specific TURN servers */
 
@@ -399,20 +398,12 @@ static inline bool fastd_peer_hole_punch_allows(const fastd_peer_t *peer, fastd_
 	}
 }
 
-/** Returns whether symmetric NAT punch predictions are enabled for a peer */
+/** Returns whether symmetric NAT punching strategies are enabled for a peer */
 static inline bool fastd_peer_get_punch_symmetric(const fastd_peer_t *peer) {
 	if (peer && peer->punch_symmetric.set)
 		return peer->punch_symmetric.state;
 
 	return conf.punch_symmetric;
-}
-
-/** Returns whether bounded hard-symmetric NAT scans are enabled for a peer */
-static inline bool fastd_peer_get_punch_hard_symmetric(const fastd_peer_t *peer) {
-	if (peer && peer->punch_hard_symmetric.set)
-		return peer->punch_hard_symmetric.state;
-
-	return conf.punch_hard_symmetric;
 }
 
 /** Returns the effective TURN relay setting for a peer */

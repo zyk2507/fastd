@@ -149,6 +149,33 @@ sys.exit(0 if direct_hole_punched(a, "b") and direct_hole_punched(b, "a") else 1
 PY
 }
 
+direct_peer_connected() {
+	python3 - "$WORK/a.json" "$WORK/b.json" <<'PY'
+import json
+import sys
+
+try:
+    a = json.load(open(sys.argv[1]))
+    b = json.load(open(sys.argv[2]))
+except Exception:
+    sys.exit(1)
+
+def find_peer(doc, name):
+    for peer in doc.get("peers", {}).values():
+        if peer.get("name") == name:
+            return peer
+    return {}
+
+def direct_connection(doc, name, public_ip):
+    peer = find_peer(doc, name)
+    connection = peer.get("connection") or {}
+    address = peer.get("address") or ""
+    return "established" in connection and address.startswith(public_ip + ":")
+
+sys.exit(0 if direct_connection(a, "b", "10.52.0.3") and direct_connection(b, "a", "10.52.0.2") else 1)
+PY
+}
+
 punch_results_seen() {
 	python3 - "$WORK/c.json" <<'PY'
 import json
@@ -472,11 +499,10 @@ status socket "$WORK/a.status";
 stun server "10.52.0.1" port 3478;
 stun server "10.52.0.1" port 3479;
 punch symmetric yes;
-punch hard-symmetric no;
 punch max sockets 25;
 punch max packets 800;
 peer "c" { key "$PUB_C"; remote 10.52.0.1 port 13000; transport udp; }
-peer "b" { key "$PUB_B"; transport udp; hole-punch udp; punch symmetric yes; punch hard-symmetric no; }
+peer "b" { key "$PUB_B"; transport udp; hole-punch udp; punch symmetric yes; }
 EOF
 
 	cat > "$WORK/b.conf" <<EOF
@@ -490,11 +516,10 @@ status socket "$WORK/b.status";
 stun server "10.52.0.1" port 3478;
 stun server "10.52.0.1" port 3479;
 punch symmetric yes;
-punch hard-symmetric no;
 punch max sockets 25;
 punch max packets 800;
 peer "c" { key "$PUB_C"; remote 10.52.0.1 port 13000; transport udp; }
-peer "a" { key "$PUB_A"; transport udp; hole-punch udp; punch symmetric yes; punch hard-symmetric no; }
+peer "a" { key "$PUB_A"; transport udp; hole-punch udp; punch symmetric yes; }
 EOF
 
 	cat > "$WORK/c.conf" <<EOF
@@ -509,11 +534,10 @@ forward no;
 peer discovery no;
 punch control relay yes;
 punch symmetric yes;
-punch hard-symmetric no;
 punch max sockets 25;
 punch max packets 800;
-peer "a" { key "$PUB_A"; transport udp; hole-punch udp; punch symmetric yes; punch hard-symmetric no; }
-peer "b" { key "$PUB_B"; transport udp; hole-punch udp; punch symmetric yes; punch hard-symmetric no; }
+peer "a" { key "$PUB_A"; transport udp; hole-punch udp; punch symmetric yes; }
+peer "b" { key "$PUB_B"; transport udp; hole-punch udp; punch symmetric yes; }
 EOF
 }
 
@@ -708,26 +732,19 @@ wait_for_both_easy_symmetric_path() {
 	return 1
 }
 
-wait_for_hard_symmetric_no_direct_path() {
-	local saw_expected_state=false
-
+wait_for_hard_symmetric_path() {
 	for _ in $(seq 1 40); do
 		sleep 0.5
 		check_fastds_alive
 		dump_statuses
 
 		if [[ -f "$WORK/a.json" && -f "$WORK/b.json" && -f "$WORK/c.json" ]] &&
-			direct_hole_punched; then
-			return 1
-		fi
-
-		if [[ -f "$WORK/a.json" && -f "$WORK/b.json" && -f "$WORK/c.json" ]] &&
-			hard_symmetric_nat_types_seen && punch_results_seen; then
-			saw_expected_state=true
+			hard_symmetric_nat_types_seen && direct_peer_connected && punch_results_seen; then
+			return 0
 		fi
 	done
 
-	[[ "$saw_expected_state" == true ]]
+	return 1
 }
 
 printf '1..6\n'
@@ -885,12 +902,38 @@ stop_fastds
 stop_stun
 start_fake_stun hard_both
 run ip netns exec "$NS_RA" nft insert rule ip nat postrouting ip saddr 10.52.1.2 ip daddr 10.52.0.1 udp dport 13000 snat to 10.52.0.2:43100
+run ip netns exec "$NS_RA" nft insert rule ip nat postrouting ip saddr 10.52.1.2 ip daddr 10.52.0.3 udp dport 44088-44112 snat to 10.52.0.2:43088-43112
 run ip netns exec "$NS_RB" nft insert rule ip nat postrouting ip saddr 10.52.2.2 ip daddr 10.52.0.1 udp dport 13000 snat to 10.52.0.3:44100
+run ip netns exec "$NS_RB" nft insert rule ip nat postrouting ip saddr 10.52.2.2 ip daddr 10.52.0.2 udp dport 43088-43112 snat to 10.52.0.3:44088-44112
+run ip netns exec "$NS_RA" nft add rule ip nat prerouting iifname pub udp dport 43088-43112 dnat to 10.52.1.2:13001
+run ip netns exec "$NS_RB" nft add rule ip nat prerouting iifname pub udp dport 44088-44112 dnat to 10.52.2.2:13001
 write_hard_symmetric_confs
 start_fastds
 
-if ! wait_for_hard_symmetric_no_direct_path; then
-	fail 'hard-symmetric peers established a direct path or did not exchange punch results'
+if ! wait_for_hard_symmetric_path; then
+	fail 'hard-symmetric peers did not establish a direct path'
 fi
 
-printf 'ok 6 - hard-symmetric peers do not direct-connect while guarded mode is disabled\n'
+run ip -n "$NS_A" addr add 10.52.10.1/30 dev fda-b
+run ip -n "$NS_B" addr add 10.52.10.2/30 dev fdb-a
+run ip -n "$NS_A" link set fda-b up
+run ip -n "$NS_B" link set fdb-a up
+ip -n "$NS_A" addr show dev fda-b > "$WORK/a.ip" 2>&1 || true
+ip -n "$NS_B" addr show dev fdb-a > "$WORK/b.ip" 2>&1 || true
+sleep 1
+
+ok=false
+for _ in $(seq 1 20); do
+	if ping_direct; then
+		ok=true
+		break
+	fi
+	sleep 0.5
+done
+
+if [[ "$ok" != true ]]; then
+	dump_statuses
+	fail 'hard-symmetric direct data path failed'
+fi
+
+printf 'ok 6 - hard-symmetric NAT peers punch directly with bounded port scans\n'

@@ -243,7 +243,7 @@ static uint8_t punch_endpoint_command_type(
 		return FASTD_PUNCH_SEND_EASY_SYM;
 	}
 
-	if (subject_nat_type == FASTD_NAT_SYMMETRIC && fastd_peer_get_punch_hard_symmetric(subject))
+	if (subject_nat_type == FASTD_NAT_SYMMETRIC)
 		return FASTD_PUNCH_SEND_HARD_SYM;
 
 	return FASTD_PUNCH_SEND_CONE;
@@ -338,14 +338,12 @@ static int easy_symmetric_step(int port_delta) {
 }
 
 /** Returns true for local NAT types that benefit from opening a UDP punch socket array */
-static bool nat_type_uses_local_socket_array(fastd_nat_type_t nat_type, bool hard_symmetric) {
+static bool nat_type_uses_local_socket_array(fastd_nat_type_t nat_type) {
 	switch (nat_type) {
 	case FASTD_NAT_SYMMETRIC_EASY_INC:
 	case FASTD_NAT_SYMMETRIC_EASY_DEC:
-		return true;
-
 	case FASTD_NAT_SYMMETRIC:
-		return hard_symmetric;
+		return true;
 
 	default:
 		return false;
@@ -358,16 +356,14 @@ static unsigned punch_udp_socket_count_for_nat(
 	if (!fastd_peer_get_punch_symmetric(peer))
 		return 0;
 
-	if (remote_nat_type == FASTD_NAT_SYMMETRIC)
-		return fastd_peer_get_punch_hard_symmetric(peer) ? 1 : 0;
-
-	if (remote_nat_type == FASTD_NAT_SYMMETRIC_EASY_INC || remote_nat_type == FASTD_NAT_SYMMETRIC_EASY_DEC)
+	if (remote_nat_type == FASTD_NAT_SYMMETRIC || remote_nat_type == FASTD_NAT_SYMMETRIC_EASY_INC ||
+	    remote_nat_type == FASTD_NAT_SYMMETRIC_EASY_DEC)
 		return 1;
 
 	if (!local_available)
 		return 0;
 
-	if (!nat_type_uses_local_socket_array(local_nat_type, fastd_peer_get_punch_hard_symmetric(peer)))
+	if (!nat_type_uses_local_socket_array(local_nat_type))
 		return 0;
 
 	return conf.punch_max_sockets ? conf.punch_max_sockets : 1;
@@ -395,7 +391,7 @@ add_endpoint_candidate(fastd_peer_address_t *out, size_t out_len, size_t count, 
 /** Builds concrete endpoint candidates for a remote peer's NAT metadata */
 static size_t build_endpoint_candidates(
 	fastd_peer_address_t *out, size_t out_len, const fastd_peer_address_t *endpoint, fastd_nat_type_t nat_type,
-	int port_delta, unsigned max_sockets, bool symmetric, bool hard_symmetric) {
+	int port_delta, unsigned max_sockets, bool symmetric) {
 	if (!out_len)
 		return 0;
 
@@ -409,7 +405,7 @@ static size_t build_endpoint_candidates(
 	int base_port = ntohs(fastd_peer_address_get_port(endpoint));
 	size_t n_candidates = 0;
 
-	if (nat_type == FASTD_NAT_SYMMETRIC && hard_symmetric) {
+	if (nat_type == FASTD_NAT_SYMMETRIC) {
 		int start = base_port - (int)(count / 2);
 
 		unsigned i;
@@ -451,9 +447,8 @@ static size_t build_endpoint_candidates(
 /** Test wrapper for punch endpoint prediction */
 size_t fastd_punch_test_build_endpoint_candidates(
 	fastd_peer_address_t *out, size_t out_len, const fastd_peer_address_t *endpoint, fastd_nat_type_t nat_type,
-	int port_delta, unsigned max_sockets, bool symmetric, bool hard_symmetric) {
-	return build_endpoint_candidates(
-		out, out_len, endpoint, nat_type, port_delta, max_sockets, symmetric, hard_symmetric);
+	int port_delta, unsigned max_sockets, bool symmetric) {
+	return build_endpoint_candidates(out, out_len, endpoint, nat_type, port_delta, max_sockets, symmetric);
 }
 
 /** Test wrapper for punch control message parsing */
@@ -540,7 +535,7 @@ static size_t relay_endpoint_to_peer(fastd_peer_t *dest, fastd_peer_t *subject, 
 	fastd_peer_address_t *candidates = fastd_new_array(count, fastd_peer_address_t);
 	size_t n_candidates = build_endpoint_candidates(
 		candidates, count, &endpoint, nat_type, subject->punch_port_delta, conf.punch_max_sockets,
-		fastd_peer_get_punch_symmetric(subject), fastd_peer_get_punch_hard_symmetric(subject));
+		fastd_peer_get_punch_symmetric(subject));
 
 	uint8_t command_type = punch_endpoint_command_type(dest, subject, nat_type);
 	size_t sent = 0;

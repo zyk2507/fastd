@@ -326,8 +326,7 @@ struct fastd_config {
 	bool forward;               /**< Specifies if packet forwarding is enable */
 	bool peer_discovery;        /**< Enables relay-assisted endpoint discovery for direct peer connections */
 	bool punch_control_relay;   /**< Relays punch control messages without forwarding data-plane packets */
-	bool punch_symmetric;       /**< Enables bounded symmetric NAT punch predictions */
-	bool punch_hard_symmetric;  /**< Enables bounded hard-symmetric port scans */
+	bool punch_symmetric;       /**< Enables symmetric NAT punch prediction and bounded scans */
 	unsigned punch_max_sockets; /**< Maximum predicted or probed sockets per punch command */
 	unsigned punch_max_packets; /**< Maximum punch control messages relayed per maintenance interval */
 	fastd_realm_config_t realm; /**< External rendezvous configuration for peer hole punching */
