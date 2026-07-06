@@ -75,15 +75,28 @@ FAST_WAIT_ATTEMPTS=28
 FAST_WAIT_SLEEP=0.2
 SHORT_WAIT_ATTEMPTS=6
 SHORT_WAIT_SLEEP=0.2
-PING_WAIT_ATTEMPTS=8
+PING_WAIT_ATTEMPTS=35
 PING_WAIT_SLEEP=0.1
 PING_TIMEOUT=0.4
 FAILOVER_WAIT_ATTEMPTS=18
 FAILOVER_WAIT_SLEEP=0.2
 TEST_PUNCH_KEEPALIVE=2
-IPERF_DURATION=${FASTD_IPERF_DURATION:-1}
-IPERF_PARALLEL=${FASTD_IPERF_PARALLEL:-2}
-IPERF_CONNECT_TIMEOUT=${FASTD_IPERF_CONNECT_TIMEOUT:-5000}
+IPERF_DURATION=${FASTD_IPERF_DURATION:-9}
+IPERF_ACTIVE_CUT_DURATION=${FASTD_IPERF_ACTIVE_CUT_DURATION:-9}
+IPERF_RECOVERY_DURATION=${FASTD_IPERF_RECOVERY_DURATION:-9}
+IPERF_PARALLEL=${FASTD_IPERF_PARALLEL:-8}
+IPERF_CONNECT_TIMEOUT=${FASTD_IPERF_CONNECT_TIMEOUT:-20000}
+IPERF_MIN_BYTES_FLOOR=100000000
+IPERF_MIN_BYTES=${FASTD_IPERF_MIN_BYTES:-$IPERF_MIN_BYTES_FLOOR}
+IPERF_CASE_GROUP=${FASTD_IPERF_CASE_GROUP:-basic}
+
+if ! [[ "$IPERF_MIN_BYTES" =~ ^[0-9]+$ ]]; then
+	echo "invalid FASTD_IPERF_MIN_BYTES: $IPERF_MIN_BYTES" >&2
+	exit 1
+fi
+if ((IPERF_MIN_BYTES < IPERF_MIN_BYTES_FLOOR)); then
+	IPERF_MIN_BYTES=$IPERF_MIN_BYTES_FLOOR
+fi
 
 punch_test_limits() {
 	local maintenance=${1:-2}
@@ -176,8 +189,10 @@ start_iperf_server() {
 
 run_iperf_stream() {
 	local label=$1 client_name=$2 client_ns=$3 client_addr=$4 server_name=$5 server_ns=$6 server_addr=$7 port=$8
+	local duration=${9:-$IPERF_DURATION}
 	local client_log="$WORK/$client_name.$label.client.iperf"
 	local server_log="$WORK/$server_name.$label.server.iperf"
+	local check_log="$WORK/$client_name.$label.check.iperf"
 
 	stop_iperf
 	if ! start_iperf_server "$server_ns" "$server_addr" "$port" "$server_log"; then
@@ -186,8 +201,8 @@ run_iperf_stream() {
 	fi
 
 	if ! ip netns exec "$client_ns" iperf3 \
-		-c "$server_addr" -B "$client_addr" -p "$port" -t "$IPERF_DURATION" -P "$IPERF_PARALLEL" \
-		--bidir --connect-timeout "$IPERF_CONNECT_TIMEOUT" --get-server-output > "$client_log" 2>&1; then
+		-c "$server_addr" -B "$client_addr" -p "$port" -t "$duration" -P "$IPERF_PARALLEL" \
+		--bidir --json --connect-timeout "$IPERF_CONNECT_TIMEOUT" --get-server-output > "$client_log" 2>&1; then
 		stop_iperf
 		dump_statuses
 		fail "iperf3 client failed: $label"
@@ -200,20 +215,85 @@ run_iperf_stream() {
 	fi
 	IPERF_PID=
 
+	if ! assert_iperf_transferred "$label" "$client_log" "$check_log"; then
+		dump_statuses
+		fail "iperf3 transferred too little data: $label"
+	fi
+	sed 's/^/# /' "$check_log"
+
 	check_fastds_alive
 	dump_statuses
 }
 
+assert_iperf_transferred() {
+	local label=$1 log_file=$2 check_log=$3
+
+	python3 - "$log_file" "$label" "$IPERF_MIN_BYTES" > "$check_log" <<'PY'
+import json
+import sys
+
+log_file, label, min_bytes_text = sys.argv[1:4]
+min_bytes = int(min_bytes_text)
+
+try:
+    data = json.load(open(log_file))
+except Exception as exc:
+    print(f"{label}: failed to parse iperf3 JSON: {exc}")
+    sys.exit(1)
+
+if data.get("error"):
+    print(f"{label}: iperf3 JSON error: {data['error']}")
+    sys.exit(1)
+
+end = data.get("end") or {}
+fields = {
+    "client_tx": "sum_sent",
+    "server_rx": "sum_received",
+    "server_tx": "sum_sent_bidir_reverse",
+    "client_rx": "sum_received_bidir_reverse",
+}
+
+values = {}
+errors = []
+for name, key in fields.items():
+    value = (end.get(key) or {}).get("bytes")
+    if not isinstance(value, (int, float)):
+        errors.append(f"{name}:{key}=missing")
+        continue
+    values[name] = int(value)
+
+server_rx = values.get("server_rx", 0)
+client_rx = values.get("client_rx", 0)
+total_rx = server_rx + client_rx
+
+if server_rx <= 0:
+    errors.append("server_rx:no-data")
+if client_rx <= 0:
+    errors.append("client_rx:no-data")
+if total_rx < min_bytes:
+    errors.append(f"total_rx:{total_rx}<min:{min_bytes}")
+
+summary = " ".join(f"{name}={values.get(name, 'missing')}" for name in fields)
+print(f"{label}: {summary} total_rx={total_rx} min_total={min_bytes}")
+
+if errors:
+    print(f"{label}: failed checks: {', '.join(errors)}")
+    sys.exit(1)
+PY
+}
+
 run_direct_iperf() {
 	local label=$1 port=$2
+	local duration=${3:-$IPERF_DURATION}
 
-	run_iperf_stream "$label" a "$NS_A" 10.52.10.1 b "$NS_B" 10.52.10.2 "$port"
+	run_iperf_stream "$label" a "$NS_A" 10.52.10.1 b "$NS_B" 10.52.10.2 "$port" "$duration"
 }
 
 run_public_nat_iperf() {
 	local label=$1 port=$2
+	local duration=${3:-$IPERF_DURATION}
 
-	run_iperf_stream "$label" c "$NS_C" 10.52.20.1 a "$NS_A" 10.52.20.2 "$port"
+	run_iperf_stream "$label" c "$NS_C" 10.52.20.1 a "$NS_A" 10.52.20.2 "$port" "$duration"
 }
 
 check_fastds_alive() {
@@ -1008,7 +1088,7 @@ run_direct_iperf_after_active_cut() {
 	a_active=$(hole_punch_field a b remote_port) || fail "missing A active punch remote port before $label iperf3 cut"
 	b_active=$(hole_punch_field b a remote_port) || fail "missing B active punch remote port before $label iperf3 cut"
 	block_active_direct_path "$a_active" "$b_active"
-	run_direct_iperf "$label" "$port"
+	run_direct_iperf "$label" "$port" "$IPERF_ACTIVE_CUT_DURATION"
 
 	if ! direct_active_ports_changed "$a_active" "$b_active"; then
 		fail "$label did not recover onto a different direct path during iperf3"
@@ -1025,7 +1105,7 @@ run_direct_iperf_after_transient_cut() {
 	block_active_direct_path "$a_active" "$b_active"
 	sleep "$SHORT_WAIT_SLEEP"
 	clear_blocked_direct_path
-	run_direct_iperf "$label" "$port"
+	run_direct_iperf "$label" "$port" "$IPERF_RECOVERY_DURATION"
 }
 
 cut_public_nat_link_once() {
@@ -1034,116 +1114,151 @@ cut_public_nat_link_once() {
 	run ip -n "$NS_RA" link set pub up
 }
 
+iperf_basic_group_enabled() {
+	[[ "$IPERF_CASE_GROUP" == basic || "$IPERF_CASE_GROUP" == all ]]
+}
+
+iperf_symmetric_group_enabled() {
+	[[ "$IPERF_CASE_GROUP" == symmetric || "$IPERF_CASE_GROUP" == all ]]
+}
+
+print_iperf_plan() {
+	case "$IPERF_CASE_GROUP" in
+	basic)
+		printf '1..3\n'
+		;;
+	symmetric)
+		printf '1..2\n'
+		;;
+	all)
+		printf '1..5\n'
+		;;
+	*)
+		printf '1..0 # SKIP unknown iperf case group: %s\n' "$IPERF_CASE_GROUP"
+		exit 0
+		;;
+	esac
+}
+
+begin_iperf_case() {
+	CURRENT_TEST=$((CURRENT_TEST + 1))
+}
+
 run_iperf_tests() {
-	printf '1..5\n'
+	print_iperf_plan
+	CURRENT_TEST=0
 
-	CURRENT_TEST=1
-	write_c_conf yes
-	start_fastds
+	if iperf_basic_group_enabled; then
+		begin_iperf_case
+		write_c_conf yes
+		start_fastds
 
-	if ! wait_for_direct_path; then
-		fail 'direct UDP path was not established before public iperf3'
+		if ! wait_for_direct_path; then
+			fail 'direct UDP path was not established before public iperf3'
+		fi
+
+		run ip -n "$NS_C" addr add 10.52.20.1/30 dev fdc-a
+		run ip -n "$NS_A" addr add 10.52.20.2/30 dev fda-c
+		run ip -n "$NS_C" link set fdc-a up
+		run ip -n "$NS_A" link set fda-c up
+		ip -n "$NS_C" addr show dev fdc-a > "$WORK/c.ip" 2>&1 || true
+		ip -n "$NS_A" addr show dev fda-c >> "$WORK/a.ip" 2>&1 || true
+		cut_public_nat_link_once
+		run_public_nat_iperf public-nat-after-cut 5201
+		printf 'ok %s - public node carries bidirectional iperf3 traffic with a NAT peer after a link cut\n' "$CURRENT_TEST"
+
+		begin_iperf_case
+		run ip -n "$NS_A" addr add 10.52.10.1/30 dev fda-b
+		run ip -n "$NS_B" addr add 10.52.10.2/30 dev fdb-a
+		run ip -n "$NS_A" link set fda-b up
+		run ip -n "$NS_B" link set fdb-a up
+		ip -n "$NS_A" addr show dev fda-b > "$WORK/a.ip" 2>&1 || true
+		ip -n "$NS_B" addr show dev fdb-a > "$WORK/b.ip" 2>&1 || true
+		wait_for_direct_ping 'direct A/B data path failed before full-cone iperf3'
+		stop_public_relay_fastd
+		sleep "$SHORT_WAIT_SLEEP"
+		run_direct_iperf_after_transient_cut full-cone-after-cut 5202
+		printf 'ok %s - full-cone direct path recovers and carries bidirectional iperf3 traffic after active cut\n' "$CURRENT_TEST"
+
+		begin_iperf_case
+		stop_fastds
+		start_fake_stun
+		run ip netns exec "$NS_RA" nft insert rule ip nat postrouting ip saddr 10.52.1.2 ip daddr 10.52.0.1 udp dport 11000 snat to 10.52.0.2:41100
+		run ip netns exec "$NS_RA" nft insert rule ip nat postrouting ip saddr 10.52.1.2 ip daddr 10.52.0.3 udp dport 11001 snat to 10.52.0.2:41100-41124
+		run ip netns exec "$NS_RB" nft add rule ip nat prerouting iifname pub udp dport 11001 dnat to 10.52.2.2:11001
+		write_symmetric_to_cone_confs
+		start_fastds
+
+		if ! wait_for_symmetric_to_cone_path; then
+			fail 'symmetric-to-cone UDP path was not established before iperf3'
+		fi
+
+		run ip -n "$NS_A" addr add 10.52.10.1/30 dev fda-b
+		run ip -n "$NS_B" addr add 10.52.10.2/30 dev fdb-a
+		run ip -n "$NS_A" link set fda-b up
+		run ip -n "$NS_B" link set fdb-a up
+		ip -n "$NS_A" addr show dev fda-b > "$WORK/a.ip" 2>&1 || true
+		ip -n "$NS_B" addr show dev fdb-a > "$WORK/b.ip" 2>&1 || true
+		wait_for_direct_ping 'symmetric-to-cone direct data path failed before iperf3'
+		run_direct_iperf_after_transient_cut symmetric-to-cone-after-cut 5203
+		printf 'ok %s - easy-symmetric to full-cone path recovers and carries bidirectional iperf3 traffic after active cut\n' "$CURRENT_TEST"
 	fi
 
-	run ip -n "$NS_C" addr add 10.52.20.1/30 dev fdc-a
-	run ip -n "$NS_A" addr add 10.52.20.2/30 dev fda-c
-	run ip -n "$NS_C" link set fdc-a up
-	run ip -n "$NS_A" link set fda-c up
-	ip -n "$NS_C" addr show dev fdc-a > "$WORK/c.ip" 2>&1 || true
-	ip -n "$NS_A" addr show dev fda-c >> "$WORK/a.ip" 2>&1 || true
-	cut_public_nat_link_once
-	run_public_nat_iperf public-nat-after-cut 5201
-	printf 'ok 1 - public node carries bidirectional iperf3 traffic with a NAT peer after a link cut\n'
+	if iperf_symmetric_group_enabled; then
+		begin_iperf_case
+		stop_fastds
+		stop_stun
+		start_fake_stun both_easy
+		run ip netns exec "$NS_RA" nft insert rule ip nat postrouting ip saddr 10.52.1.2 ip daddr 10.52.0.1 udp dport 12000 snat to 10.52.0.2:41100
+		run ip netns exec "$NS_RA" nft insert rule ip nat postrouting ip saddr 10.52.1.2 ip daddr 10.52.0.3 udp dport 42139-42163 snat to 10.52.0.2:41100-41124
+		run ip netns exec "$NS_RB" nft insert rule ip nat postrouting ip saddr 10.52.2.2 ip daddr 10.52.0.1 udp dport 12000 snat to 10.52.0.3:42163
+		run ip netns exec "$NS_RB" nft insert rule ip nat postrouting ip saddr 10.52.2.2 ip daddr 10.52.0.2 udp dport 41100-41124 snat to 10.52.0.3:42139-42163
+		run ip netns exec "$NS_RA" nft add rule ip nat prerouting iifname pub udp dport 41100-41124 dnat to 10.52.1.2:12001
+		run ip netns exec "$NS_RB" nft add rule ip nat prerouting iifname pub udp dport 42139-42163 dnat to 10.52.2.2:12001
+		write_both_easy_symmetric_confs
+		start_fastds
 
-	CURRENT_TEST=2
-	run ip -n "$NS_A" addr add 10.52.10.1/30 dev fda-b
-	run ip -n "$NS_B" addr add 10.52.10.2/30 dev fdb-a
-	run ip -n "$NS_A" link set fda-b up
-	run ip -n "$NS_B" link set fdb-a up
-	ip -n "$NS_A" addr show dev fda-b > "$WORK/a.ip" 2>&1 || true
-	ip -n "$NS_B" addr show dev fdb-a > "$WORK/b.ip" 2>&1 || true
-	wait_for_direct_ping 'direct A/B data path failed before full-cone iperf3'
-	stop_public_relay_fastd
-	sleep "$SHORT_WAIT_SLEEP"
-	run_direct_iperf_after_transient_cut full-cone-after-cut 5202
-	printf 'ok 2 - full-cone direct path recovers and carries bidirectional iperf3 traffic after active cut\n'
+		if ! wait_for_both_easy_symmetric_path; then
+			fail 'easy-symmetric to easy-symmetric UDP path was not established before iperf3'
+		fi
 
-	CURRENT_TEST=3
-	stop_fastds
-	start_fake_stun
-	run ip netns exec "$NS_RA" nft insert rule ip nat postrouting ip saddr 10.52.1.2 ip daddr 10.52.0.1 udp dport 11000 snat to 10.52.0.2:41100
-	run ip netns exec "$NS_RA" nft insert rule ip nat postrouting ip saddr 10.52.1.2 ip daddr 10.52.0.3 udp dport 11001 snat to 10.52.0.2:41100-41124
-	run ip netns exec "$NS_RB" nft add rule ip nat prerouting iifname pub udp dport 11001 dnat to 10.52.2.2:11001
-	write_symmetric_to_cone_confs
-	start_fastds
+		run ip -n "$NS_A" addr add 10.52.10.1/30 dev fda-b
+		run ip -n "$NS_B" addr add 10.52.10.2/30 dev fdb-a
+		run ip -n "$NS_A" link set fda-b up
+		run ip -n "$NS_B" link set fdb-a up
+		ip -n "$NS_A" addr show dev fda-b > "$WORK/a.ip" 2>&1 || true
+		ip -n "$NS_B" addr show dev fdb-a > "$WORK/b.ip" 2>&1 || true
+		wait_for_direct_ping 'easy-symmetric direct data path failed before iperf3'
+		run_direct_iperf_after_active_cut both-easy-after-cut 5204
+		printf 'ok %s - easy-symmetric peers recover and carry bidirectional iperf3 traffic after active cut\n' "$CURRENT_TEST"
 
-	if ! wait_for_symmetric_to_cone_path; then
-		fail 'symmetric-to-cone UDP path was not established before iperf3'
+		begin_iperf_case
+		stop_fastds
+		stop_stun
+		start_fake_stun hard_both
+		run ip netns exec "$NS_RA" nft insert rule ip nat postrouting ip saddr 10.52.1.2 ip daddr 10.52.0.1 udp dport 13000 snat to 10.52.0.2:43100
+		run ip netns exec "$NS_RA" nft insert rule ip nat postrouting ip saddr 10.52.1.2 ip daddr 10.52.0.3 udp dport 44088-44112 snat to 10.52.0.2:43088-43112
+		run ip netns exec "$NS_RB" nft insert rule ip nat postrouting ip saddr 10.52.2.2 ip daddr 10.52.0.1 udp dport 13000 snat to 10.52.0.3:44100
+		run ip netns exec "$NS_RB" nft insert rule ip nat postrouting ip saddr 10.52.2.2 ip daddr 10.52.0.2 udp dport 43088-43112 snat to 10.52.0.3:44088-44112
+		run ip netns exec "$NS_RA" nft add rule ip nat prerouting iifname pub udp dport 43088-43112 dnat to 10.52.1.2:13001
+		run ip netns exec "$NS_RB" nft add rule ip nat prerouting iifname pub udp dport 44088-44112 dnat to 10.52.2.2:13001
+		write_hard_symmetric_confs
+		start_fastds
+
+		if ! wait_for_hard_symmetric_path; then
+			fail 'hard-symmetric peers did not establish a direct path before iperf3'
+		fi
+
+		run ip -n "$NS_A" addr add 10.52.10.1/30 dev fda-b
+		run ip -n "$NS_B" addr add 10.52.10.2/30 dev fdb-a
+		run ip -n "$NS_A" link set fda-b up
+		run ip -n "$NS_B" link set fdb-a up
+		ip -n "$NS_A" addr show dev fda-b > "$WORK/a.ip" 2>&1 || true
+		ip -n "$NS_B" addr show dev fdb-a > "$WORK/b.ip" 2>&1 || true
+		wait_for_direct_ping 'hard-symmetric direct data path failed before iperf3'
+		run_direct_iperf_after_transient_cut hard-symmetric-after-cut 5205
+		printf 'ok %s - hard-symmetric direct path recovers and carries bidirectional iperf3 traffic after active cut\n' "$CURRENT_TEST"
 	fi
-
-	run ip -n "$NS_A" addr add 10.52.10.1/30 dev fda-b
-	run ip -n "$NS_B" addr add 10.52.10.2/30 dev fdb-a
-	run ip -n "$NS_A" link set fda-b up
-	run ip -n "$NS_B" link set fdb-a up
-	ip -n "$NS_A" addr show dev fda-b > "$WORK/a.ip" 2>&1 || true
-	ip -n "$NS_B" addr show dev fdb-a > "$WORK/b.ip" 2>&1 || true
-	wait_for_direct_ping 'symmetric-to-cone direct data path failed before iperf3'
-	run_direct_iperf_after_transient_cut symmetric-to-cone-after-cut 5203
-	printf 'ok 3 - easy-symmetric to full-cone path recovers and carries bidirectional iperf3 traffic after active cut\n'
-
-	CURRENT_TEST=4
-	stop_fastds
-	stop_stun
-	start_fake_stun both_easy
-	run ip netns exec "$NS_RA" nft insert rule ip nat postrouting ip saddr 10.52.1.2 ip daddr 10.52.0.1 udp dport 12000 snat to 10.52.0.2:41100
-	run ip netns exec "$NS_RA" nft insert rule ip nat postrouting ip saddr 10.52.1.2 ip daddr 10.52.0.3 udp dport 42139-42163 snat to 10.52.0.2:41100-41124
-	run ip netns exec "$NS_RB" nft insert rule ip nat postrouting ip saddr 10.52.2.2 ip daddr 10.52.0.1 udp dport 12000 snat to 10.52.0.3:42163
-	run ip netns exec "$NS_RB" nft insert rule ip nat postrouting ip saddr 10.52.2.2 ip daddr 10.52.0.2 udp dport 41100-41124 snat to 10.52.0.3:42139-42163
-	run ip netns exec "$NS_RA" nft add rule ip nat prerouting iifname pub udp dport 41100-41124 dnat to 10.52.1.2:12001
-	run ip netns exec "$NS_RB" nft add rule ip nat prerouting iifname pub udp dport 42139-42163 dnat to 10.52.2.2:12001
-	write_both_easy_symmetric_confs
-	start_fastds
-
-	if ! wait_for_both_easy_symmetric_path; then
-		fail 'easy-symmetric to easy-symmetric UDP path was not established before iperf3'
-	fi
-
-	run ip -n "$NS_A" addr add 10.52.10.1/30 dev fda-b
-	run ip -n "$NS_B" addr add 10.52.10.2/30 dev fdb-a
-	run ip -n "$NS_A" link set fda-b up
-	run ip -n "$NS_B" link set fdb-a up
-	ip -n "$NS_A" addr show dev fda-b > "$WORK/a.ip" 2>&1 || true
-	ip -n "$NS_B" addr show dev fdb-a > "$WORK/b.ip" 2>&1 || true
-	wait_for_direct_ping 'easy-symmetric direct data path failed before iperf3'
-	run_direct_iperf_after_active_cut both-easy-after-cut 5204
-	printf 'ok 4 - easy-symmetric peers recover and carry bidirectional iperf3 traffic after active cut\n'
-
-	CURRENT_TEST=5
-	stop_fastds
-	stop_stun
-	start_fake_stun hard_both
-	run ip netns exec "$NS_RA" nft insert rule ip nat postrouting ip saddr 10.52.1.2 ip daddr 10.52.0.1 udp dport 13000 snat to 10.52.0.2:43100
-	run ip netns exec "$NS_RA" nft insert rule ip nat postrouting ip saddr 10.52.1.2 ip daddr 10.52.0.3 udp dport 44088-44112 snat to 10.52.0.2:43088-43112
-	run ip netns exec "$NS_RB" nft insert rule ip nat postrouting ip saddr 10.52.2.2 ip daddr 10.52.0.1 udp dport 13000 snat to 10.52.0.3:44100
-	run ip netns exec "$NS_RB" nft insert rule ip nat postrouting ip saddr 10.52.2.2 ip daddr 10.52.0.2 udp dport 43088-43112 snat to 10.52.0.3:44088-44112
-	run ip netns exec "$NS_RA" nft add rule ip nat prerouting iifname pub udp dport 43088-43112 dnat to 10.52.1.2:13001
-	run ip netns exec "$NS_RB" nft add rule ip nat prerouting iifname pub udp dport 44088-44112 dnat to 10.52.2.2:13001
-	write_hard_symmetric_confs
-	start_fastds
-
-	if ! wait_for_hard_symmetric_path; then
-		fail 'hard-symmetric peers did not establish a direct path before iperf3'
-	fi
-
-	run ip -n "$NS_A" addr add 10.52.10.1/30 dev fda-b
-	run ip -n "$NS_B" addr add 10.52.10.2/30 dev fdb-a
-	run ip -n "$NS_A" link set fda-b up
-	run ip -n "$NS_B" link set fdb-a up
-	ip -n "$NS_A" addr show dev fda-b > "$WORK/a.ip" 2>&1 || true
-	ip -n "$NS_B" addr show dev fdb-a > "$WORK/b.ip" 2>&1 || true
-	wait_for_direct_ping 'hard-symmetric direct data path failed before iperf3'
-	run_direct_iperf_after_transient_cut hard-symmetric-after-cut 5205
-	printf 'ok 5 - hard-symmetric direct path recovers and carries bidirectional iperf3 traffic after active cut\n'
 }
 
 if [[ "$IPERF_MODE" == 1 ]]; then
