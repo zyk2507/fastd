@@ -36,7 +36,7 @@ test('nat-punch-netns',
 	bash,
 	args : [files('test-nat-punch-netns.sh'), fastd_exe.full_path()],
 	protocol : 'tap',
-	timeout : 120,
+	timeout : 180,
 )
 
 benchmark_uhash = executable(

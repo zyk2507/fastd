@@ -189,6 +189,26 @@ sys.exit(0)
 PY
 }
 
+both_easy_nat_types_seen() {
+	python3 - "$WORK/a.json" "$WORK/b.json" <<'PY'
+import json
+import sys
+
+try:
+    a = json.load(open(sys.argv[1]))
+    b = json.load(open(sys.argv[2]))
+except Exception:
+    sys.exit(1)
+
+if (a.get("nat") or {}).get("type") != "symmetric-easy-inc":
+    sys.exit(1)
+if (b.get("nat") or {}).get("type") != "symmetric-easy-dec":
+    sys.exit(1)
+
+sys.exit(0)
+PY
+}
+
 make_public_link() {
 	local ns=$1 ifname=$2 host=$3
 	local peer="${host}p"
@@ -369,11 +389,64 @@ peer "b" { key "$PUB_B"; transport udp; hole-punch udp; punch symmetric yes; }
 EOF
 }
 
+write_both_easy_symmetric_confs() {
+	cat > "$WORK/a.conf" <<EOF
+mode multitap;
+interface "fda-%n";
+persist interface no;
+method "salsa2012+umac";
+secret "$SEC_A";
+bind 0.0.0.0:12001;
+status socket "$WORK/a.status";
+stun server "10.52.0.1" port 3478;
+stun server "10.52.0.1" port 3479;
+punch max sockets 25;
+punch max packets 800;
+peer "c" { key "$PUB_C"; remote 10.52.0.1 port 12000; transport udp; }
+peer "b" { key "$PUB_B"; transport udp; hole-punch udp; punch symmetric yes; }
+EOF
+
+	cat > "$WORK/b.conf" <<EOF
+mode multitap;
+interface "fdb-%n";
+persist interface no;
+method "salsa2012+umac";
+secret "$SEC_B";
+bind 0.0.0.0:12001;
+status socket "$WORK/b.status";
+stun server "10.52.0.1" port 3478;
+stun server "10.52.0.1" port 3479;
+punch max sockets 25;
+punch max packets 800;
+peer "c" { key "$PUB_C"; remote 10.52.0.1 port 12000; transport udp; }
+peer "a" { key "$PUB_A"; transport udp; hole-punch udp; punch symmetric yes; }
+EOF
+
+	cat > "$WORK/c.conf" <<EOF
+mode multitap;
+interface "fdc-%n";
+persist interface no;
+method "salsa2012+umac";
+secret "$SEC_C";
+bind 10.52.0.1:12000;
+status socket "$WORK/c.status";
+forward no;
+peer discovery no;
+punch control relay yes;
+punch max sockets 25;
+punch max packets 800;
+peer "a" { key "$PUB_A"; transport udp; hole-punch udp; punch symmetric yes; }
+peer "b" { key "$PUB_B"; transport udp; hole-punch udp; punch symmetric yes; }
+EOF
+}
+
 start_fake_stun() {
+	local mode=${1:-symmetric_to_cone}
+
 	rm -f "$WORK/stun.ready"
 	: > "$WORK/stun.log"
 
-	ip netns exec "$NS_C" python3 - "$WORK/stun.ready" > "$WORK/stun.log" 2>&1 <<'PY' &
+	ip netns exec "$NS_C" python3 - "$WORK/stun.ready" "$mode" > "$WORK/stun.log" 2>&1 <<'PY' &
 import select
 import signal
 import socket
@@ -383,6 +456,7 @@ import sys
 COOKIE = 0x2112A442
 SERVER_IP = "10.52.0.1"
 READY = sys.argv[1]
+MODE = sys.argv[2]
 running = True
 easy_counters = {}
 
@@ -399,6 +473,11 @@ def mapped_endpoint(source):
         counter = easy_counters.get(ip, 0)
         easy_counters[ip] = counter + 1
         return ip, 41100 + counter
+
+    if MODE == "both_easy" and ip == "10.52.0.3":
+        counter = easy_counters.get(ip, 0)
+        easy_counters[ip] = counter + 1
+        return ip, 42163 - counter
 
     if ip == "10.52.0.3":
         return ip, 11001
@@ -525,7 +604,22 @@ wait_for_symmetric_to_cone_path() {
 	return 1
 }
 
-printf '1..4\n'
+wait_for_both_easy_symmetric_path() {
+	for _ in $(seq 1 120); do
+		sleep 0.5
+		check_fastds_alive
+		dump_statuses
+
+		if [[ -f "$WORK/a.json" && -f "$WORK/b.json" && -f "$WORK/c.json" ]] &&
+			both_easy_nat_types_seen && direct_hole_punched && punch_results_seen; then
+			return 0
+		fi
+	done
+
+	return 1
+}
+
+printf '1..5\n'
 
 CURRENT_TEST=1
 write_c_conf no
@@ -633,3 +727,44 @@ if [[ "$ok" != true ]]; then
 fi
 
 printf 'ok 4 - easy-symmetric NAT peer punches directly to a full-cone NAT peer\n'
+
+CURRENT_TEST=5
+stop_fastds
+stop_stun
+start_fake_stun both_easy
+run ip netns exec "$NS_RA" nft insert rule ip nat postrouting ip saddr 10.52.1.2 ip daddr 10.52.0.1 udp dport 12000 snat to 10.52.0.2:41100
+run ip netns exec "$NS_RA" nft insert rule ip nat postrouting ip saddr 10.52.1.2 ip daddr 10.52.0.3 udp dport 42139-42163 snat to 10.52.0.2:41100-41124
+run ip netns exec "$NS_RB" nft insert rule ip nat postrouting ip saddr 10.52.2.2 ip daddr 10.52.0.1 udp dport 12000 snat to 10.52.0.3:42163
+run ip netns exec "$NS_RB" nft insert rule ip nat postrouting ip saddr 10.52.2.2 ip daddr 10.52.0.2 udp dport 41100-41124 snat to 10.52.0.3:42139-42163
+run ip netns exec "$NS_RA" nft add rule ip nat prerouting iifname pub udp dport 41100-41124 dnat to 10.52.1.2:12001
+run ip netns exec "$NS_RB" nft add rule ip nat prerouting iifname pub udp dport 42139-42163 dnat to 10.52.2.2:12001
+write_both_easy_symmetric_confs
+start_fastds
+
+if ! wait_for_both_easy_symmetric_path; then
+	fail 'easy-symmetric to easy-symmetric UDP path was not established'
+fi
+
+run ip -n "$NS_A" addr add 10.52.10.1/30 dev fda-b
+run ip -n "$NS_B" addr add 10.52.10.2/30 dev fdb-a
+run ip -n "$NS_A" link set fda-b up
+run ip -n "$NS_B" link set fdb-a up
+ip -n "$NS_A" addr show dev fda-b > "$WORK/a.ip" 2>&1 || true
+ip -n "$NS_B" addr show dev fdb-a > "$WORK/b.ip" 2>&1 || true
+sleep 1
+
+ok=false
+for _ in $(seq 1 20); do
+	if ping_direct; then
+		ok=true
+		break
+	fi
+	sleep 0.5
+done
+
+if [[ "$ok" != true ]]; then
+	dump_statuses
+	fail 'easy-symmetric to easy-symmetric direct data path failed'
+fi
+
+printf 'ok 5 - easy-symmetric NAT peers punch directly with predicted port ranges\n'
