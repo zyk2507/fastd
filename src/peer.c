@@ -769,6 +769,7 @@ static void clear_direct_candidate_cache(fastd_peer_t *peer) {
 	peer->direct_remote_timeout = FASTD_TIMEOUT_INV;
 	peer->direct_remote_source = DIRECT_CANDIDATE_REALM;
 	peer->direct_remote_exact_udp = false;
+	peer->direct_remote_udp_punch_sockets = 0;
 }
 
 /** Removes expired punch suppression entries */
@@ -832,6 +833,7 @@ static void set_direct_candidate_cache(fastd_peer_t *peer, const fastd_peer_dire
 	peer->direct_remote_timeout = candidate->timeout;
 	peer->direct_remote_source = candidate->source;
 	peer->direct_remote_exact_udp = candidate->exact_udp_punch;
+	peer->direct_remote_udp_punch_sockets = candidate->udp_punch_sockets;
 }
 
 /** Marks an established peer as direct when its address matches a direct candidate */
@@ -958,7 +960,8 @@ fastd_peer_direct_candidate_count_by_source(const fastd_peer_t *peer, fastd_peer
 
 /** Checks if an address is the currently selected punch-control direct candidate */
 bool fastd_peer_is_current_punch_control_candidate(
-	const fastd_peer_t *peer, const fastd_peer_address_t *addr, bool *exact_udp_punch) {
+	const fastd_peer_t *peer, const fastd_peer_address_t *addr, bool *exact_udp_punch,
+	unsigned *udp_punch_sockets) {
 	if (peer->direct_remote_source != DIRECT_CANDIDATE_PUNCH_CONTROL ||
 	    peer->direct_remote.sa.sa_family == AF_UNSPEC || fastd_timed_out(peer->direct_remote_timeout) ||
 	    !fastd_peer_address_equal(&peer->direct_remote, addr))
@@ -966,6 +969,8 @@ bool fastd_peer_is_current_punch_control_candidate(
 
 	if (exact_udp_punch)
 		*exact_udp_punch = peer->direct_remote_exact_udp;
+	if (udp_punch_sockets)
+		*udp_punch_sockets = peer->direct_remote_udp_punch_sockets;
 
 	return true;
 }
@@ -973,7 +978,7 @@ bool fastd_peer_is_current_punch_control_candidate(
 /** Checks if an address is the currently selected exact-UDP punch-control direct candidate */
 bool fastd_peer_is_current_punch_candidate(const fastd_peer_t *peer, const fastd_peer_address_t *addr) {
 	bool exact_udp_punch = false;
-	return fastd_peer_is_current_punch_control_candidate(peer, addr, &exact_udp_punch) && exact_udp_punch;
+	return fastd_peer_is_current_punch_control_candidate(peer, addr, &exact_udp_punch, NULL) && exact_udp_punch;
 }
 
 /** Checks if a punch-control candidate endpoint is temporarily suppressed */
@@ -1060,6 +1065,8 @@ void fastd_peer_add_direct_candidate_source(
 	}
 	if (source != DIRECT_CANDIDATE_PUNCH_CONTROL)
 		candidate->exact_udp_punch = false;
+	if (source != DIRECT_CANDIDATE_PUNCH_CONTROL)
+		candidate->udp_punch_sockets = 0;
 
 	for (i = 0; i < n_macs; i++)
 		add_direct_mac(peer, macs[i]);
@@ -1096,7 +1103,8 @@ void fastd_peer_add_direct_candidate(
 
 /** Adds or refreshes a punch-control direct endpoint for a peer */
 void fastd_peer_add_punch_control_candidate(
-	fastd_peer_t *peer, const fastd_peer_address_t *remote_addr, uint8_t priority, bool exact_udp_punch) {
+	fastd_peer_t *peer, const fastd_peer_address_t *remote_addr, uint8_t priority, bool exact_udp_punch,
+	unsigned udp_punch_sockets) {
 	if (!fastd_peer_is_established(peer) && fastd_peer_punch_candidate_suppressed(peer, remote_addr)) {
 		ctx.punch_direct_suppressed++;
 		pr_debug("suppressing punch-control candidate for %P[%I] after recent failures", peer, remote_addr);
@@ -1112,6 +1120,7 @@ void fastd_peer_add_punch_control_candidate(
 		if (candidate->source == DIRECT_CANDIDATE_PUNCH_CONTROL &&
 		    direct_candidate_equal(candidate, NULL, remote_addr)) {
 			candidate->exact_udp_punch = exact_udp_punch;
+			candidate->udp_punch_sockets = udp_punch_sockets;
 			set_direct_candidate_cache(peer, candidate);
 			return;
 		}

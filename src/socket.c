@@ -1057,6 +1057,33 @@ static fastd_socket_t *find_udp_hole_punch_socket(fastd_peer_t *peer, const fast
 	return NULL;
 }
 
+/** Counts existing UDP punch sockets for a peer and remote candidate */
+static size_t count_udp_hole_punch_sockets(fastd_peer_t *peer, const fastd_peer_address_t *remote_addr) {
+	size_t count = 0;
+	size_t i;
+	for (i = 0; i < VECTOR_LEN(ctx.udp_punch_socks); i++) {
+		fastd_socket_t *sock = VECTOR_INDEX(ctx.udp_punch_socks, i);
+
+		if (sock->hole_punch_peer == peer && fastd_peer_address_equal(&sock->peer_addr, remote_addr))
+			count++;
+	}
+
+	return count;
+}
+
+/** Sends a UDP punch handshake from one socket */
+static bool
+udp_punch_send_from_socket(fastd_socket_t *sock, const fastd_peer_address_t *remote_addr, const fastd_buffer_t *buffer) {
+	ssize_t ret = sendto(sock->fd.fd, buffer->data, buffer->len, 0, &remote_addr->sa, address_len(remote_addr));
+	if (ret < 0) {
+		pr_debug2_errno("UDP punch sendto");
+		return false;
+	}
+
+	ctx.punch_udp_exact_tx++;
+	return true;
+}
+
 /** Opens a UDP socket for active UDP hole punching with a selected local source port */
 static fastd_socket_t *
 open_udp_hole_punch_socket_local(fastd_peer_t *peer, const fastd_peer_address_t *remote_addr, uint16_t local_port) {
@@ -1110,14 +1137,36 @@ udp_punch_send_exact(fastd_peer_t *peer, const fastd_peer_address_t *remote_addr
 	if (!sock)
 		return false;
 
-	ssize_t ret = sendto(sock->fd.fd, buffer->data, buffer->len, 0, &remote_addr->sa, address_len(remote_addr));
-	if (ret < 0) {
-		pr_debug2_errno("UDP exact punch sendto");
-		return false;
+	return udp_punch_send_from_socket(sock, remote_addr, buffer);
+}
+
+/** Sends handshakes from an ephemeral UDP punch socket array to one endpoint */
+static bool
+udp_punch_send_socket_array(fastd_peer_t *peer, const fastd_peer_address_t *remote_addr, const fastd_buffer_t *buffer,
+			    unsigned socket_count) {
+	if (socket_count <= 1)
+		return udp_punch_send_exact(peer, remote_addr, buffer);
+
+	bool sent = false;
+
+	size_t i;
+	for (i = 0; i < VECTOR_LEN(ctx.udp_punch_socks); i++) {
+		fastd_socket_t *sock = VECTOR_INDEX(ctx.udp_punch_socks, i);
+		if (sock->hole_punch_peer == peer && fastd_peer_address_equal(&sock->peer_addr, remote_addr))
+			sent |= udp_punch_send_from_socket(sock, remote_addr, buffer);
 	}
 
-	ctx.punch_udp_exact_tx++;
-	return true;
+	size_t existing = count_udp_hole_punch_sockets(peer, remote_addr);
+	while (existing < socket_count) {
+		fastd_socket_t *sock = open_udp_hole_punch_socket_local(peer, remote_addr, 0);
+		if (!sock)
+			break;
+
+		existing++;
+		sent |= udp_punch_send_from_socket(sock, remote_addr, buffer);
+	}
+
+	return sent;
 }
 
 /** Sends an initial handshake on deterministic UDP hole punching candidates */
@@ -1134,8 +1183,9 @@ bool fastd_udp_punch_send(
 		return false;
 
 	bool exact_udp_punch = false;
-	if (fastd_peer_is_current_punch_control_candidate(peer, remote_addr, &exact_udp_punch))
-		return exact_udp_punch ? udp_punch_send_exact(peer, remote_addr, buffer) : false;
+	unsigned udp_punch_sockets = 0;
+	if (fastd_peer_is_current_punch_control_candidate(peer, remote_addr, &exact_udp_punch, &udp_punch_sockets))
+		return exact_udp_punch ? udp_punch_send_socket_array(peer, remote_addr, buffer, udp_punch_sockets) : false;
 
 	uint16_t ports[FASTD_HOLE_PUNCH_NUM_PORTS * FASTD_HOLE_PUNCH_BUCKETS];
 	size_t n_ports = fastd_hole_punch_generate_ports(ports, array_size(ports), time(NULL));

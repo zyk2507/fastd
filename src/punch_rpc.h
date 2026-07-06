@@ -23,4 +23,8 @@ size_t fastd_punch_test_build_endpoint_candidates(
 
 bool fastd_punch_test_parse_endpoint_message(const uint8_t *data, size_t len, uint8_t *type, size_t *key_len);
 
+unsigned fastd_punch_test_udp_socket_count(fastd_peer_t *peer, fastd_nat_type_t remote_nat_type);
+unsigned fastd_punch_test_udp_socket_count_for_nat(
+	fastd_peer_t *peer, fastd_nat_type_t remote_nat_type, bool local_available, fastd_nat_type_t local_nat_type);
+
 #endif

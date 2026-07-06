@@ -423,6 +423,42 @@ static void test_peer_punch_symmetric_inherits_and_overrides(void **state UNUSED
 	conf.punch_hard_symmetric = false;
 }
 
+static void test_punch_socket_count_policy(void **state UNUSED) {
+	fastd_peer_t peer = {};
+
+	conf.punch_symmetric = true;
+	conf.punch_hard_symmetric = false;
+	conf.punch_max_sockets = 25;
+
+	assert_int_equal(
+		fastd_punch_test_udp_socket_count_for_nat(
+			&peer, FASTD_NAT_SYMMETRIC_EASY_INC, false, FASTD_NAT_UNKNOWN),
+		1);
+	assert_int_equal(
+		fastd_punch_test_udp_socket_count_for_nat(&peer, FASTD_NAT_SYMMETRIC, false, FASTD_NAT_UNKNOWN),
+		0);
+
+	peer.punch_hard_symmetric = FASTD_TRISTATE_TRUE;
+	assert_int_equal(
+		fastd_punch_test_udp_socket_count_for_nat(&peer, FASTD_NAT_SYMMETRIC, false, FASTD_NAT_UNKNOWN),
+		1);
+
+	peer.punch_hard_symmetric = FASTD_TRISTATE_UNDEF;
+	assert_int_equal(
+		fastd_punch_test_udp_socket_count_for_nat(
+			&peer, FASTD_NAT_FULL_CONE, true, FASTD_NAT_SYMMETRIC_EASY_DEC),
+		25);
+
+	peer.punch_symmetric = FASTD_TRISTATE_FALSE;
+	assert_int_equal(
+		fastd_punch_test_udp_socket_count_for_nat(
+			&peer, FASTD_NAT_SYMMETRIC_EASY_INC, true, FASTD_NAT_SYMMETRIC_EASY_INC),
+		0);
+
+	conf.punch_symmetric = false;
+	conf.punch_hard_symmetric = false;
+}
+
 int main(void) {
 #ifndef WITH_NAT_DETECT
 	printf("1..0 # Skipped: NAT detection not included\n");
@@ -455,6 +491,7 @@ int main(void) {
 		cmocka_unit_test(test_punch_suppresses_failed_endpoint_temporarily),
 		cmocka_unit_test(test_punch_suppression_is_bounded),
 		cmocka_unit_test(test_peer_punch_symmetric_inherits_and_overrides),
+		cmocka_unit_test(test_punch_socket_count_policy),
 	};
 
 	return cmocka_run_group_tests(tests, NULL, NULL);

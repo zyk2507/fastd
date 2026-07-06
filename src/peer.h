@@ -54,6 +54,7 @@ typedef struct fastd_peer_direct_candidate {
 	uint8_t priority;                            /**< Selection priority */
 	fastd_peer_direct_candidate_source_t source; /**< Candidate source */
 	bool exact_udp_punch;                        /**< Send UDP handshakes from a short-lived exact punch socket */
+	unsigned udp_punch_sockets;                  /**< Number of short-lived UDP sockets to use for punch handshakes */
 } fastd_peer_direct_candidate_t;
 
 /** One temporarily suppressed punch endpoint after failed direct attempts */
@@ -114,6 +115,7 @@ struct fastd_peer {
 	bool direct_established; /**< true if the current session was established using a direct candidate */
 	fastd_peer_direct_candidate_source_t direct_remote_source; /**< Source of the cached direct endpoint */
 	bool direct_remote_exact_udp;                            /**< true if cached endpoint uses exact UDP punching */
+	unsigned direct_remote_udp_punch_sockets;                /**< Number of cached UDP punch sockets to use */
 	VECTOR(fastd_peer_direct_candidate_t) direct_candidates; /**< Direct endpoint candidates */
 	VECTOR(fastd_peer_punch_suppression_t) punch_suppressions; /**< Failed punch endpoints under cooldown */
 	fastd_timeout_t next_discovery_announce;                 /**< Rate limit for relay endpoint announcements */
@@ -214,13 +216,14 @@ void fastd_peer_add_direct_candidate_source(
 	fastd_peer_t *peer, fastd_peer_t *relay, const fastd_peer_address_t *remote_addr, const fastd_eth_addr_t *macs,
 	size_t n_macs, fastd_peer_direct_candidate_source_t source, uint8_t priority);
 void fastd_peer_add_punch_control_candidate(
-	fastd_peer_t *peer, const fastd_peer_address_t *remote_addr, uint8_t priority, bool exact_udp_punch);
+	fastd_peer_t *peer, const fastd_peer_address_t *remote_addr, uint8_t priority, bool exact_udp_punch,
+	unsigned udp_punch_sockets);
 bool fastd_peer_has_direct_candidate(const fastd_peer_t *peer);
 size_t fastd_peer_direct_candidate_count(const fastd_peer_t *peer);
 size_t
 fastd_peer_direct_candidate_count_by_source(const fastd_peer_t *peer, fastd_peer_direct_candidate_source_t source);
 bool fastd_peer_is_current_punch_control_candidate(
-	const fastd_peer_t *peer, const fastd_peer_address_t *addr, bool *exact_udp_punch);
+	const fastd_peer_t *peer, const fastd_peer_address_t *addr, bool *exact_udp_punch, unsigned *udp_punch_sockets);
 bool fastd_peer_is_current_punch_candidate(const fastd_peer_t *peer, const fastd_peer_address_t *addr);
 bool fastd_peer_punch_candidate_suppressed(const fastd_peer_t *peer, const fastd_peer_address_t *addr);
 size_t fastd_peer_punch_suppression_count(const fastd_peer_t *peer);

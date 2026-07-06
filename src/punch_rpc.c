@@ -260,17 +260,49 @@ static int easy_symmetric_step(int port_delta) {
 	return port_delta;
 }
 
-/** Returns true when a punch endpoint is a symmetric-NAT port prediction */
-static bool nat_type_needs_exact_udp(fastd_nat_type_t nat_type) {
+/** Returns true for local NAT types that benefit from opening a UDP punch socket array */
+static bool nat_type_uses_local_socket_array(fastd_nat_type_t nat_type, bool hard_symmetric) {
 	switch (nat_type) {
-	case FASTD_NAT_SYMMETRIC:
 	case FASTD_NAT_SYMMETRIC_EASY_INC:
 	case FASTD_NAT_SYMMETRIC_EASY_DEC:
 		return true;
 
+	case FASTD_NAT_SYMMETRIC:
+		return hard_symmetric;
+
 	default:
 		return false;
 	}
+}
+
+/** Returns the number of UDP sockets to use for one punch command with known NAT metadata */
+static unsigned punch_udp_socket_count_for_nat(
+	fastd_peer_t *peer, fastd_nat_type_t remote_nat_type, bool local_available, fastd_nat_type_t local_nat_type) {
+	if (!fastd_peer_get_punch_symmetric(peer))
+		return 0;
+
+	if (remote_nat_type == FASTD_NAT_SYMMETRIC)
+		return fastd_peer_get_punch_hard_symmetric(peer) ? 1 : 0;
+
+	if (remote_nat_type == FASTD_NAT_SYMMETRIC_EASY_INC || remote_nat_type == FASTD_NAT_SYMMETRIC_EASY_DEC)
+		return 1;
+
+	if (!local_available)
+		return 0;
+
+	if (!nat_type_uses_local_socket_array(local_nat_type, fastd_peer_get_punch_hard_symmetric(peer)))
+		return 0;
+
+	return conf.punch_max_sockets ? conf.punch_max_sockets : 1;
+}
+
+/** Returns the number of short-lived UDP sockets to use for one punch command */
+static unsigned punch_udp_socket_count(fastd_peer_t *peer, fastd_nat_type_t remote_nat_type) {
+	fastd_nat_status_t status;
+	if (!fastd_nat_get_status(&status) || !status.available)
+		return punch_udp_socket_count_for_nat(peer, remote_nat_type, false, FASTD_NAT_UNKNOWN);
+
+	return punch_udp_socket_count_for_nat(peer, remote_nat_type, true, status.type);
 }
 
 /** Adds one endpoint candidate to a bounded output array */
@@ -365,6 +397,17 @@ bool fastd_punch_test_parse_endpoint_message(const uint8_t *data, size_t len, ui
 		*key_len = payload->key_len;
 
 	return true;
+}
+
+/** Test wrapper for punch UDP socket count policy */
+unsigned fastd_punch_test_udp_socket_count(fastd_peer_t *peer, fastd_nat_type_t remote_nat_type) {
+	return punch_udp_socket_count(peer, remote_nat_type);
+}
+
+/** Test wrapper for punch UDP socket count policy with explicit local NAT type */
+unsigned fastd_punch_test_udp_socket_count_for_nat(
+	fastd_peer_t *peer, fastd_nat_type_t remote_nat_type, bool local_available, fastd_nat_type_t local_nat_type) {
+	return punch_udp_socket_count_for_nat(peer, remote_nat_type, local_available, local_nat_type);
 }
 
 #endif
@@ -481,8 +524,10 @@ static void handle_send_cone(fastd_peer_t *sender, const fastd_punch_endpoint_t 
 	if (!decode_address(&endpoint, payload))
 		return;
 
-	bool exact_udp_punch = fastd_peer_get_punch_symmetric(peer) && nat_type_needs_exact_udp(payload->nat_type);
-	fastd_peer_add_punch_control_candidate(peer, &endpoint, FASTD_PUNCH_CANDIDATE_PRIORITY, exact_udp_punch);
+	unsigned udp_punch_sockets = punch_udp_socket_count(peer, payload->nat_type);
+	bool exact_udp_punch = udp_punch_sockets > 0;
+	fastd_peer_add_punch_control_candidate(
+		peer, &endpoint, FASTD_PUNCH_CANDIDATE_PRIORITY, exact_udp_punch, udp_punch_sockets);
 	if (fastd_peer_send_direct_handshake(peer, &endpoint))
 		ctx.punch_direct_handshakes++;
 
