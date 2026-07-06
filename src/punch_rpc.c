@@ -19,6 +19,9 @@
 #define FASTD_PUNCH_NAT_INFO 1
 #define FASTD_PUNCH_SEND_CONE 2
 #define FASTD_PUNCH_RESULT 3
+#define FASTD_PUNCH_SEND_EASY_SYM 4
+#define FASTD_PUNCH_SEND_HARD_SYM 5
+#define FASTD_PUNCH_BOTH_EASY_SYM 6
 
 #define FASTD_PUNCH_ANNOUNCE_INTERVAL 15000
 #define FASTD_PUNCH_RELAY_INTERVAL 10000
@@ -180,6 +183,70 @@ static bool get_peer_endpoint(const fastd_peer_t *peer, fastd_peer_address_t *en
 	}
 
 	return false;
+}
+
+/** Returns true if a NAT type has a predictable symmetric port direction */
+static bool nat_type_is_easy_symmetric(fastd_nat_type_t nat_type) {
+	return nat_type == FASTD_NAT_SYMMETRIC_EASY_INC || nat_type == FASTD_NAT_SYMMETRIC_EASY_DEC;
+}
+
+/** Returns true if a peer has fresh punch NAT metadata */
+static bool peer_has_fresh_punch_nat_info(const fastd_peer_t *peer) {
+	return peer->punch_endpoint.sa.sa_family != AF_UNSPEC && !fastd_timed_out(peer->punch_timeout);
+}
+
+/** Returns true for endpoint punch command message types */
+static bool punch_type_is_endpoint_command(uint8_t type) {
+	switch (type) {
+	case FASTD_PUNCH_SEND_CONE:
+	case FASTD_PUNCH_SEND_EASY_SYM:
+	case FASTD_PUNCH_SEND_HARD_SYM:
+	case FASTD_PUNCH_BOTH_EASY_SYM:
+		return true;
+
+	default:
+		return false;
+	}
+}
+
+/** Returns a human-readable endpoint punch command name */
+static const char *punch_command_type_name(uint8_t type) {
+	switch (type) {
+	case FASTD_PUNCH_SEND_CONE:
+		return "cone";
+
+	case FASTD_PUNCH_SEND_EASY_SYM:
+		return "easy-symmetric";
+
+	case FASTD_PUNCH_SEND_HARD_SYM:
+		return "hard-symmetric";
+
+	case FASTD_PUNCH_BOTH_EASY_SYM:
+		return "both-easy-symmetric";
+
+	default:
+		return "unknown";
+	}
+}
+
+/** Selects the most specific endpoint punch command type for a relayed endpoint */
+static uint8_t punch_endpoint_command_type(
+	const fastd_peer_t *dest, const fastd_peer_t *subject, fastd_nat_type_t subject_nat_type) {
+	if (!fastd_peer_get_punch_symmetric(subject))
+		return FASTD_PUNCH_SEND_CONE;
+
+	if (nat_type_is_easy_symmetric(subject_nat_type)) {
+		if (fastd_peer_get_punch_symmetric(dest) && peer_has_fresh_punch_nat_info(dest) &&
+		    nat_type_is_easy_symmetric(dest->punch_nat_type))
+			return FASTD_PUNCH_BOTH_EASY_SYM;
+
+		return FASTD_PUNCH_SEND_EASY_SYM;
+	}
+
+	if (subject_nat_type == FASTD_NAT_SYMMETRIC && fastd_peer_get_punch_hard_symmetric(subject))
+		return FASTD_PUNCH_SEND_HARD_SYM;
+
+	return FASTD_PUNCH_SEND_CONE;
 }
 
 /** Sends one endpoint punch control message */
@@ -420,13 +487,25 @@ unsigned fastd_punch_test_udp_socket_count_for_nat(
 	return punch_udp_socket_count_for_nat(peer, remote_nat_type, local_available, local_nat_type);
 }
 
+/** Test wrapper for punch command type classification */
+uint8_t
+fastd_punch_test_endpoint_command_type(fastd_peer_t *dest, fastd_peer_t *subject, fastd_nat_type_t subject_nat_type) {
+	return punch_endpoint_command_type(dest, subject, subject_nat_type);
+}
+
+/** Test wrapper for endpoint punch command type detection */
+bool fastd_punch_test_is_endpoint_command_type(uint8_t type) {
+	return punch_type_is_endpoint_command(type);
+}
+
 #endif
 
-/** Sends one concrete endpoint candidate as a cone punching command */
+/** Sends one concrete endpoint candidate as a punching command */
 static bool relay_one_endpoint_to_peer(
-	fastd_peer_t *dest, fastd_peer_t *subject, const fastd_peer_address_t *endpoint, fastd_nat_type_t nat_type) {
+	fastd_peer_t *dest, fastd_peer_t *subject, const fastd_peer_address_t *endpoint, fastd_nat_type_t nat_type,
+	uint8_t command_type) {
 	return send_endpoint_message(
-		dest, FASTD_PUNCH_SEND_CONE, conf.protocol->get_peer_key(subject), conf.protocol->key_length(),
+		dest, command_type, conf.protocol->get_peer_key(subject), conf.protocol->key_length(),
 		endpoint, nat_type, subject->punch_min_port, subject->punch_max_port, subject->punch_port_delta, 0);
 }
 
@@ -463,10 +542,11 @@ static size_t relay_endpoint_to_peer(fastd_peer_t *dest, fastd_peer_t *subject, 
 		candidates, count, &endpoint, nat_type, subject->punch_port_delta, conf.punch_max_sockets,
 		fastd_peer_get_punch_symmetric(subject), fastd_peer_get_punch_hard_symmetric(subject));
 
+	uint8_t command_type = punch_endpoint_command_type(dest, subject, nat_type);
 	size_t sent = 0;
 	size_t i;
 	for (i = 0; i < n_candidates; i++) {
-		if (relay_one_endpoint_to_peer(dest, subject, &candidates[i], nat_type))
+		if (relay_one_endpoint_to_peer(dest, subject, &candidates[i], nat_type, command_type))
 			sent++;
 	}
 
@@ -526,8 +606,8 @@ static void handle_nat_info(fastd_peer_t *sender, const fastd_punch_endpoint_t *
 		&endpoint);
 }
 
-/** Handles a cone punching command */
-static void handle_send_cone(fastd_peer_t *sender, const fastd_punch_endpoint_t *payload) {
+/** Handles an endpoint punching command */
+static void handle_send_endpoint_command(fastd_peer_t *sender, const fastd_punch_endpoint_t *payload, uint8_t type) {
 	size_t key_len = conf.protocol->key_length();
 	if (payload->key_len != key_len)
 		return;
@@ -563,7 +643,9 @@ static void handle_send_cone(fastd_peer_t *sender, const fastd_punch_endpoint_t 
 		send_punch_result(sender, key, key_len, &endpoint, FASTD_PUNCH_RESULT_ACCEPTED);
 	}
 
-	pr_debug("received punch cone command from %P for %P[%I]", sender, peer, &endpoint);
+	pr_debug(
+		"received punch %s command from %P for %P[%I]", punch_command_type_name(type), sender, peer,
+		&endpoint);
 }
 
 /** Handles a punch command result from another peer */
@@ -638,7 +720,11 @@ bool fastd_punch_handle_control(fastd_peer_t *peer, fastd_buffer_t *buffer) {
 		break;
 
 	case FASTD_PUNCH_SEND_CONE:
-		handle_send_cone(peer, payload);
+	case FASTD_PUNCH_SEND_EASY_SYM:
+	case FASTD_PUNCH_SEND_HARD_SYM:
+	case FASTD_PUNCH_BOTH_EASY_SYM:
+		if (punch_type_is_endpoint_command(type))
+			handle_send_endpoint_command(peer, payload, type);
 		break;
 
 	case FASTD_PUNCH_RESULT:

@@ -42,6 +42,14 @@ typedef struct __attribute__((packed)) test_punch_message {
 	uint8_t key[4];
 } test_punch_message_t;
 
+enum {
+	TEST_PUNCH_SEND_CONE = 2,
+	TEST_PUNCH_RESULT = 3,
+	TEST_PUNCH_SEND_EASY_SYM = 4,
+	TEST_PUNCH_SEND_HARD_SYM = 5,
+	TEST_PUNCH_BOTH_EASY_SYM = 6,
+};
+
 static fastd_peer_address_t addr4(uint32_t ip, uint16_t port) {
 	fastd_peer_address_t ret = {};
 
@@ -66,7 +74,7 @@ static test_punch_message_t make_punch_message(void) {
 
 	memcpy(msg.header.magic, "fpch", 4);
 	msg.header.version = 1;
-	msg.header.type = 2;
+	msg.header.type = TEST_PUNCH_SEND_CONE;
 	msg.header.length = htobe16(sizeof(msg));
 	msg.endpoint.key_len = sizeof(msg.key);
 	msg.endpoint.address_family = 4;
@@ -333,21 +341,44 @@ static void test_punch_parses_valid_message(void **state UNUSED) {
 	size_t key_len = 0;
 
 	assert_true(fastd_punch_test_parse_endpoint_message((const uint8_t *)&msg, sizeof(msg), &type, &key_len));
-	assert_int_equal(type, 2);
+	assert_int_equal(type, TEST_PUNCH_SEND_CONE);
 	assert_int_equal(key_len, 4);
 }
 
 static void test_punch_parses_result_message(void **state UNUSED) {
 	test_punch_message_t msg = make_punch_message();
-	msg.header.type = 3;
+	msg.header.type = TEST_PUNCH_RESULT;
 	msg.endpoint.reserved = 3;
 
 	uint8_t type = 0;
 	size_t key_len = 0;
 
 	assert_true(fastd_punch_test_parse_endpoint_message((const uint8_t *)&msg, sizeof(msg), &type, &key_len));
-	assert_int_equal(type, 3);
+	assert_int_equal(type, TEST_PUNCH_RESULT);
 	assert_int_equal(key_len, 4);
+}
+
+static void test_punch_parses_all_endpoint_command_messages(void **state UNUSED) {
+	static const uint8_t command_types[] = {
+		TEST_PUNCH_SEND_CONE,
+		TEST_PUNCH_SEND_EASY_SYM,
+		TEST_PUNCH_SEND_HARD_SYM,
+		TEST_PUNCH_BOTH_EASY_SYM,
+	};
+
+	size_t i;
+	for (i = 0; i < array_size(command_types); i++) {
+		test_punch_message_t msg = make_punch_message();
+		msg.header.type = command_types[i];
+
+		uint8_t type = 0;
+		size_t key_len = 0;
+
+		assert_true(fastd_punch_test_parse_endpoint_message((const uint8_t *)&msg, sizeof(msg), &type, &key_len));
+		assert_true(fastd_punch_test_is_endpoint_command_type(type));
+		assert_int_equal(type, command_types[i]);
+		assert_int_equal(key_len, 4);
+	}
 }
 
 static void test_punch_rejects_bad_magic(void **state UNUSED) {
@@ -472,6 +503,43 @@ static void test_punch_socket_count_policy(void **state UNUSED) {
 	conf.punch_hard_symmetric = false;
 }
 
+static void test_punch_selects_endpoint_command_types(void **state UNUSED) {
+	fastd_peer_t dest = {};
+	fastd_peer_t subject = {};
+
+	ctx.now = 1000;
+	conf.punch_symmetric = true;
+	conf.punch_hard_symmetric = false;
+
+	assert_int_equal(
+		fastd_punch_test_endpoint_command_type(&dest, &subject, FASTD_NAT_FULL_CONE),
+		TEST_PUNCH_SEND_CONE);
+	assert_int_equal(
+		fastd_punch_test_endpoint_command_type(&dest, &subject, FASTD_NAT_SYMMETRIC_EASY_INC),
+		TEST_PUNCH_SEND_EASY_SYM);
+
+	subject.punch_hard_symmetric = FASTD_TRISTATE_TRUE;
+	assert_int_equal(
+		fastd_punch_test_endpoint_command_type(&dest, &subject, FASTD_NAT_SYMMETRIC),
+		TEST_PUNCH_SEND_HARD_SYM);
+
+	subject.punch_hard_symmetric = FASTD_TRISTATE_UNDEF;
+	dest.punch_endpoint = addr4(0xcb007107, 43000);
+	dest.punch_nat_type = FASTD_NAT_SYMMETRIC_EASY_DEC;
+	dest.punch_timeout = ctx.now + 1000;
+	assert_int_equal(
+		fastd_punch_test_endpoint_command_type(&dest, &subject, FASTD_NAT_SYMMETRIC_EASY_INC),
+		TEST_PUNCH_BOTH_EASY_SYM);
+
+	subject.punch_symmetric = FASTD_TRISTATE_FALSE;
+	assert_int_equal(
+		fastd_punch_test_endpoint_command_type(&dest, &subject, FASTD_NAT_SYMMETRIC_EASY_INC),
+		TEST_PUNCH_SEND_CONE);
+
+	conf.punch_symmetric = false;
+	conf.punch_hard_symmetric = false;
+}
+
 int main(void) {
 #ifndef WITH_NAT_DETECT
 	printf("1..0 # Skipped: NAT detection not included\n");
@@ -498,6 +566,7 @@ int main(void) {
 		cmocka_unit_test(test_punch_respects_output_limit),
 		cmocka_unit_test(test_punch_parses_valid_message),
 		cmocka_unit_test(test_punch_parses_result_message),
+		cmocka_unit_test(test_punch_parses_all_endpoint_command_messages),
 		cmocka_unit_test(test_punch_rejects_bad_magic),
 		cmocka_unit_test(test_punch_rejects_bad_version),
 		cmocka_unit_test(test_punch_rejects_bad_length),
@@ -506,6 +575,7 @@ int main(void) {
 		cmocka_unit_test(test_punch_suppression_is_bounded),
 		cmocka_unit_test(test_peer_punch_symmetric_inherits_and_overrides),
 		cmocka_unit_test(test_punch_socket_count_policy),
+		cmocka_unit_test(test_punch_selects_endpoint_command_types),
 	};
 
 	return cmocka_run_group_tests(tests, NULL, NULL);

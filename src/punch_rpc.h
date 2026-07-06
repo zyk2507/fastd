@@ -26,5 +26,8 @@ bool fastd_punch_test_parse_endpoint_message(const uint8_t *data, size_t len, ui
 unsigned fastd_punch_test_udp_socket_count(fastd_peer_t *peer, fastd_nat_type_t remote_nat_type);
 unsigned fastd_punch_test_udp_socket_count_for_nat(
 	fastd_peer_t *peer, fastd_nat_type_t remote_nat_type, bool local_available, fastd_nat_type_t local_nat_type);
+uint8_t
+fastd_punch_test_endpoint_command_type(fastd_peer_t *dest, fastd_peer_t *subject, fastd_nat_type_t subject_nat_type);
+bool fastd_punch_test_is_endpoint_command_type(uint8_t type);
 
 #endif
