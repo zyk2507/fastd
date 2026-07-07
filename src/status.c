@@ -608,23 +608,19 @@ static void print_hole_punch_table(json_object *peers) {
 	ft_table_t *table = create_status_table();
 	size_t row = ft_cur_row(table);
 	ft_write_ln(
-		table, "Peer", "State", "Mode", "Transport", "Local port", "Remote port", "Direct candidates",
-		"Punch candidates", "Backup", "Symmetric");
+		table, "Peer", "State", "Reason", "Mode", "Transport", "Local port", "Remote port",
+		"Direct candidates", "Punch candidates", "Backup", "Symmetric");
 	mark_header_row(table, row);
-	ft_set_cell_prop(table, FT_ANY_ROW, 4, FT_CPROP_TEXT_ALIGN, FT_ALIGNED_RIGHT);
 	ft_set_cell_prop(table, FT_ANY_ROW, 5, FT_CPROP_TEXT_ALIGN, FT_ALIGNED_RIGHT);
 	ft_set_cell_prop(table, FT_ANY_ROW, 6, FT_CPROP_TEXT_ALIGN, FT_ALIGNED_RIGHT);
 	ft_set_cell_prop(table, FT_ANY_ROW, 7, FT_CPROP_TEXT_ALIGN, FT_ALIGNED_RIGHT);
 	ft_set_cell_prop(table, FT_ANY_ROW, 8, FT_CPROP_TEXT_ALIGN, FT_ALIGNED_RIGHT);
+	ft_set_cell_prop(table, FT_ANY_ROW, 9, FT_CPROP_TEXT_ALIGN, FT_ALIGNED_RIGHT);
 
 	json_object_object_foreach(peers, key, peer) {
 		json_object *hole_punch = get_object_member(peer, "hole_punch");
 		if (!hole_punch)
 			continue;
-
-		bool established = get_bool_member(hole_punch, "established");
-		bool enabled = get_bool_member(hole_punch, "enabled");
-		const char *state = established ? "established" : (enabled ? "enabled" : "off");
 
 		char local_port[32], remote_port[32], direct_candidates[32], punch_candidates[32], backup[64];
 		format_peer_port(local_port, hole_punch, "local_port");
@@ -642,7 +638,8 @@ static void print_hole_punch_table(json_object *peers) {
 		}
 
 		ft_write_ln(
-			table, peer_display_name(key, peer), state,
+			table, peer_display_name(key, peer), value_or_dash(get_string_member(hole_punch, "path_state")),
+			value_or_dash(get_string_member(hole_punch, "reason")),
 			value_or_dash(get_string_member(hole_punch, "mode")),
 			value_or_dash(get_string_member(hole_punch, "transport")), local_port, remote_port,
 			direct_candidates, punch_candidates, backup, onoff(get_bool_member(hole_punch, "symmetric")));
@@ -892,23 +889,23 @@ static const char *punch_pair_task_stage_name(fastd_punch_pair_task_stage_t stag
 	case PUNCH_PAIR_TASK_STAGE_LAUNCHED:
 		return "launched";
 
-		case PUNCH_PAIR_TASK_STAGE_WAITING:
-			return "waiting";
+	case PUNCH_PAIR_TASK_STAGE_WAITING:
+		return "waiting";
 
-		case PUNCH_PAIR_TASK_STAGE_IN_FLIGHT:
-			return "in-flight";
+	case PUNCH_PAIR_TASK_STAGE_IN_FLIGHT:
+		return "in-flight";
 
-		case PUNCH_PAIR_TASK_STAGE_BLACKLISTED:
-			return "blacklisted";
+	case PUNCH_PAIR_TASK_STAGE_BLACKLISTED:
+		return "blacklisted";
 
 	case PUNCH_PAIR_TASK_STAGE_SUPPRESSED:
 		return "suppressed";
 
-		case PUNCH_PAIR_TASK_STAGE_MISSING_METADATA:
-			return "missing-metadata";
+	case PUNCH_PAIR_TASK_STAGE_MISSING_METADATA:
+		return "missing-metadata";
 
-		case PUNCH_PAIR_TASK_STAGE_ABORTED:
-			return "aborted";
+	case PUNCH_PAIR_TASK_STAGE_ABORTED:
+		return "aborted";
 
 	case PUNCH_PAIR_TASK_STAGE_RESULT_ACCEPTED:
 		return "result-accepted";
@@ -1004,6 +1001,70 @@ static const char *hole_punch_mode_name(fastd_hole_punch_mode_t mode) {
 	default:
 		return "unset";
 	}
+}
+
+/** Returns the user-visible hole-punch path state for a peer */
+static const char *hole_punch_path_state(
+	bool enabled, bool established, bool verified, bool proven, bool backup_established, bool backup_verified,
+	bool backup_payload_proven) {
+	if (!enabled)
+		return "off";
+	if (established && proven && backup_established && backup_verified && backup_payload_proven)
+		return "direct-with-payload-backup";
+	if (established && verified && backup_established && backup_verified)
+		return "direct-with-backup";
+	if (established && proven)
+		return "direct-payload-proven";
+	if (established && verified)
+		return "direct-verified";
+	if (established)
+		return "direct-unverified";
+	if (backup_established && backup_verified)
+		return "backup-ready";
+	if (backup_established)
+		return "backup-unverified";
+
+	return "not-direct";
+}
+
+/** Returns the most useful reason a peer is in its current hole-punch path state */
+static const char *hole_punch_reason(
+	const fastd_peer_t *peer, bool enabled, bool established, bool verified, bool proven, bool backup_established,
+	bool backup_verified, bool backup_payload_proven) {
+	bool udp_metadata = peer_address_available(&peer->punch_endpoint) && peer->punch_timeout != FASTD_TIMEOUT_INV &&
+			    !fastd_timed_out(peer->punch_timeout);
+	bool tcp_metadata = peer_address_available(&peer->tcp_punch_endpoint) &&
+			    peer->tcp_punch_timeout != FASTD_TIMEOUT_INV &&
+			    !fastd_timed_out(peer->tcp_punch_timeout);
+
+	if (!enabled)
+		return "hole-punch-disabled";
+	if (!fastd_peer_get_nat_traversal(peer))
+		return "nat-traversal-disabled";
+	if (established && proven && backup_established && backup_verified && backup_payload_proven)
+		return "active-and-backup-payload-ready";
+	if (established && verified && backup_established && backup_verified)
+		return "active-and-backup-verified";
+	if (established && proven)
+		return "active-path-carried-payload";
+	if (established && verified)
+		return "active-path-verified";
+	if (established)
+		return "active-path-awaiting-verification";
+	if (backup_established && backup_verified)
+		return "backup-ready-for-promotion";
+	if (backup_established)
+		return "backup-awaiting-verification";
+	if (fastd_peer_punch_relay_backoff_count(peer))
+		return "relay-backoff-active";
+	if (fastd_peer_punch_suppression_count(peer))
+		return "candidate-suppressed";
+	if (fastd_peer_direct_candidate_count(peer))
+		return "candidate-awaiting-handshake";
+	if (udp_metadata || tcp_metadata)
+		return "metadata-ready";
+
+	return "missing-nat-metadata";
 }
 
 /** Dumps UDP punch metadata learned from a peer */
@@ -1208,6 +1269,16 @@ static json_object *dump_hole_punch(const fastd_peer_t *peer) {
 	json_object_object_add(ret, "backup_verified", json_object_new_boolean(backup_verified));
 	json_object_object_add(ret, "backup_payload_proven", json_object_new_boolean(peer->backup_payload_proven));
 	json_object_object_add(ret, "backup_probe_proven", json_object_new_boolean(peer->backup_probe_proven));
+	json_object_object_add(
+		ret, "path_state",
+		json_object_new_string(hole_punch_path_state(
+			mode != HOLE_PUNCH_OFF, established, verified, proven, backup_established, backup_verified,
+			peer->backup_payload_proven)));
+	json_object_object_add(
+		ret, "reason",
+		json_object_new_string(hole_punch_reason(
+			peer, mode != HOLE_PUNCH_OFF, established, verified, proven, backup_established,
+			backup_verified, peer->backup_payload_proven)));
 	json_object_object_add(ret, "symmetric", json_object_new_boolean(fastd_peer_get_punch_symmetric(peer)));
 	json_object_object_add(
 		ret, "direct_candidates", json_object_new_int64(fastd_peer_direct_candidate_count(peer)));

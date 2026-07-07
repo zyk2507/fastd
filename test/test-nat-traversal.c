@@ -1901,28 +1901,28 @@ static void test_status_hole_punch_exposes_peer_nat_metadata(void **state UNUSED
 	peer.tcp_punch_timeout = ctx.now + 7000;
 	peer.direct_remote = addr4(0xcb007105, 41001);
 	peer.direct_remote_timeout = ctx.now + 6000;
-		peer.last_punch_task = (fastd_peer_punch_task_t){
-			.id = 42,
-			.updated = ctx.now - 125,
-			.next_retry = ctx.now + 15000,
-			.endpoint = addr4(0xcb007105, 41003),
-			.role = PEER_PUNCH_TASK_ROLE_RELAY_DEST,
-			.cause = PEER_PUNCH_TASK_CAUSE_HANDSHAKE_SENT,
-			.command = PEER_PUNCH_TASK_COMMAND_HARD_SYM,
-			.result = PEER_PUNCH_TASK_RESULT_HANDSHAKE,
-			.packet_count = 84,
-			.candidate_count = 25,
+	peer.last_punch_task = (fastd_peer_punch_task_t){
+		.id = 42,
+		.updated = ctx.now - 125,
+		.next_retry = ctx.now + 15000,
+		.endpoint = addr4(0xcb007105, 41003),
+		.role = PEER_PUNCH_TASK_ROLE_RELAY_DEST,
+		.cause = PEER_PUNCH_TASK_CAUSE_HANDSHAKE_SENT,
+		.command = PEER_PUNCH_TASK_COMMAND_HARD_SYM,
+		.result = PEER_PUNCH_TASK_RESULT_HANDSHAKE,
+		.packet_count = 84,
+		.candidate_count = 25,
 		.candidates_sent = 23,
 		.order = 7,
 		.udp_punch_sockets = 84,
-			.hard_sym_port_index = 100,
-			.hard_sym_next_port_index = 125,
-			.hard_sym_round = 2,
-			.wait_window_ms = 5000,
-			.base_mapped_endpoint = addr4(0xcb007105, 43000),
-			.base_mapped_listener_id = 77,
-			.base_mapped_available = true,
-			.base_mapped_port_mapped = true,
+		.hard_sym_port_index = 100,
+		.hard_sym_next_port_index = 125,
+		.hard_sym_round = 2,
+		.wait_window_ms = 5000,
+		.base_mapped_endpoint = addr4(0xcb007105, 43000),
+		.base_mapped_listener_id = 77,
+		.base_mapped_available = true,
+		.base_mapped_port_mapped = true,
 	};
 
 	VECTOR_ADD(
@@ -1948,6 +1948,8 @@ static void test_status_hole_punch_exposes_peer_nat_metadata(void **state UNUSED
 	assert_true(json_get_bool_required(hole_punch, "nat_traversal"));
 	assert_true(json_get_bool_required(hole_punch, "enabled"));
 	assert_true(json_get_bool_required(hole_punch, "symmetric"));
+	assert_string_equal(json_get_string_required(hole_punch, "path_state"), "not-direct");
+	assert_string_equal(json_get_string_required(hole_punch, "reason"), "relay-backoff-active");
 	assert_int_equal(json_get_int_required(hole_punch, "direct_candidates"), 1);
 	assert_int_equal(json_get_int_required(hole_punch, "punch_control_candidates"), 1);
 	assert_int_equal(json_get_int_required(hole_punch, "relay_backoffs"), 1);
@@ -2034,14 +2036,14 @@ static void test_status_hole_punch_exposes_peer_nat_metadata(void **state UNUSED
 
 	struct json_object *task = json_get_object_required(hole_punch, "last_punch_task");
 	assert_true(json_get_bool_required(task, "available"));
-		assert_int_equal(json_get_int_required(task, "id"), 42);
-		assert_int_equal(json_get_int_required(task, "updated_age"), 125);
-		assert_string_equal(json_get_string_required(task, "role"), "relay-destination");
-		assert_string_equal(json_get_string_required(task, "cause"), "handshake-sent");
-		assert_string_equal(json_get_string_required(task, "command"), "hard-symmetric");
-		assert_string_equal(json_get_string_required(task, "result"), "handshake");
-		assert_int_equal(json_get_int_required(task, "next_retry_ms"), 15000);
-		assert_non_null(strstr(json_get_string_required(task, "endpoint"), "41003"));
+	assert_int_equal(json_get_int_required(task, "id"), 42);
+	assert_int_equal(json_get_int_required(task, "updated_age"), 125);
+	assert_string_equal(json_get_string_required(task, "role"), "relay-destination");
+	assert_string_equal(json_get_string_required(task, "cause"), "handshake-sent");
+	assert_string_equal(json_get_string_required(task, "command"), "hard-symmetric");
+	assert_string_equal(json_get_string_required(task, "result"), "handshake");
+	assert_int_equal(json_get_int_required(task, "next_retry_ms"), 15000);
+	assert_non_null(strstr(json_get_string_required(task, "endpoint"), "41003"));
 	assert_non_null(strstr(json_get_string_required(task, "base_mapped_endpoint"), "43000"));
 	assert_int_equal(json_get_int_required(task, "base_mapped_listener_id"), 77);
 	assert_true(json_get_bool_required(task, "base_mapped_port_mapped"));
@@ -2056,6 +2058,48 @@ static void test_status_hole_punch_exposes_peer_nat_metadata(void **state UNUSED
 	assert_int_equal(json_get_int_required(task, "hard_symmetric_round"), 2);
 
 	json_object_put(hole_punch);
+
+	fastd_peer_address_t active_local = addr4(0xcb007105, 35000);
+	fastd_peer_address_t backup_local = addr4(0xcb007105, 35001);
+	fastd_socket_t active_sock = {
+		.fd.fd = 1,
+		.type = SOCKET_TYPE_UDP,
+		.bound_addr = &active_local,
+		.hole_punch = true,
+	};
+	fastd_socket_t backup_sock = {
+		.fd.fd = 2,
+		.type = SOCKET_TYPE_UDP,
+		.bound_addr = &backup_local,
+		.hole_punch = true,
+	};
+	peer.state = STATE_ESTABLISHED;
+	peer.sock = &active_sock;
+	peer.local_address = active_local;
+	peer.address = peer.direct_remote;
+	peer.direct_established = true;
+	peer.active_path_timeout = ctx.now + 8000;
+	peer.active_path_proven_timeout = ctx.now + 9000;
+	peer.backup_sock = &backup_sock;
+	peer.backup_local_address = backup_local;
+	peer.backup_address = addr4(0xcb007105, 41005);
+	peer.backup_reset_timeout = ctx.now + 10000;
+	peer.backup_keepalive_timeout = ctx.now + 11000;
+	peer.backup_direct_established = true;
+	peer.backup_path_verified = true;
+	peer.backup_payload_proven = true;
+
+	hole_punch = fastd_status_test_dump_hole_punch(&peer);
+	assert_string_equal(json_get_string_required(hole_punch, "path_state"), "direct-with-payload-backup");
+	assert_string_equal(json_get_string_required(hole_punch, "reason"), "active-and-backup-payload-ready");
+	assert_true(json_get_bool_required(hole_punch, "established"));
+	assert_true(json_get_bool_required(hole_punch, "verified"));
+	assert_true(json_get_bool_required(hole_punch, "proven"));
+	assert_true(json_get_bool_required(hole_punch, "backup_established"));
+	assert_true(json_get_bool_required(hole_punch, "backup_verified"));
+	assert_true(json_get_bool_required(hole_punch, "backup_payload_proven"));
+	json_object_put(hole_punch);
+
 	VECTOR_FREE(peer.direct_candidates);
 	VECTOR_FREE(peer.punch_suppressions);
 	VECTOR_FREE(peer.punch_relay_backoffs);
