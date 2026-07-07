@@ -877,6 +877,9 @@ static fastd_punch_pair_state_t punch_pair_state(const fastd_peer_t *a, const fa
 	if (state.backoff)
 		state.next_retry = runtime->backoff_until;
 
+	if (state.backoff)
+		return state;
+
 	if (!state.has_metadata_a && !state.has_metadata_b) {
 		state.missing_metadata = true;
 		return state;
@@ -2721,14 +2724,15 @@ static void relay_peer_endpoints(void) {
 					false);
 				continue;
 			}
-	if (state.backoff) {
-		ctx.punch_task_manager_blacklisted++;
-		task_manager_note_next_retry(state.next_retry);
-		task_manager_record_pair_task(
-			a, b, NULL, NULL, PUNCH_PAIR_TASK_STAGE_BLACKLISTED, 0, 0, state.next_retry,
-			false);
-	}
-	if (state.waiting) {
+			if (state.backoff) {
+				ctx.punch_task_manager_blacklisted++;
+				task_manager_note_next_retry(state.next_retry);
+				task_manager_record_pair_task(
+					a, b, NULL, NULL, PUNCH_PAIR_TASK_STAGE_BLACKLISTED, 0, 0,
+					state.next_retry, false);
+				continue;
+			}
+			if (state.waiting) {
 				ctx.punch_task_manager_waiting++;
 				task_manager_note_next_retry(state.next_retry);
 				task_manager_record_pair_task(

@@ -1607,7 +1607,8 @@ static void test_punch_pair_runtime_tracks_inflight_backoff_and_demand(void **st
 	fastd_peer_add_punch_relay_backoff(&a, &endpoint);
 	fastd_punch_test_task_manager_record_pair_result(&a, &b, TEST_PUNCH_RESULT_BUSY, &endpoint);
 	pair_state = fastd_punch_test_pair_state(&a, &b);
-	assert_true(pair_state.collected);
+	assert_false(pair_state.collected);
+	assert_false(pair_state.waiting);
 	assert_true(pair_state.backoff);
 	assert_false(pair_state.in_flight);
 	assert_int_equal(pair_state.next_retry, ctx.now + FASTD_PUNCH_SUPPRESSION_TIME);
