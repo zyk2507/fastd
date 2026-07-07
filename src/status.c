@@ -1635,6 +1635,58 @@ static json_object *dump_punch_pair_task_history(void) {
 	return ret;
 }
 
+/** Returns true while a task-manager runtime timeout is active */
+static bool punch_runtime_timeout_active(fastd_timeout_t timeout) {
+	return timeout != FASTD_TIMEOUT_INV && !fastd_timed_out(timeout);
+}
+
+/** Wraps an active task-manager runtime timeout as remaining milliseconds */
+static json_object *wrap_active_runtime_timeout(fastd_timeout_t timeout) {
+	return punch_runtime_timeout_active(timeout) ? json_object_new_int64(timeout_remaining(timeout)) : NULL;
+}
+
+/** Dumps one peer-pair task-manager runtime state */
+static json_object *dump_punch_pair_runtime(const fastd_punch_pair_runtime_t *runtime) {
+	bool in_flight = punch_runtime_timeout_active(runtime->in_flight_until);
+	bool backoff = punch_runtime_timeout_active(runtime->backoff_until);
+	bool recent_demand = punch_runtime_timeout_active(runtime->recent_demand_until);
+	bool pending_demand = recent_demand && runtime->demand_seq != runtime->served_demand_seq;
+
+	struct json_object *ret = json_object_new_object();
+	json_object_object_add(ret, "peer_a_id", json_object_new_int64(runtime->peer_a_id));
+	json_object_object_add(ret, "peer_b_id", json_object_new_int64(runtime->peer_b_id));
+	json_object_object_add(ret, "peer_a", wrap_peer_name_by_id(runtime->peer_a_id));
+	json_object_object_add(ret, "peer_b", wrap_peer_name_by_id(runtime->peer_b_id));
+	json_object_object_add(ret, "updated_age", json_object_new_int64(timeout_age(runtime->updated)));
+	json_object_object_add(ret, "in_flight", json_object_new_boolean(in_flight));
+	json_object_object_add(ret, "backoff", json_object_new_boolean(backoff));
+	json_object_object_add(ret, "recent_demand", json_object_new_boolean(recent_demand));
+	json_object_object_add(ret, "pending_demand", json_object_new_boolean(pending_demand));
+	json_object_object_add(ret, "in_flight_ms", wrap_active_runtime_timeout(runtime->in_flight_until));
+	json_object_object_add(ret, "backoff_ms", wrap_active_runtime_timeout(runtime->backoff_until));
+	json_object_object_add(ret, "recent_demand_ms", wrap_active_runtime_timeout(runtime->recent_demand_until));
+	json_object_object_add(ret, "demand_seq", json_object_new_int64(runtime->demand_seq));
+	json_object_object_add(ret, "served_demand_seq", json_object_new_int64(runtime->served_demand_seq));
+	json_object_object_add(ret, "launch_count", json_object_new_int(runtime->launch_count));
+	json_object_object_add(ret, "abort_count", json_object_new_int(runtime->abort_count));
+	json_object_object_add(ret, "result_count", json_object_new_int(runtime->result_count));
+	json_object_object_add(ret, "busy_count", json_object_new_int(runtime->busy_count));
+	return ret;
+}
+
+/** Dumps active peer-pair task-manager runtime states newest-first */
+static json_object *dump_punch_pair_runtime_states(void) {
+	struct json_object *ret = json_object_new_array();
+	size_t remaining = VECTOR_LEN(ctx.punch_pair_states);
+
+	while (remaining) {
+		remaining--;
+		json_object_array_add(ret, dump_punch_pair_runtime(&VECTOR_INDEX(ctx.punch_pair_states, remaining)));
+	}
+
+	return ret;
+}
+
 /** Dumps punch task-manager runtime counters */
 static json_object *dump_punch_task_manager(void) {
 	struct json_object *ret = json_object_new_object();
@@ -1651,6 +1703,7 @@ static json_object *dump_punch_task_manager(void) {
 	json_object_object_add(ret, "recent_demand", json_object_new_int64(ctx.punch_task_manager_recent_demand));
 	json_object_object_add(ret, "runtime_states", json_object_new_int64(VECTOR_LEN(ctx.punch_pair_states)));
 	json_object_object_add(ret, "runtime_limit", json_object_new_int64(FASTD_PUNCH_PAIR_STATE_LIMIT));
+	json_object_object_add(ret, "runtime_state_list", dump_punch_pair_runtime_states());
 	json_object_object_add(ret, "budget_exhausted", json_object_new_int64(ctx.punch_task_manager_budget_exhausted));
 	json_object_object_add(
 		ret, "next_retry_min_ms",

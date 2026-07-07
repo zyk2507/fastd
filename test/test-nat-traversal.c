@@ -2238,6 +2238,21 @@ static void test_status_punch_exposes_udp_socket_pool(void **state UNUSED) {
 	fastd_peer_add_punch_relay_backoff(&task_peer, &result_endpoint);
 	fastd_punch_test_task_manager_record_pair_result(
 		&task_peer, &peer, TEST_PUNCH_RESULT_BUSY, &result_endpoint);
+	assert_int_equal(VECTOR_LEN(ctx.punch_pair_states), 1);
+	VECTOR_INDEX(ctx.punch_pair_states, 0) = (fastd_punch_pair_runtime_t){
+		.peer_a_id = 77,
+		.peer_b_id = 78,
+		.updated = ctx.now - 250,
+		.in_flight_until = ctx.now + 5000,
+		.backoff_until = ctx.now + 6000,
+		.recent_demand_until = ctx.now + 7000,
+		.demand_seq = 3,
+		.served_demand_seq = 2,
+		.launch_count = 4,
+		.abort_count = 1,
+		.result_count = 2,
+		.busy_count = 1,
+	};
 
 	struct json_object *punch = fastd_status_test_dump_punch();
 	struct json_object *pool = json_get_object_required(punch, "udp_punch_socket_pool");
@@ -2272,6 +2287,28 @@ static void test_status_punch_exposes_udp_socket_pool(void **state UNUSED) {
 	assert_int_equal(json_get_int_required(manager, "recent_demand"), 17);
 	assert_int_equal(json_get_int_required(manager, "runtime_states"), 1);
 	assert_int_equal(json_get_int_required(manager, "runtime_limit"), FASTD_PUNCH_PAIR_STATE_LIMIT);
+	struct json_object *runtime_states = json_get_array_required(manager, "runtime_state_list");
+	assert_int_equal(json_object_array_length(runtime_states), 1);
+	struct json_object *runtime_state = json_object_array_get_idx(runtime_states, 0);
+	assert_int_equal(json_object_get_type(runtime_state), json_type_object);
+	assert_int_equal(json_get_int_required(runtime_state, "peer_a_id"), 77);
+	assert_int_equal(json_get_int_required(runtime_state, "peer_b_id"), 78);
+	assert_string_equal(json_get_string_required(runtime_state, "peer_a"), "peer-a");
+	assert_string_equal(json_get_string_required(runtime_state, "peer_b"), "peer-b");
+	assert_int_equal(json_get_int_required(runtime_state, "updated_age"), 250);
+	assert_true(json_get_bool_required(runtime_state, "in_flight"));
+	assert_true(json_get_bool_required(runtime_state, "backoff"));
+	assert_true(json_get_bool_required(runtime_state, "recent_demand"));
+	assert_true(json_get_bool_required(runtime_state, "pending_demand"));
+	assert_int_equal(json_get_int_required(runtime_state, "in_flight_ms"), 5000);
+	assert_int_equal(json_get_int_required(runtime_state, "backoff_ms"), 6000);
+	assert_int_equal(json_get_int_required(runtime_state, "recent_demand_ms"), 7000);
+	assert_int_equal(json_get_int_required(runtime_state, "demand_seq"), 3);
+	assert_int_equal(json_get_int_required(runtime_state, "served_demand_seq"), 2);
+	assert_int_equal(json_get_int_required(runtime_state, "launch_count"), 4);
+	assert_int_equal(json_get_int_required(runtime_state, "abort_count"), 1);
+	assert_int_equal(json_get_int_required(runtime_state, "result_count"), 2);
+	assert_int_equal(json_get_int_required(runtime_state, "busy_count"), 1);
 	assert_int_equal(json_get_int_required(manager, "budget_exhausted"), 1);
 	assert_int_equal(json_get_int_required(manager, "next_retry_min_ms"), 12345);
 	assert_int_equal(json_get_int_required(manager, "outcome_success"), 8);
