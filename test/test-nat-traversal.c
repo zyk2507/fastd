@@ -142,7 +142,7 @@ enum {
 	TEST_PUNCH_RESULT_BUSY = 5,
 };
 
-#define TEST_CONTROL_HISTORY 16
+#define TEST_CONTROL_HISTORY 32
 
 static fastd_peer_t *test_send_peer;
 static size_t test_send_count;
@@ -2147,6 +2147,287 @@ static void test_punch_task_manager_requests_partial_symmetric_metadata(void **s
 	fastd_cleanup_buffers();
 }
 
+static void test_punch_task_manager_prewarms_relayed_nat_metadata(void **state UNUSED) {
+	__typeof__(ctx.peers) old_peers = ctx.peers;
+	__typeof__(ctx.punch_pair_states) old_pair_states = ctx.punch_pair_states;
+	const fastd_protocol_t *old_protocol = conf.protocol;
+	fastd_peer_group_t *old_peer_group = conf.peer_group;
+	bool old_control_relay = conf.punch_control_relay;
+	unsigned old_relay_interval = conf.punch_relay_interval;
+	unsigned old_max_packets = conf.punch_max_packets;
+	size_t old_encrypt_headroom = conf.encrypt_headroom;
+	size_t old_max_buffer = ctx.max_buffer;
+	uint64_t old_runs = ctx.punch_task_manager_runs;
+	uint64_t old_pairs = ctx.punch_task_manager_pairs;
+	uint64_t old_collected = ctx.punch_task_manager_collected;
+	uint64_t old_launched = ctx.punch_task_manager_launched;
+	uint64_t old_metadata_relays = ctx.punch_task_manager_metadata_relays;
+	uint64_t old_budget_exhausted = ctx.punch_task_manager_budget_exhausted;
+	fastd_timeout_t old_next_retry = ctx.punch_task_manager_next_retry;
+	fastd_punch_pair_task_t old_pair_tasks[FASTD_PUNCH_PAIR_TASK_HISTORY];
+	memcpy(old_pair_tasks, ctx.punch_pair_tasks, sizeof(old_pair_tasks));
+	uint64_t old_next_pair_task_id = ctx.next_punch_pair_task_id;
+	size_t old_pair_task_pos = ctx.punch_pair_task_pos;
+	size_t old_pair_task_count = ctx.punch_pair_task_count;
+	int64_t old_now = ctx.now;
+
+	ctx.peers = (__typeof__(ctx.peers)){};
+	ctx.punch_pair_states = (__typeof__(ctx.punch_pair_states)){};
+	memset(ctx.punch_pair_tasks, 0, sizeof(ctx.punch_pair_tasks));
+	ctx.next_punch_pair_task_id = 0;
+	ctx.punch_pair_task_pos = 0;
+	ctx.punch_pair_task_count = 0;
+	ctx.now = 1000;
+	conf.protocol = &test_protocol;
+	conf.punch_control_relay = true;
+	conf.punch_relay_interval = 7000;
+	conf.punch_max_packets = 8;
+	conf.encrypt_headroom = 0;
+	ctx.max_buffer = 2048;
+	test_reset_control_sends();
+	fastd_init_buffers();
+
+	fastd_peer_group_t group = {
+		.transport = TRANSPORT_AUTO,
+		.hole_punch = HOLE_PUNCH_AUTO,
+		.nat_traversal = FASTD_TRISTATE_TRUE,
+	};
+	conf.peer_group = &group;
+
+	fastd_peer_t a = {
+		.id = 30,
+		.group = &group,
+		.name = "peer-a",
+		.state = STATE_ESTABLISHED,
+		.address = addr4(0xcb007105, 41000),
+		.punch_endpoint = addr4(0xc6336407, 51000),
+		.punch_nat_type = FASTD_NAT_FULL_CONE,
+		.punch_min_port = 51000,
+		.punch_max_port = 51000,
+		.punch_timeout = ctx.now + 10000,
+		.tcp_punch_endpoint = addr4(0xc6336407, 53000),
+		.n_tcp_punch_endpoints = 1,
+		.tcp_punch_nat_type = FASTD_NAT_FULL_CONE,
+		.tcp_punch_min_port = 53000,
+		.tcp_punch_max_port = 53000,
+		.tcp_punch_timeout = ctx.now + 10000,
+		.next_punch_relay = ctx.now,
+	};
+	a.tcp_punch_endpoints[0] = a.tcp_punch_endpoint;
+	fastd_peer_t b = {
+		.id = 20,
+		.group = &group,
+		.name = "peer-b",
+		.state = STATE_ESTABLISHED,
+		.address = addr4(0xcb007106, 42000),
+		.punch_endpoint = addr4(0xc6336408, 52000),
+		.punch_nat_type = FASTD_NAT_FULL_CONE,
+		.punch_min_port = 52000,
+		.punch_max_port = 52000,
+		.punch_timeout = ctx.now + 10000,
+		.tcp_punch_endpoint = addr4(0xc6336408, 54000),
+		.n_tcp_punch_endpoints = 1,
+		.tcp_punch_nat_type = FASTD_NAT_FULL_CONE,
+		.tcp_punch_min_port = 54000,
+		.tcp_punch_max_port = 54000,
+		.tcp_punch_timeout = ctx.now + 10000,
+		.next_punch_relay = ctx.now,
+	};
+	b.tcp_punch_endpoints[0] = b.tcp_punch_endpoint;
+
+	VECTOR_ADD(ctx.peers, &a);
+	VECTOR_ADD(ctx.peers, &b);
+
+	fastd_punch_test_relay_peer_endpoints();
+	assert_int_equal(ctx.punch_task_manager_pairs, 1);
+	assert_int_equal(ctx.punch_task_manager_collected, 1);
+	assert_int_equal(ctx.punch_task_manager_launched, 1);
+	assert_int_equal(ctx.punch_task_manager_metadata_relays, 2);
+	assert_int_equal(ctx.punch_task_manager_budget_exhausted, 1);
+	assert_int_equal(test_control_send_count, 8);
+	assert_ptr_equal(test_control_send_peers[0], &b);
+	assert_ptr_equal(test_control_send_peers[1], &b);
+	assert_ptr_equal(test_control_send_peers[2], &b);
+	assert_ptr_equal(test_control_send_peers[3], &a);
+	assert_ptr_equal(test_control_send_peers[4], &a);
+	assert_ptr_equal(test_control_send_peers[5], &a);
+	assert_ptr_equal(test_control_send_peers[6], &b);
+	assert_ptr_equal(test_control_send_peers[7], &b);
+	assert_int_equal(test_control_send_types[0], TEST_PUNCH_SEND_CONE);
+	assert_int_equal(test_control_send_types[1], TEST_PUNCH_SEND_CONE);
+	assert_int_equal(test_control_send_types[2], TEST_PUNCH_SEND_TCP);
+	assert_int_equal(test_control_send_types[3], TEST_PUNCH_SEND_CONE);
+	assert_int_equal(test_control_send_types[4], TEST_PUNCH_SEND_CONE);
+	assert_int_equal(test_control_send_types[5], TEST_PUNCH_SEND_TCP);
+	assert_int_equal(test_control_send_types[6], TEST_PUNCH_NAT_INFO);
+	assert_int_equal(test_control_send_types[7], TEST_PUNCH_TCP_NAT_INFO);
+	assert_int_equal(test_control_send_ports[0], 41000);
+	assert_int_equal(test_control_send_ports[1], 51000);
+	assert_int_equal(test_control_send_ports[2], 53000);
+	assert_int_equal(test_control_send_ports[3], 42000);
+	assert_int_equal(test_control_send_ports[4], 52000);
+	assert_int_equal(test_control_send_ports[5], 54000);
+	assert_int_equal(test_control_send_ports[6], 51000);
+	assert_int_equal(test_control_send_ports[7], 53000);
+
+	VECTOR_FREE(ctx.peers);
+	VECTOR_FREE(ctx.punch_pair_states);
+	ctx.peers = old_peers;
+	ctx.punch_pair_states = old_pair_states;
+	conf.protocol = old_protocol;
+	conf.peer_group = old_peer_group;
+	conf.punch_control_relay = old_control_relay;
+	conf.punch_relay_interval = old_relay_interval;
+	conf.punch_max_packets = old_max_packets;
+	conf.encrypt_headroom = old_encrypt_headroom;
+	ctx.max_buffer = old_max_buffer;
+	ctx.punch_task_manager_runs = old_runs;
+	ctx.punch_task_manager_pairs = old_pairs;
+	ctx.punch_task_manager_collected = old_collected;
+	ctx.punch_task_manager_launched = old_launched;
+	ctx.punch_task_manager_metadata_relays = old_metadata_relays;
+	ctx.punch_task_manager_budget_exhausted = old_budget_exhausted;
+	ctx.punch_task_manager_next_retry = old_next_retry;
+	memcpy(ctx.punch_pair_tasks, old_pair_tasks, sizeof(old_pair_tasks));
+	ctx.next_punch_pair_task_id = old_next_pair_task_id;
+	ctx.punch_pair_task_pos = old_pair_task_pos;
+	ctx.punch_pair_task_count = old_pair_task_count;
+	ctx.now = old_now;
+	test_reset_control_sends();
+	fastd_cleanup_buffers();
+}
+
+static void test_punch_task_manager_skips_endpoint_dependent_post_command_prewarm(void **state UNUSED) {
+	__typeof__(ctx.peers) old_peers = ctx.peers;
+	__typeof__(ctx.punch_pair_states) old_pair_states = ctx.punch_pair_states;
+	const fastd_protocol_t *old_protocol = conf.protocol;
+	fastd_peer_group_t *old_peer_group = conf.peer_group;
+	bool old_control_relay = conf.punch_control_relay;
+	bool old_punch_symmetric = conf.punch_symmetric;
+	unsigned old_relay_interval = conf.punch_relay_interval;
+	unsigned old_max_packets = conf.punch_max_packets;
+	size_t old_encrypt_headroom = conf.encrypt_headroom;
+	size_t old_max_buffer = ctx.max_buffer;
+	uint64_t old_runs = ctx.punch_task_manager_runs;
+	uint64_t old_pairs = ctx.punch_task_manager_pairs;
+	uint64_t old_collected = ctx.punch_task_manager_collected;
+	uint64_t old_launched = ctx.punch_task_manager_launched;
+	uint64_t old_metadata_relays = ctx.punch_task_manager_metadata_relays;
+	uint64_t old_budget_exhausted = ctx.punch_task_manager_budget_exhausted;
+	fastd_timeout_t old_next_retry = ctx.punch_task_manager_next_retry;
+	fastd_punch_pair_task_t old_pair_tasks[FASTD_PUNCH_PAIR_TASK_HISTORY];
+	memcpy(old_pair_tasks, ctx.punch_pair_tasks, sizeof(old_pair_tasks));
+	uint64_t old_next_pair_task_id = ctx.next_punch_pair_task_id;
+	size_t old_pair_task_pos = ctx.punch_pair_task_pos;
+	size_t old_pair_task_count = ctx.punch_pair_task_count;
+	int64_t old_now = ctx.now;
+
+	ctx.peers = (__typeof__(ctx.peers)){};
+	ctx.punch_pair_states = (__typeof__(ctx.punch_pair_states)){};
+	memset(ctx.punch_pair_tasks, 0, sizeof(ctx.punch_pair_tasks));
+	ctx.next_punch_pair_task_id = 0;
+	ctx.punch_pair_task_pos = 0;
+	ctx.punch_pair_task_count = 0;
+	ctx.now = 1000;
+	conf.protocol = &test_protocol;
+	conf.punch_control_relay = true;
+	conf.punch_symmetric = true;
+	conf.punch_relay_interval = 7000;
+	conf.punch_max_packets = 32;
+	conf.encrypt_headroom = 0;
+	ctx.max_buffer = 2048;
+	test_reset_control_sends();
+	fastd_init_buffers();
+
+	fastd_peer_group_t group = {
+		.transport = TRANSPORT_AUTO,
+		.hole_punch = HOLE_PUNCH_AUTO,
+		.nat_traversal = FASTD_TRISTATE_TRUE,
+	};
+	conf.peer_group = &group;
+
+	fastd_peer_t a = {
+		.id = 30,
+		.group = &group,
+		.name = "peer-a",
+		.state = STATE_ESTABLISHED,
+		.address = addr4(0xcb007105, 41000),
+		.punch_endpoint = addr4(0xc6336407, 51000),
+		.punch_nat_type = FASTD_NAT_SYMMETRIC_EASY_INC,
+		.punch_min_port = 51000,
+		.punch_max_port = 51000,
+		.punch_port_delta = 1,
+		.punch_timeout = ctx.now + 10000,
+		.next_punch_relay = ctx.now,
+	};
+	fastd_peer_t b = {
+		.id = 20,
+		.group = &group,
+		.name = "peer-b",
+		.state = STATE_ESTABLISHED,
+		.address = addr4(0xcb007106, 42000),
+		.punch_endpoint = addr4(0xc6336408, 52000),
+		.punch_nat_type = FASTD_NAT_FULL_CONE,
+		.punch_min_port = 52000,
+		.punch_max_port = 52000,
+		.punch_timeout = ctx.now + 10000,
+		.next_punch_relay = ctx.now,
+	};
+
+	VECTOR_ADD(ctx.peers, &a);
+	VECTOR_ADD(ctx.peers, &b);
+
+	fastd_punch_test_relay_peer_endpoints();
+	assert_int_equal(ctx.punch_task_manager_pairs, 1);
+	assert_int_equal(ctx.punch_task_manager_collected, 1);
+	assert_int_equal(ctx.punch_task_manager_launched, 1);
+	assert_int_equal(ctx.punch_task_manager_metadata_relays, 1);
+	assert_int_equal(ctx.punch_task_manager_budget_exhausted, 0);
+	assert_true(test_control_send_count < conf.punch_max_packets);
+
+	bool saw_stable_nat_info = false;
+	bool saw_endpoint_dependent_nat_info = false;
+	size_t i;
+	for (i = 0; i < test_control_send_count && i < TEST_CONTROL_HISTORY; i++) {
+		if (test_control_send_types[i] != TEST_PUNCH_NAT_INFO)
+			continue;
+
+		if (test_control_send_ports[i] == 52000)
+			saw_stable_nat_info = true;
+		if (test_control_send_ports[i] == 51000)
+			saw_endpoint_dependent_nat_info = true;
+	}
+	assert_true(saw_stable_nat_info);
+	assert_false(saw_endpoint_dependent_nat_info);
+
+	VECTOR_FREE(ctx.peers);
+	VECTOR_FREE(ctx.punch_pair_states);
+	ctx.peers = old_peers;
+	ctx.punch_pair_states = old_pair_states;
+	conf.protocol = old_protocol;
+	conf.peer_group = old_peer_group;
+	conf.punch_control_relay = old_control_relay;
+	conf.punch_symmetric = old_punch_symmetric;
+	conf.punch_relay_interval = old_relay_interval;
+	conf.punch_max_packets = old_max_packets;
+	conf.encrypt_headroom = old_encrypt_headroom;
+	ctx.max_buffer = old_max_buffer;
+	ctx.punch_task_manager_runs = old_runs;
+	ctx.punch_task_manager_pairs = old_pairs;
+	ctx.punch_task_manager_collected = old_collected;
+	ctx.punch_task_manager_launched = old_launched;
+	ctx.punch_task_manager_metadata_relays = old_metadata_relays;
+	ctx.punch_task_manager_budget_exhausted = old_budget_exhausted;
+	ctx.punch_task_manager_next_retry = old_next_retry;
+	memcpy(ctx.punch_pair_tasks, old_pair_tasks, sizeof(old_pair_tasks));
+	ctx.next_punch_pair_task_id = old_next_pair_task_id;
+	ctx.punch_pair_task_pos = old_pair_task_pos;
+	ctx.punch_pair_task_count = old_pair_task_count;
+	ctx.now = old_now;
+	test_reset_control_sends();
+	fastd_cleanup_buffers();
+}
+
 static void test_punch_task_manager_relays_multiple_tcp_endpoints_with_budget(void **state UNUSED) {
 	__typeof__(ctx.peers) old_peers = ctx.peers;
 	__typeof__(ctx.punch_pair_states) old_pair_states = ctx.punch_pair_states;
@@ -3885,6 +4166,8 @@ int main(void) {
 		cmocka_unit_test(test_punch_pair_runtime_tracks_inflight_backoff_and_demand),
 		cmocka_unit_test(test_punch_task_manager_requests_missing_metadata_on_demand),
 		cmocka_unit_test(test_punch_task_manager_requests_partial_symmetric_metadata),
+		cmocka_unit_test(test_punch_task_manager_prewarms_relayed_nat_metadata),
+		cmocka_unit_test(test_punch_task_manager_skips_endpoint_dependent_post_command_prewarm),
 		cmocka_unit_test(test_punch_task_manager_relays_multiple_tcp_endpoints_with_budget),
 		cmocka_unit_test(test_punch_send_tcp_preserves_multiple_received_endpoints),
 		cmocka_unit_test(test_punch_accepts_relayed_nat_metadata),

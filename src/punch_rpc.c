@@ -1733,6 +1733,23 @@ static size_t relay_nat_metadata_to_peer(fastd_peer_t *dest, const fastd_peer_t 
 	return sent;
 }
 
+/** Returns true if post-command metadata prewarming is stable enough to avoid retriggering endpoint-dependent punches */
+static bool peer_has_stable_post_command_nat_metadata(const fastd_peer_t *peer) {
+	if (!peer_has_fresh_punch_nat_info(peer))
+		return false;
+
+	if (nat_type_is_endpoint_dependent(peer->punch_nat_type))
+		return false;
+
+	size_t i;
+	for (i = 0; i < peer->n_punch_endpoints; i++) {
+		if (nat_type_is_endpoint_dependent(peer->punch_endpoints[i].nat_type))
+			return false;
+	}
+
+	return true;
+}
+
 /** Requests an EasyTier-style public punch listener selection from a peer */
 static bool send_select_listener_request(
 	fastd_peer_t *dest, const fastd_peer_address_t *request_endpoint, bool force_new, bool prefer_port_mapping) {
@@ -3074,6 +3091,7 @@ static void relay_peer_endpoints(void) {
 				a, b, NULL, NULL, PUNCH_PAIR_TASK_STAGE_COLLECTED, 0, 0, FASTD_TIMEOUT_INV, false);
 
 			size_t before_pair = sent;
+			size_t pair_command_sent = 0;
 			size_t backoff_skipped = 0;
 			fastd_timeout_t backoff_next_retry = FASTD_TIMEOUT_INV;
 			if (state.has_metadata_a && (state.due_a || state.pending_demand)) {
@@ -3087,6 +3105,7 @@ static void relay_peer_endpoints(void) {
 						&backoff_next_retry);
 
 				if (sent > before_direction) {
+					pair_command_sent += sent - before_direction;
 					task_manager_record_pair_task(
 						a, b, a, b, PUNCH_PAIR_TASK_STAGE_LAUNCHED, sent - before_direction,
 						backoff_skipped - before_direction_backoff, FASTD_TIMEOUT_INV,
@@ -3107,6 +3126,7 @@ static void relay_peer_endpoints(void) {
 						&backoff_next_retry);
 
 				if (sent > before_direction) {
+					pair_command_sent += sent - before_direction;
 					task_manager_record_pair_task(
 						a, b, b, a, PUNCH_PAIR_TASK_STAGE_LAUNCHED, sent - before_direction,
 						backoff_skipped - before_direction_backoff, FASTD_TIMEOUT_INV,
@@ -3115,6 +3135,19 @@ static void relay_peer_endpoints(void) {
 				}
 				b->next_punch_relay = ctx.now + conf.punch_relay_interval;
 				task_manager_note_next_retry(b->next_punch_relay);
+			}
+
+			if (pair_command_sent && sent < conf.punch_max_packets &&
+			    peer_has_stable_post_command_nat_metadata(a)) {
+				size_t relayed = relay_nat_metadata_to_peer(b, a, conf.punch_max_packets - sent);
+				sent += relayed;
+				ctx.punch_task_manager_metadata_relays += relayed;
+			}
+			if (pair_command_sent && sent < conf.punch_max_packets &&
+			    peer_has_stable_post_command_nat_metadata(b)) {
+				size_t relayed = relay_nat_metadata_to_peer(a, b, conf.punch_max_packets - sent);
+				sent += relayed;
+				ctx.punch_task_manager_metadata_relays += relayed;
 			}
 
 			if (sent == before_pair) {
