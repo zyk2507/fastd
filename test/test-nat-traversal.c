@@ -1414,6 +1414,37 @@ static void test_nat_traversal_inherits_and_overrides(void **state UNUSED) {
 	assert_false(fastd_peer_get_turn_relay(&peer));
 }
 
+static bool test_simultaneous_yield(uint8_t own_key_byte, uint8_t peer_key_byte, fastd_nat_type_t peer_nat_type) {
+	uint8_t own_key[32] = {};
+	uint8_t peer_key[32] = {};
+
+	own_key[31] = own_key_byte;
+	peer_key[31] = peer_key_byte;
+	return fastd_protocol_ec25519_fhmqvc_test_accept_simultaneous_responder(
+		own_key, peer_key, peer_nat_type, ctx.now + 10000);
+}
+
+static void test_ec25519_simultaneous_responder_yield_is_deterministic(void **state UNUSED) {
+	int64_t old_now = ctx.now;
+	ctx.now = 1000;
+
+	assert_true(test_simultaneous_yield(2, 1, FASTD_NAT_SYMMETRIC_EASY_INC));
+	assert_false(test_simultaneous_yield(1, 2, FASTD_NAT_SYMMETRIC_EASY_INC));
+	assert_int_equal(
+		test_simultaneous_yield(2, 1, FASTD_NAT_SYMMETRIC_EASY_INC) +
+			test_simultaneous_yield(1, 2, FASTD_NAT_SYMMETRIC_EASY_INC),
+		1);
+
+	assert_true(test_simultaneous_yield(2, 1, FASTD_NAT_SYMMETRIC_EASY_DEC));
+	assert_false(test_simultaneous_yield(1, 2, FASTD_NAT_SYMMETRIC_EASY_DEC));
+	assert_int_equal(
+		test_simultaneous_yield(2, 1, FASTD_NAT_SYMMETRIC_EASY_DEC) +
+			test_simultaneous_yield(1, 2, FASTD_NAT_SYMMETRIC_EASY_DEC),
+		1);
+
+	ctx.now = old_now;
+}
+
 static void test_punch_data_relay_effective_setting(void **state UNUSED) {
 	fastd_tristate_t old_data_relay = conf.punch_data_relay;
 	bool old_control_relay = conf.punch_control_relay;
@@ -3844,6 +3875,7 @@ int main(void) {
 		cmocka_unit_test(test_punch_relay_backoff_is_bounded),
 		cmocka_unit_test(test_peer_punch_symmetric_inherits_and_overrides),
 		cmocka_unit_test(test_nat_traversal_inherits_and_overrides),
+		cmocka_unit_test(test_ec25519_simultaneous_responder_yield_is_deterministic),
 		cmocka_unit_test(test_punch_data_relay_effective_setting),
 		cmocka_unit_test(test_punch_data_relay_only_for_learned_nat_unicast),
 		cmocka_unit_test(test_punch_nat_refresh_policy),

@@ -235,13 +235,39 @@ static bool establish_backup(
 	return true;
 }
 
+/** Returns true if the first key deterministically yields a simultaneous active handshake to the second key */
+static bool simultaneous_responder_key_order_accepts(
+	const uint8_t own_key[PUBLICKEYBYTES], const uint8_t peer_key[PUBLICKEYBYTES]) {
+	return memcmp(own_key, peer_key, PUBLICKEYBYTES) > 0;
+}
+
 /** Returns true if this peer should yield a simultaneous active handshake to the remote initiator */
 static bool accept_simultaneous_responder_session(const fastd_peer_t *peer) {
-	if (peer->punch_nat_type == FASTD_NAT_SYMMETRIC_EASY_INC && !fastd_timed_out(peer->punch_timeout))
-		return true;
-
-	return memcmp(conf.protocol_config->key.public.u8, peer->key->key.u8, PUBLICKEYBYTES) > 0;
+	return simultaneous_responder_key_order_accepts(conf.protocol_config->key.public.u8, peer->key->key.u8);
 }
+
+#ifdef WITH_TESTS
+bool fastd_protocol_ec25519_fhmqvc_test_accept_simultaneous_responder(
+	const uint8_t own_key[32], const uint8_t peer_key[32], fastd_nat_type_t peer_nat_type,
+	fastd_timeout_t punch_timeout) {
+	fastd_protocol_config_t protocol_config = {};
+	fastd_protocol_key_t protocol_key = {};
+	fastd_peer_t peer = {
+		.key = &protocol_key,
+		.punch_nat_type = peer_nat_type,
+		.punch_timeout = punch_timeout,
+	};
+	fastd_protocol_config_t *old_protocol_config = conf.protocol_config;
+
+	memcpy(protocol_config.key.public.u8, own_key, PUBLICKEYBYTES);
+	memcpy(protocol_key.key.u8, peer_key, PUBLICKEYBYTES);
+	conf.protocol_config = &protocol_config;
+
+	bool ret = accept_simultaneous_responder_session(&peer);
+	conf.protocol_config = old_protocol_config;
+	return ret;
+}
+#endif
 
 /** Establishes a connection with a peer after a successful handshake */
 static bool establish(
