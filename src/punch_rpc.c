@@ -2700,31 +2700,51 @@ static size_t relay_tcp_endpoint_to_peer(
 
 	if (!tcp_nat_type_punchable(dest->tcp_punch_nat_type) || !tcp_nat_type_punchable(subject->tcp_punch_nat_type))
 		return 0;
-	fastd_timeout_t backoff_timeout = fastd_peer_punch_relay_backoff_timeout(dest, &subject->tcp_punch_endpoint);
-	if (backoff_timeout != FASTD_TIMEOUT_INV) {
-		if (backoff_skipped)
-			(*backoff_skipped)++;
-		if (backoff_next_retry &&
-		    (*backoff_next_retry == FASTD_TIMEOUT_INV || backoff_timeout < *backoff_next_retry))
-			*backoff_next_retry = backoff_timeout;
-		return 0;
-	}
 
-	bool sent = send_endpoint_message(
-		dest, FASTD_PUNCH_SEND_TCP, conf.protocol->get_peer_key(subject), conf.protocol->key_length(),
-		&subject->tcp_punch_endpoint, subject->tcp_punch_nat_type, subject->tcp_punch_min_port,
-		subject->tcp_punch_max_port, 0, 0, 0);
+	fastd_peer_address_t endpoints[FASTD_NAT_MAX_PUBLIC_ENDPOINTS];
+	size_t n_endpoints = 0;
+	size_t i;
+
+	for (i = 0; i < subject->n_tcp_punch_endpoints; i++) {
+		n_endpoints = add_unique_endpoint(
+			endpoints, n_endpoints, array_size(endpoints), &subject->tcp_punch_endpoints[i]);
+	}
+	n_endpoints =
+		add_unique_endpoint(endpoints, n_endpoints, array_size(endpoints), &subject->tcp_punch_endpoint);
+
+	size_t sent = 0;
+	fastd_peer_address_t last_endpoint = {};
+	for (i = 0; i < n_endpoints && sent < limit; i++) {
+		fastd_timeout_t backoff_timeout = fastd_peer_punch_relay_backoff_timeout(dest, &endpoints[i]);
+		if (backoff_timeout != FASTD_TIMEOUT_INV) {
+			if (backoff_skipped)
+				(*backoff_skipped)++;
+			if (backoff_next_retry &&
+			    (*backoff_next_retry == FASTD_TIMEOUT_INV || backoff_timeout < *backoff_next_retry))
+				*backoff_next_retry = backoff_timeout;
+			continue;
+		}
+
+		if (!send_endpoint_message(
+			    dest, FASTD_PUNCH_SEND_TCP, conf.protocol->get_peer_key(subject),
+			    conf.protocol->key_length(), &endpoints[i], subject->tcp_punch_nat_type,
+			    subject->tcp_punch_min_port, subject->tcp_punch_max_port, 0, 0, 0))
+			continue;
+
+		last_endpoint = endpoints[i];
+		sent++;
+	}
 
 	if (sent) {
 		record_punch_task(
 			subject, PEER_PUNCH_TASK_ROLE_RELAY_SUBJECT, PEER_PUNCH_TASK_COMMAND_TCP,
-			PEER_PUNCH_TASK_RESULT_NONE, &subject->tcp_punch_endpoint, 0, 1, 1, 0, 0, 0, 0, 0);
+			PEER_PUNCH_TASK_RESULT_NONE, &last_endpoint, 0, n_endpoints, sent, 0, 0, 0, 0, 0);
 		record_punch_task(
 			dest, PEER_PUNCH_TASK_ROLE_RELAY_DEST, PEER_PUNCH_TASK_COMMAND_TCP,
-			PEER_PUNCH_TASK_RESULT_NONE, &subject->tcp_punch_endpoint, 0, 1, 1, 0, 0, 0, 0, 0);
+			PEER_PUNCH_TASK_RESULT_NONE, &last_endpoint, 0, n_endpoints, sent, 0, 0, 0, 0, 0);
 	}
 
-	return sent ? 1 : 0;
+	return sent;
 }
 
 /** Stores punch NAT metadata and resets hard-symmetric scan state when the public mapping changes */
