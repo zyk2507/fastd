@@ -332,6 +332,7 @@ bool fastd_peer_matches_address(const fastd_peer_t *peer, const fastd_peer_addre
 bool fastd_peer_claim_address(
 	fastd_peer_t *peer, fastd_socket_t *sock, const fastd_peer_address_t *local_addr,
 	const fastd_peer_address_t *remote_addr, bool force);
+bool fastd_peer_handle_tcp_connection_lost(fastd_peer_t *peer);
 bool fastd_peer_claim_backup_path(
 	fastd_peer_t *peer, fastd_socket_t *sock, const fastd_peer_address_t *local_addr,
 	const fastd_peer_address_t *remote_addr);

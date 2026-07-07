@@ -523,21 +523,30 @@ PY
 block_active_direct_path() {
 	local a_remote=$1 b_remote=$2
 	local a_local=${3:-} b_local=${4:-}
+	local proto=${5:-udp}
+	local action=drop
+
+	if [[ "$proto" != udp && "$proto" != tcp ]]; then
+		fail "unsupported direct path block protocol: $proto"
+	fi
+	if [[ "$proto" == tcp ]]; then
+		action='reject with tcp reset'
+	fi
 
 	clear_blocked_direct_path
 
 	run ip netns exec "$NS_RA" nft add table ip failover
 	run ip netns exec "$NS_RA" nft 'add chain ip failover prerouting { type filter hook prerouting priority -200; policy accept; }'
-	run ip netns exec "$NS_RA" nft add rule ip failover prerouting iifname pub ip saddr 10.52.0.3 ip daddr 10.52.0.2 udp sport "$a_remote" udp dport "$b_remote" drop
+	run ip netns exec "$NS_RA" nft add rule ip failover prerouting iifname pub ip saddr 10.52.0.3 ip daddr 10.52.0.2 "$proto" sport "$a_remote" "$proto" dport "$b_remote" $action
 	run ip netns exec "$NS_RB" nft add table ip failover
 	run ip netns exec "$NS_RB" nft 'add chain ip failover prerouting { type filter hook prerouting priority -200; policy accept; }'
-	run ip netns exec "$NS_RB" nft add rule ip failover prerouting iifname pub ip saddr 10.52.0.2 ip daddr 10.52.0.3 udp sport "$b_remote" udp dport "$a_remote" drop
+	run ip netns exec "$NS_RB" nft add rule ip failover prerouting iifname pub ip saddr 10.52.0.2 ip daddr 10.52.0.3 "$proto" sport "$b_remote" "$proto" dport "$a_remote" $action
 
 	if [[ -n "$a_local" && -n "$b_local" ]]; then
 		run ip netns exec "$NS_RA" nft 'add chain ip failover forward { type filter hook forward priority 0; policy accept; }'
-		run ip netns exec "$NS_RA" nft add rule ip failover forward iifname pub oifname priv ip saddr 10.52.0.3 ip daddr 10.52.1.2 udp sport "$a_remote" udp dport "$a_local" drop
+		run ip netns exec "$NS_RA" nft add rule ip failover forward iifname pub oifname priv ip saddr 10.52.0.3 ip daddr 10.52.1.2 "$proto" sport "$a_remote" "$proto" dport "$a_local" $action
 		run ip netns exec "$NS_RB" nft 'add chain ip failover forward { type filter hook forward priority 0; policy accept; }'
-		run ip netns exec "$NS_RB" nft add rule ip failover forward iifname pub oifname priv ip saddr 10.52.0.2 ip daddr 10.52.2.2 udp sport "$b_remote" udp dport "$b_local" drop
+		run ip netns exec "$NS_RB" nft add rule ip failover forward iifname pub oifname priv ip saddr 10.52.0.2 ip daddr 10.52.2.2 "$proto" sport "$b_remote" "$proto" dport "$b_local" $action
 	fi
 }
 
@@ -1431,6 +1440,22 @@ run_direct_iperf_after_transient_cut() {
 	run_direct_iperf "$label" "$port" "$IPERF_RECOVERY_DURATION"
 }
 
+run_direct_iperf_during_transient_cut() {
+	local label=$1 port=$2 proto=${3:-udp}
+	local a_local a_remote b_local b_remote unblock_pid
+
+	dump_statuses
+	a_local=$(hole_punch_field a b local_port) || fail "missing A active punch local port before $label iperf3 cut"
+	a_remote=$(hole_punch_field a b remote_port) || fail "missing A active punch remote port before $label iperf3 cut"
+	b_local=$(hole_punch_field b a local_port) || fail "missing B active punch local port before $label iperf3 cut"
+	b_remote=$(hole_punch_field b a remote_port) || fail "missing B active punch remote port before $label iperf3 cut"
+	block_active_direct_path "$a_remote" "$b_remote" "$a_local" "$b_local" "$proto"
+	(sleep "$SHORT_WAIT_SLEEP"; clear_blocked_direct_path) &
+	unblock_pid=$!
+	run_direct_iperf "$label" "$port" "$IPERF_RECOVERY_DURATION"
+	wait "$unblock_pid" >/dev/null 2>&1 || true
+}
+
 cut_public_nat_link_once() {
 	run ip -n "$NS_RA" link set pub down
 	sleep "$SHORT_WAIT_SLEEP"
@@ -1617,6 +1642,46 @@ run_tcp_tests() {
 
 	printf 'ok 1 - control relay establishes a direct TCP punch path through port-preserving mappings\n'
 }
+
+run_tcp_iperf_tests() {
+	printf '1..1\n'
+	CURRENT_TEST=1
+
+	start_fake_stun tcp
+	write_tcp_punch_confs
+	start_fastds
+
+	ok=false
+	for _ in $(seq 1 "$FAST_WAIT_ATTEMPTS"); do
+		sleep "$FAST_WAIT_SLEEP"
+		check_fastds_alive
+		dump_statuses
+
+		if [[ -f "$WORK/a.json" && -f "$WORK/b.json" && -f "$WORK/c.json" ]] &&
+			tcp_nat_types_seen && direct_tcp_hole_punched && punch_results_seen; then
+			ok=true
+			break
+		fi
+	done
+
+	[[ "$ok" == true ]] || fail 'direct TCP punch path was not established before iperf3'
+
+	run ip -n "$NS_A" addr add 10.52.10.1/30 dev fda-b
+	run ip -n "$NS_B" addr add 10.52.10.2/30 dev fdb-a
+	run ip -n "$NS_A" link set fda-b up
+	run ip -n "$NS_B" link set fdb-a up
+	ip -n "$NS_A" addr show dev fda-b > "$WORK/a.ip" 2>&1 || true
+	ip -n "$NS_B" addr show dev fdb-a > "$WORK/b.ip" 2>&1 || true
+	wait_for_direct_ping 'direct TCP-punched A/B data path failed before iperf3'
+	run_direct_iperf_during_transient_cut tcp-after-cut 5206 tcp
+
+	printf 'ok 1 - TCP direct punch path recovers and carries bidirectional iperf3 traffic after active cut\n'
+}
+
+if [[ "$IPERF_MODE" == 1 && "$TCP_MODE" == 1 ]]; then
+	run_tcp_iperf_tests
+	exit 0
+fi
 
 if [[ "$IPERF_MODE" == 1 ]]; then
 	run_iperf_tests

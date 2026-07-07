@@ -71,6 +71,14 @@ test('nat-punch-iperf-symmetric-netns',
 	timeout : 60,
 )
 
+test('nat-punch-iperf-tcp-netns',
+	bash,
+	args : [files('test-nat-punch-iperf-tcp-netns.sh'), fastd_exe.full_path()],
+	protocol : 'tap',
+	is_parallel : false,
+	timeout : 60,
+)
+
 test('hysteria-realm-netns',
 	bash,
 	args : [files('test-hysteria-realm-netns.sh'), fastd_exe.full_path()],

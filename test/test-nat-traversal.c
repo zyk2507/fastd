@@ -1416,6 +1416,71 @@ static void test_nat_traversal_inherits_and_overrides(void **state UNUSED) {
 	assert_false(fastd_peer_get_turn_relay(&peer));
 }
 
+static void test_tcp_direct_loss_preserves_nat_session_and_schedules_reconnect(void **state UNUSED) {
+	fastd_pqueue_t *old_task_queue = ctx.task_queue;
+	int64_t old_now = ctx.now;
+	bool old_keepalive = conf.punch_keepalive;
+	__typeof__(conf.punch_keepalive_interval) old_keepalive_interval = conf.punch_keepalive_interval;
+
+	ctx.task_queue = NULL;
+	ctx.now = 424000;
+	conf.punch_keepalive = true;
+	conf.punch_keepalive_interval = 25000;
+
+	fastd_peer_t peer = {
+		.id = 77,
+		.name = "tcp-peer",
+		.state = STATE_ESTABLISHED,
+		.transport = TRANSPORT_TCP,
+		.nat_traversal = FASTD_TRISTATE_TRUE,
+		.hole_punch = HOLE_PUNCH_TCP,
+		.direct_established = true,
+		.address = addr4(0xcb007105, 45100),
+		.active_path_timeout = ctx.now + 10000,
+		.active_path_proven_timeout = ctx.now + 11000,
+		.active_path_payload_seen = ctx.now + 12000,
+		.active_path_payload_sent = true,
+		.last_handshake_timeout = ctx.now - 1000,
+		.last_handshake_address = addr4(0xcb007105, 45100),
+		.last_handshake_transport = TRANSPORT_TCP,
+		.reset_timeout = FASTD_TIMEOUT_INV,
+		.keepalive_timeout = ctx.now + 30000,
+		.next_handshake = FASTD_TIMEOUT_INV,
+		.backup_reset_timeout = FASTD_TIMEOUT_INV,
+		.backup_keepalive_timeout = FASTD_TIMEOUT_INV,
+	};
+
+	assert_true(fastd_peer_handle_tcp_connection_lost(&peer));
+	assert_true(fastd_peer_is_established(&peer));
+	assert_true(peer.direct_established);
+	assert_int_equal(peer.active_path_timeout, ctx.now);
+	assert_int_equal(peer.active_path_proven_timeout, FASTD_TIMEOUT_INV);
+	assert_int_equal(peer.active_path_payload_seen, FASTD_TIMEOUT_INV);
+	assert_false(peer.active_path_payload_sent);
+	assert_int_equal(peer.last_handshake_timeout, ctx.now);
+	assert_int_equal(peer.last_handshake_address.sa.sa_family, AF_UNSPEC);
+	assert_int_equal(peer.last_handshake_transport, TRANSPORT_UNSET);
+	assert_int_equal(peer.next_handshake, ctx.now + 100);
+	assert_int_equal(peer.keepalive_timeout, ctx.now + conf.punch_keepalive_interval);
+	assert_int_equal(fastd_task_timeout(&peer.task), peer.next_handshake);
+
+	fastd_peer_t ordinary_peer = peer;
+	ordinary_peer.task = (fastd_task_t){};
+	ordinary_peer.direct_established = false;
+	ordinary_peer.active_path_timeout = ctx.now + 3000;
+	assert_false(fastd_peer_handle_tcp_connection_lost(&ordinary_peer));
+	assert_int_equal(ordinary_peer.active_path_timeout, ctx.now + 3000);
+
+	if (fastd_task_scheduled(&peer.task))
+		fastd_task_unschedule(&peer.task);
+
+	assert_null(ctx.task_queue);
+	ctx.task_queue = old_task_queue;
+	ctx.now = old_now;
+	conf.punch_keepalive = old_keepalive;
+	conf.punch_keepalive_interval = old_keepalive_interval;
+}
+
 static bool test_simultaneous_yield(uint8_t own_key_byte, uint8_t peer_key_byte, fastd_nat_type_t peer_nat_type) {
 	uint8_t own_key[32] = {};
 	uint8_t peer_key[32] = {};
@@ -4548,6 +4613,7 @@ int main(void) {
 		cmocka_unit_test(test_punch_relay_backoff_is_bounded),
 		cmocka_unit_test(test_peer_punch_symmetric_inherits_and_overrides),
 		cmocka_unit_test(test_nat_traversal_inherits_and_overrides),
+		cmocka_unit_test(test_tcp_direct_loss_preserves_nat_session_and_schedules_reconnect),
 		cmocka_unit_test(test_ec25519_simultaneous_responder_yield_is_deterministic),
 		cmocka_unit_test(test_punch_data_relay_effective_setting),
 		cmocka_unit_test(test_punch_data_relay_only_for_learned_nat_unicast),

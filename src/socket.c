@@ -171,10 +171,12 @@ static void close_tcp_connection(fastd_socket_t *sock, bool reset_peer) {
 		peer->sock = NULL;
 		sock->peer = NULL;
 
-		if (reset_peer && established)
-			fastd_peer_reset(peer);
-		else if (reset_peer)
+		if (reset_peer && established) {
+			if (!fastd_peer_handle_tcp_connection_lost(peer))
+				fastd_peer_reset(peer);
+		} else if (reset_peer) {
 			fastd_peer_transport_failed(peer, TRANSPORT_TCP);
+		}
 	} else if (peer && peer->backup_sock == sock) {
 		sock->peer = NULL;
 		peer->backup_sock = NULL;

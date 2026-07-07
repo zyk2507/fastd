@@ -30,6 +30,7 @@
 #define FASTD_DIRECT_CANDIDATE_PRIORITY_DISCOVERY 100
 #define FASTD_DIRECT_CANDIDATE_PRIORITY_EASY_SYM_PROBE 110
 #define FASTD_DIRECT_CANDIDATE_PRIORITY_PROBE 130
+#define FASTD_TCP_DIRECT_RECONNECT_DELAY 100
 static bool direct_candidate_valid(const fastd_peer_direct_candidate_t *candidate);
 static void clear_direct_candidate_cache(fastd_peer_t *peer);
 static bool send_handshake_address(fastd_peer_t *peer, const fastd_peer_address_t *addr);
@@ -368,6 +369,34 @@ void fastd_peer_reset_socket(fastd_peer_t *peer) {
 		else
 			peer->sock = fastd_socket_open(peer, AF_INET6);
 	}
+}
+
+/** Keeps a NAT traversal TCP direct session alive after its backing stream was lost */
+bool fastd_peer_handle_tcp_connection_lost(fastd_peer_t *peer) {
+	if (!peer || !fastd_peer_is_established(peer) || !peer->direct_established)
+		return false;
+
+	if (!fastd_peer_get_nat_traversal(peer) ||
+	    !fastd_peer_transport_allows(fastd_peer_get_transport(peer), TRANSPORT_TCP))
+		return false;
+
+	if (peer->address.sa.sa_family != AF_INET && peer->address.sa.sa_family != AF_INET6)
+		return false;
+
+	pr_debug("TCP direct path for %P was lost; keeping session while reconnecting", peer);
+
+	peer->active_path_timeout = ctx.now;
+	peer->active_path_proven_timeout = FASTD_TIMEOUT_INV;
+	peer->active_path_payload_seen = FASTD_TIMEOUT_INV;
+	peer->active_path_payload_sent = false;
+	peer->last_handshake_timeout = ctx.now;
+	peer->last_handshake_address.sa.sa_family = AF_UNSPEC;
+	peer->last_handshake_transport = TRANSPORT_UNSET;
+
+	fastd_peer_schedule_handshake(peer, FASTD_TCP_DIRECT_RECONNECT_DELAY);
+	fastd_peer_clear_keepalive(peer);
+	fastd_peer_reschedule(peer);
+	return true;
 }
 
 /** Schedules the peer maintenance task (or removes the scheduled task if there's nothing to do) */
@@ -2519,6 +2548,15 @@ static bool send_handshake_address_transport(
 
 		if (sock && sock->bound_addr)
 			local_address = *sock->bound_addr;
+	} else if (
+		!sock && fastd_peer_transport_allows(fastd_peer_get_transport(peer), TRANSPORT_TCP) &&
+		(preferred_transport == TRANSPORT_TCP || fastd_peer_get_transport(peer) == TRANSPORT_TCP ||
+		 (candidate_transports && direct_candidate_mask_allows(candidate_transports, TRANSPORT_TCP) &&
+		  !direct_candidate_mask_allows(candidate_transports, TRANSPORT_UDP)))) {
+		fastd_peer_reset_socket(peer);
+		sock = peer->sock;
+		local_address = peer->local_address;
+		handshake_addr = &peer->address;
 	}
 
 	if (!sock)
