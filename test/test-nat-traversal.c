@@ -5,6 +5,7 @@
 */
 
 #include "nat_detect.h"
+#include "method.h"
 #include "peer.h"
 #include "punch_rpc.h"
 
@@ -141,6 +142,13 @@ enum {
 
 static fastd_peer_t *test_send_peer;
 static size_t test_send_count;
+static const uint8_t test_key_a[32] = { 1 };
+static const uint8_t test_key_b[32] = { 2 };
+static const fastd_method_info_t test_control_method = {
+	.provider = &(const fastd_method_provider_t){
+		.flags = METHOD_SUPPORTS_CONTROL,
+	},
+};
 
 static void test_protocol_send(fastd_peer_t *peer, fastd_buffer_t *buffer) {
 	test_send_peer = peer;
@@ -148,9 +156,39 @@ static void test_protocol_send(fastd_peer_t *peer, fastd_buffer_t *buffer) {
 	fastd_buffer_free(buffer);
 }
 
+static void test_protocol_send_control(fastd_peer_t *peer UNUSED, fastd_buffer_t *buffer) {
+	fastd_buffer_free(buffer);
+}
+
+static size_t test_protocol_key_length(void) {
+	return sizeof(test_key_a);
+}
+
+static const void *test_protocol_get_own_key(void) {
+	return test_key_a;
+}
+
+static const void *test_protocol_get_peer_key(const fastd_peer_t *peer) {
+	return peer && peer->id == 20 ? test_key_b : test_key_a;
+}
+
+static fastd_peer_t *test_protocol_find_peer_by_key_data(const void *key UNUSED, size_t len UNUSED) {
+	return NULL;
+}
+
+static const fastd_method_info_t *test_protocol_get_current_method(const fastd_peer_t *peer UNUSED) {
+	return &test_control_method;
+}
+
 static const fastd_protocol_t test_protocol = {
 	.name = "test",
 	.send = test_protocol_send,
+	.send_control = test_protocol_send_control,
+	.key_length = test_protocol_key_length,
+	.get_own_key = test_protocol_get_own_key,
+	.get_peer_key = test_protocol_get_peer_key,
+	.find_peer_by_key_data = test_protocol_find_peer_by_key_data,
+	.get_current_method = test_protocol_get_current_method,
 };
 
 static fastd_peer_address_t addr4(uint32_t ip, uint16_t port) {
@@ -1553,6 +1591,8 @@ static void test_punch_pair_runtime_tracks_inflight_backoff_and_demand(void **st
 	__typeof__(ctx.punch_pair_states) old_pair_states = ctx.punch_pair_states;
 	fastd_task_t old_next_maintenance = ctx.next_maintenance;
 	fastd_pqueue_t *old_task_queue = ctx.task_queue;
+	const fastd_protocol_t *old_protocol = conf.protocol;
+	bool old_control_relay = conf.punch_control_relay;
 	fastd_punch_pair_task_t old_pair_tasks[FASTD_PUNCH_PAIR_TASK_HISTORY];
 	memcpy(old_pair_tasks, ctx.punch_pair_tasks, sizeof(old_pair_tasks));
 	uint64_t old_next_pair_task_id = ctx.next_punch_pair_task_id;
@@ -1570,6 +1610,8 @@ static void test_punch_pair_runtime_tracks_inflight_backoff_and_demand(void **st
 	ctx.punch_pair_task_count = 0;
 	ctx.punch_task_manager_aborted = 0;
 	ctx.now = 1000;
+	conf.protocol = &test_protocol;
+	conf.punch_control_relay = true;
 
 	fastd_peer_t a = {
 		.id = 30,
@@ -1668,12 +1710,20 @@ static void test_punch_pair_runtime_tracks_inflight_backoff_and_demand(void **st
 	fastd_punch_note_peer_pair_demand(&a, &b);
 	assert_int_equal(fastd_task_timeout(&ctx.next_maintenance), ctx.now - 1);
 
+	fastd_task_unschedule(&ctx.next_maintenance);
+	conf.punch_control_relay = false;
+	fastd_punch_note_peer_pair_demand(&a, &b);
+	assert_int_equal(fastd_task_timeout(&ctx.next_maintenance), FASTD_TIMEOUT_INV);
+	assert_null(ctx.task_queue);
+
 	VECTOR_FREE(a.punch_relay_backoffs);
 	fastd_task_unschedule(&ctx.next_maintenance);
 	VECTOR_FREE(ctx.punch_pair_states);
 	ctx.punch_pair_states = old_pair_states;
 	ctx.next_maintenance = old_next_maintenance;
 	ctx.task_queue = old_task_queue;
+	conf.protocol = old_protocol;
+	conf.punch_control_relay = old_control_relay;
 	memcpy(ctx.punch_pair_tasks, old_pair_tasks, sizeof(ctx.punch_pair_tasks));
 	ctx.next_punch_pair_task_id = old_next_pair_task_id;
 	ctx.punch_pair_task_pos = old_pair_task_pos;
