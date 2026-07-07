@@ -2748,6 +2748,12 @@ static size_t relay_endpoint_to_peer(
 		return 0;
 	if (!limit)
 		return 0;
+	if (!fastd_peer_hole_punch_allows(dest, TRANSPORT_UDP) ||
+	    !fastd_peer_transport_allows(fastd_peer_get_transport(dest), TRANSPORT_UDP))
+		return 0;
+	if (!fastd_peer_hole_punch_allows(subject, TRANSPORT_UDP) ||
+	    !fastd_peer_transport_allows(fastd_peer_get_transport(subject), TRANSPORT_UDP))
+		return 0;
 
 	fastd_peer_punch_endpoint_t endpoints[FASTD_NAT_MAX_PUBLIC_ENDPOINTS + 1] = {};
 	size_t n_endpoints = get_peer_endpoints(subject, endpoints, array_size(endpoints));
@@ -3451,6 +3457,19 @@ static void handle_send_endpoint_command(fastd_peer_t *sender, const fastd_punch
 			&endpoint, requested_count, 1, 0, payload->reserved, 0, 0, 0, 0);
 		send_punch_result(
 			sender, key, key_len, &endpoint, FASTD_PUNCH_RESULT_NO_PEER, type, requested_count, 0, 0, 0, 0,
+			NULL, 0, false);
+		return;
+	}
+
+	if (!fastd_peer_hole_punch_allows(peer, TRANSPORT_UDP) ||
+	    !fastd_peer_transport_allows(fastd_peer_get_transport(peer), TRANSPORT_UDP)) {
+		record_punch_task(
+			peer, PEER_PUNCH_TASK_ROLE_COMMAND_TARGET, task_command, PEER_PUNCH_TASK_RESULT_SUPPRESSED,
+			&endpoint, requested_count, 1, 0, payload->reserved, 0, peer->punch_hard_sym_port_index,
+			peer->punch_hard_sym_port_index, peer->punch_hard_sym_round);
+		send_punch_result(
+			sender, key, key_len, &endpoint, FASTD_PUNCH_RESULT_SUPPRESSED, type, requested_count, 0,
+			peer->punch_hard_sym_port_index, peer->punch_hard_sym_port_index, peer->punch_hard_sym_round,
 			NULL, 0, false);
 		return;
 	}

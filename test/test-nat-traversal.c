@@ -7,12 +7,14 @@
 #include "nat_detect.h"
 #include "method.h"
 #include "peer.h"
+#include "peer_hashtable.h"
 #include "punch_rpc.h"
 
 #include <setjmp.h>
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <sys/socket.h>
 
 #include <cmocka.h>
 
@@ -1559,6 +1561,55 @@ static void test_punch_data_relay_only_for_learned_nat_unicast(void **state UNUS
 	ctx.now = old_now;
 }
 
+static void test_punch_udp_command_suppressed_for_tcp_only_peer(void **state UNUSED) {
+	const fastd_protocol_t *old_protocol = conf.protocol;
+	fastd_peer_t *old_lookup_peer = test_lookup_peer;
+	size_t old_handshake_count = test_handshake_count;
+	size_t old_encrypt_headroom = conf.encrypt_headroom;
+	size_t old_max_buffer = ctx.max_buffer;
+
+	fastd_peer_t sender = {
+		.id = 10,
+		.name = "sender",
+		.state = STATE_ESTABLISHED,
+	};
+	fastd_peer_t peer = {
+		.id = 20,
+		.name = "peer",
+		.transport = TRANSPORT_TCP,
+		.hole_punch = HOLE_PUNCH_TCP,
+		.nat_traversal = FASTD_TRISTATE_TRUE,
+	};
+	fastd_peer_address_t endpoint = addr4(0xcb007105, 41000);
+
+	conf.protocol = &test_protocol;
+	conf.encrypt_headroom = 0;
+	ctx.max_buffer = 2048;
+	fastd_init_buffers();
+	test_lookup_peer = &peer;
+	test_handshake_count = 0;
+	test_reset_control_sends();
+
+	assert_true(fastd_punch_handle_control(
+		&sender,
+		make_punch_control_buffer(
+			TEST_PUNCH_SEND_CONE, &endpoint, FASTD_NAT_FULL_CONE, test_key_b, sizeof(test_key_b))));
+
+	assert_int_equal(VECTOR_LEN(peer.direct_candidates), 0);
+	assert_int_equal(test_handshake_count, 0);
+	assert_ptr_equal(test_control_send_peer, &sender);
+	assert_int_equal(test_control_send_count, 2);
+	assert_int_equal(test_control_send_types[0], TEST_PUNCH_RESULT);
+	assert_int_equal(test_control_send_types[1], TEST_PUNCH_RESULT_EXT);
+
+	fastd_cleanup_buffers();
+	conf.protocol = old_protocol;
+	test_lookup_peer = old_lookup_peer;
+	test_handshake_count = old_handshake_count;
+	conf.encrypt_headroom = old_encrypt_headroom;
+	ctx.max_buffer = old_max_buffer;
+}
+
 static void test_punch_nat_refresh_policy(void **state UNUSED) {
 	ctx.now = 10000;
 	conf.punch_announce_interval = 15000;
@@ -2561,6 +2612,142 @@ static void test_punch_task_manager_relays_multiple_tcp_endpoints_with_budget(vo
 	fastd_cleanup_buffers();
 }
 
+static void test_punch_task_manager_tcp_only_skips_udp_commands(void **state UNUSED) {
+	__typeof__(ctx.peers) old_peers = ctx.peers;
+	__typeof__(ctx.punch_pair_states) old_pair_states = ctx.punch_pair_states;
+	const fastd_protocol_t *old_protocol = conf.protocol;
+	fastd_peer_group_t *old_peer_group = conf.peer_group;
+	bool old_control_relay = conf.punch_control_relay;
+	unsigned old_relay_interval = conf.punch_relay_interval;
+	unsigned old_max_packets = conf.punch_max_packets;
+	size_t old_encrypt_headroom = conf.encrypt_headroom;
+	size_t old_max_buffer = ctx.max_buffer;
+	int64_t old_now = ctx.now;
+
+	ctx.peers = (__typeof__(ctx.peers)){};
+	ctx.punch_pair_states = (__typeof__(ctx.punch_pair_states)){};
+	ctx.now = 1000;
+	conf.protocol = &test_protocol;
+	conf.punch_control_relay = true;
+	conf.punch_relay_interval = 7000;
+	conf.punch_max_packets = 8;
+	conf.encrypt_headroom = 0;
+	ctx.max_buffer = 2048;
+	test_reset_control_sends();
+	fastd_init_buffers();
+
+	fastd_peer_group_t group = {
+		.transport = TRANSPORT_TCP,
+		.hole_punch = HOLE_PUNCH_TCP,
+		.nat_traversal = FASTD_TRISTATE_TRUE,
+	};
+	conf.peer_group = &group;
+
+	fastd_peer_t a = {
+		.id = 30,
+		.group = &group,
+		.name = "peer-a",
+		.state = STATE_ESTABLISHED,
+		.address = addr4(0xcb007105, 41000),
+		.punch_endpoint = addr4(0xc6336407, 51010),
+		.punch_nat_type = FASTD_NAT_FULL_CONE,
+		.punch_min_port = 51010,
+		.punch_max_port = 51010,
+		.punch_timeout = ctx.now + 10000,
+		.tcp_punch_endpoint = addr4(0xc6336407, 51000),
+		.n_tcp_punch_endpoints = 1,
+		.tcp_punch_nat_type = FASTD_NAT_FULL_CONE,
+		.tcp_punch_min_port = 51000,
+		.tcp_punch_max_port = 51000,
+		.tcp_punch_timeout = ctx.now + 10000,
+		.next_punch_relay = ctx.now,
+	};
+	a.punch_endpoints[0] = (fastd_peer_punch_endpoint_t){
+		.address = a.punch_endpoint,
+		.nat_type = a.punch_nat_type,
+		.min_port = a.punch_min_port,
+		.max_port = a.punch_max_port,
+	};
+	a.n_punch_endpoints = 1;
+	a.tcp_punch_endpoints[0] = a.tcp_punch_endpoint;
+
+	fastd_peer_t b = {
+		.id = 20,
+		.group = &group,
+		.name = "peer-b",
+		.state = STATE_ESTABLISHED,
+		.address = addr4(0xcb007106, 42000),
+		.punch_endpoint = addr4(0xc6336408, 52010),
+		.punch_nat_type = FASTD_NAT_FULL_CONE,
+		.punch_min_port = 52010,
+		.punch_max_port = 52010,
+		.punch_timeout = ctx.now + 10000,
+		.tcp_punch_endpoint = addr4(0xc6336408, 52000),
+		.n_tcp_punch_endpoints = 1,
+		.tcp_punch_nat_type = FASTD_NAT_FULL_CONE,
+		.tcp_punch_min_port = 52000,
+		.tcp_punch_max_port = 52000,
+		.tcp_punch_timeout = ctx.now + 10000,
+		.next_punch_relay = ctx.now,
+	};
+	b.punch_endpoints[0] = (fastd_peer_punch_endpoint_t){
+		.address = b.punch_endpoint,
+		.nat_type = b.punch_nat_type,
+		.min_port = b.punch_min_port,
+		.max_port = b.punch_max_port,
+	};
+	b.n_punch_endpoints = 1;
+	b.tcp_punch_endpoints[0] = b.tcp_punch_endpoint;
+
+	VECTOR_ADD(ctx.peers, &a);
+	VECTOR_ADD(ctx.peers, &b);
+
+	fastd_punch_test_relay_peer_endpoints();
+	size_t tcp_commands = 0;
+	size_t udp_commands = 0;
+	bool saw_a_tcp_endpoint = false;
+	bool saw_b_tcp_endpoint = false;
+	size_t i;
+	for (i = 0; i < test_control_send_count && i < TEST_CONTROL_HISTORY; i++) {
+		switch (test_control_send_types[i]) {
+		case TEST_PUNCH_SEND_TCP:
+			tcp_commands++;
+			if (test_control_send_ports[i] == 51000)
+				saw_a_tcp_endpoint = true;
+			if (test_control_send_ports[i] == 52000)
+				saw_b_tcp_endpoint = true;
+			break;
+
+		case TEST_PUNCH_SEND_CONE:
+		case TEST_PUNCH_SEND_EASY_SYM:
+		case TEST_PUNCH_SEND_HARD_SYM:
+		case TEST_PUNCH_BOTH_EASY_SYM:
+			udp_commands++;
+			break;
+		}
+	}
+	assert_int_equal(tcp_commands, 2);
+	assert_int_equal(udp_commands, 0);
+	assert_true(saw_a_tcp_endpoint);
+	assert_true(saw_b_tcp_endpoint);
+	assert_int_equal(ctx.punch_task_manager_budget_exhausted, 0);
+
+	VECTOR_FREE(ctx.peers);
+	VECTOR_FREE(ctx.punch_pair_states);
+	ctx.peers = old_peers;
+	ctx.punch_pair_states = old_pair_states;
+	conf.protocol = old_protocol;
+	conf.peer_group = old_peer_group;
+	conf.punch_control_relay = old_control_relay;
+	conf.punch_relay_interval = old_relay_interval;
+	conf.punch_max_packets = old_max_packets;
+	conf.encrypt_headroom = old_encrypt_headroom;
+	ctx.max_buffer = old_max_buffer;
+	ctx.now = old_now;
+	test_reset_control_sends();
+	fastd_cleanup_buffers();
+}
+
 static void test_punch_send_tcp_preserves_multiple_received_endpoints(void **state UNUSED) {
 	const fastd_protocol_t *old_protocol = conf.protocol;
 	fastd_peer_group_t *old_peer_group = conf.peer_group;
@@ -2660,6 +2847,109 @@ static void test_punch_send_tcp_preserves_multiple_received_endpoints(void **sta
 	test_handshake_transport = TRANSPORT_UNSET;
 	test_handshake_remote = (fastd_peer_address_t){};
 	fastd_cleanup_buffers();
+}
+
+static void test_tcp_direct_handshake_reuses_unestablished_candidate_socket(void **state UNUSED) {
+	const fastd_protocol_t *old_protocol = conf.protocol;
+	fastd_peer_group_t *old_peer_group = conf.peer_group;
+	int old_epoll_fd = ctx.epoll_fd;
+	uint32_t old_peer_addr_ht_seed = ctx.peer_addr_ht_seed;
+	size_t old_peer_addr_ht_size = ctx.peer_addr_ht_size;
+	size_t old_peer_addr_ht_used = ctx.peer_addr_ht_used;
+	__typeof__(ctx.peer_addr_ht) old_peer_addr_ht = ctx.peer_addr_ht;
+	__typeof__(ctx.tcp_socks) old_tcp_socks = ctx.tcp_socks;
+	__typeof__(ctx.deferred_socks) old_deferred_socks = ctx.deferred_socks;
+	int64_t old_now = ctx.now;
+
+	ctx.now = 1000;
+	ctx.peer_addr_ht_seed = 0;
+	ctx.peer_addr_ht_size = 0;
+	ctx.peer_addr_ht_used = 0;
+	ctx.peer_addr_ht = NULL;
+	ctx.tcp_socks = (__typeof__(ctx.tcp_socks)){};
+	ctx.deferred_socks = (__typeof__(ctx.deferred_socks)){};
+	conf.protocol = &test_protocol;
+	test_handshake_count = 0;
+	test_handshake_peer = NULL;
+	test_handshake_transport = TRANSPORT_UNSET;
+	test_handshake_remote = (fastd_peer_address_t){};
+	fastd_poll_init();
+	ctx.peer_addr_ht_seed = 0x12345678;
+	ctx.peer_addr_ht_size = 8;
+	ctx.peer_addr_ht = fastd_new0_array(ctx.peer_addr_ht_size, __typeof__(*ctx.peer_addr_ht));
+
+	fastd_peer_group_t group = {
+		.transport = TRANSPORT_TCP,
+		.hole_punch = HOLE_PUNCH_TCP,
+		.nat_traversal = FASTD_TRISTATE_TRUE,
+		.max_connections = -1,
+	};
+	conf.peer_group = &group;
+
+	fastd_peer_address_t endpoint = addr4(0xc6336408, 52000);
+	fastd_peer_t peer = {
+		.id = 20,
+		.group = &group,
+		.config_state = CONFIG_STATIC,
+		.name = "peer-b",
+		.state = STATE_INACTIVE,
+		.transport = TRANSPORT_TCP,
+		.hole_punch = HOLE_PUNCH_TCP,
+		.nat_traversal = FASTD_TRISTATE_TRUE,
+	};
+
+	int fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, IPPROTO_TCP);
+	assert_true(fd >= 0);
+
+	fastd_socket_t *tcp_sock = fastd_new0(fastd_socket_t);
+	tcp_sock->fd = FASTD_POLL_FD(POLL_TYPE_SOCKET, fd);
+	tcp_sock->type = SOCKET_TYPE_TCP_CONNECTION;
+	tcp_sock->peer = &peer;
+	tcp_sock->peer_addr = endpoint;
+	tcp_sock->bound_addr = fastd_new(fastd_peer_address_t);
+	*tcp_sock->bound_addr = addr4(0x0a000001, 10001);
+	peer.sock = tcp_sock;
+	peer.local_address = *tcp_sock->bound_addr;
+	VECTOR_ADD(ctx.tcp_socks, tcp_sock);
+	fastd_poll_fd_register(&tcp_sock->fd);
+
+	assert_true(fastd_peer_add_punch_control_candidate_transport(
+		&peer, &endpoint, 120, false, 0, 0, DIRECT_CANDIDATE_TRANSPORT_TCP));
+	assert_true(fastd_peer_send_direct_handshake_transport(&peer, &endpoint, TRANSPORT_TCP));
+
+	assert_ptr_equal(peer.sock, tcp_sock);
+	assert_ptr_equal(tcp_sock->peer, &peer);
+	assert_int_equal(test_handshake_count, 1);
+	assert_ptr_equal(test_handshake_peer, &peer);
+	assert_int_equal(test_handshake_transport, TRANSPORT_TCP);
+	assert_true(fastd_peer_address_equal(&test_handshake_remote, &endpoint));
+
+	fastd_socket_close(tcp_sock);
+	fastd_socket_free_dynamic(tcp_sock);
+	fastd_socket_free_deferred();
+	fastd_peer_hashtable_remove(&peer);
+	peer.address = (fastd_peer_address_t){};
+	fastd_peer_hashtable_free();
+	fastd_poll_free();
+	VECTOR_FREE(ctx.tcp_socks);
+	VECTOR_FREE(ctx.deferred_socks);
+	VECTOR_FREE(peer.direct_candidates);
+	VECTOR_FREE(peer.punch_suppressions);
+	fastd_task_unschedule(&peer.task);
+	conf.protocol = old_protocol;
+	conf.peer_group = old_peer_group;
+	ctx.epoll_fd = old_epoll_fd;
+	ctx.peer_addr_ht_seed = old_peer_addr_ht_seed;
+	ctx.peer_addr_ht_size = old_peer_addr_ht_size;
+	ctx.peer_addr_ht_used = old_peer_addr_ht_used;
+	ctx.peer_addr_ht = old_peer_addr_ht;
+	ctx.tcp_socks = old_tcp_socks;
+	ctx.deferred_socks = old_deferred_socks;
+	ctx.now = old_now;
+	test_handshake_count = 0;
+	test_handshake_peer = NULL;
+	test_handshake_transport = TRANSPORT_UNSET;
+	test_handshake_remote = (fastd_peer_address_t){};
 }
 
 static void test_punch_accepts_relayed_nat_metadata(void **state UNUSED) {
@@ -4261,6 +4551,7 @@ int main(void) {
 		cmocka_unit_test(test_ec25519_simultaneous_responder_yield_is_deterministic),
 		cmocka_unit_test(test_punch_data_relay_effective_setting),
 		cmocka_unit_test(test_punch_data_relay_only_for_learned_nat_unicast),
+		cmocka_unit_test(test_punch_udp_command_suppressed_for_tcp_only_peer),
 		cmocka_unit_test(test_punch_nat_refresh_policy),
 		cmocka_unit_test(test_punch_observed_udp_metadata_fills_without_stun),
 		cmocka_unit_test(test_punch_task_pair_state_requires_established_metadata_and_due),
@@ -4271,7 +4562,9 @@ int main(void) {
 		cmocka_unit_test(test_punch_task_manager_prewarms_relayed_nat_metadata),
 		cmocka_unit_test(test_punch_task_manager_skips_endpoint_dependent_post_command_prewarm),
 		cmocka_unit_test(test_punch_task_manager_relays_multiple_tcp_endpoints_with_budget),
+		cmocka_unit_test(test_punch_task_manager_tcp_only_skips_udp_commands),
 		cmocka_unit_test(test_punch_send_tcp_preserves_multiple_received_endpoints),
+		cmocka_unit_test(test_tcp_direct_handshake_reuses_unestablished_candidate_socket),
 		cmocka_unit_test(test_punch_accepts_relayed_nat_metadata),
 		cmocka_unit_test(test_punch_metadata_updates_wake_task_manager),
 		cmocka_unit_test(test_punch_task_manager_outcome_accounting),

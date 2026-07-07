@@ -2443,6 +2443,26 @@ static fastd_socket_t *default_udp_socket_for_address(const fastd_peer_address_t
 	}
 }
 
+/** Returns true if an unestablished peer can retry a TCP handshake on its current candidate socket */
+static bool can_reuse_unestablished_tcp_socket(
+	const fastd_peer_t *peer, const fastd_peer_address_t *addr, fastd_peer_transport_t preferred_transport,
+	uint8_t candidate_transports) {
+	if (!peer->sock || !fastd_socket_is_open(peer->sock) || !fastd_socket_is_tcp(peer->sock))
+		return false;
+
+	if (!fastd_peer_address_equal(&peer->address, addr) || !fastd_peer_address_equal(&peer->sock->peer_addr, addr))
+		return false;
+
+	if (!fastd_peer_transport_allows(fastd_peer_get_transport(peer), TRANSPORT_TCP))
+		return false;
+
+	if (preferred_transport == TRANSPORT_TCP || fastd_peer_get_transport(peer) == TRANSPORT_TCP)
+		return true;
+
+	return candidate_transports && direct_candidate_mask_allows(candidate_transports, TRANSPORT_TCP) &&
+	       !direct_candidate_mask_allows(candidate_transports, TRANSPORT_UDP);
+}
+
 /** Sends a new handshake to a specific peer address, optionally forcing a concrete transport */
 static bool send_handshake_address_transport(
 	fastd_peer_t *peer, const fastd_peer_address_t *addr, fastd_peer_transport_t preferred_transport, bool force_send) {
@@ -2466,7 +2486,8 @@ static bool send_handshake_address_transport(
 				peer->transport_probe = TRANSPORT_UDP;
 		}
 
-		fastd_peer_reset_socket(peer);
+		if (!can_reuse_unestablished_tcp_socket(peer, addr, preferred_transport, candidate_transports))
+			fastd_peer_reset_socket(peer);
 
 		sock = peer->sock;
 		local_address = peer->local_address;
