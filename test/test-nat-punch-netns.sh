@@ -47,6 +47,7 @@ for cmd in ip nft ping python3 mktemp timeout; do
 done
 
 IPERF_MODE=${FASTD_NAT_PUNCH_IPERF:-0}
+TCP_MODE=${FASTD_NAT_PUNCH_TCP:-0}
 if [[ "$IPERF_MODE" == 1 ]]; then
 	command -v iperf3 >/dev/null 2>&1 || skip 'iperf3 not available'
 fi
@@ -91,6 +92,7 @@ IPERF_SERVER_IDLE_TIMEOUT=${FASTD_IPERF_SERVER_IDLE_TIMEOUT:-30}
 IPERF_MIN_BYTES_FLOOR=50000000
 IPERF_MIN_BYTES=${FASTD_IPERF_MIN_BYTES:-$IPERF_MIN_BYTES_FLOOR}
 IPERF_CASE_GROUP=${FASTD_IPERF_CASE_GROUP:-basic}
+FASTD_LOG_LEVEL=${FASTD_LOG_LEVEL:-verbose}
 
 if ! [[ "$IPERF_MIN_BYTES" =~ ^[0-9]+$ ]]; then
 	echo "invalid FASTD_IPERF_MIN_BYTES: $IPERF_MIN_BYTES" >&2
@@ -350,6 +352,37 @@ def direct_hole_punched(doc, name):
     )
 
 sys.exit(0 if direct_hole_punched(a, "b") and direct_hole_punched(b, "a") else 1)
+PY
+}
+
+direct_tcp_hole_punched() {
+	python3 - "$WORK/a.json" "$WORK/b.json" <<'PY'
+import json
+import sys
+
+try:
+    a = json.load(open(sys.argv[1]))
+    b = json.load(open(sys.argv[2]))
+except Exception:
+    sys.exit(1)
+
+def find_peer(doc, name):
+    for peer in doc.get("peers", {}).values():
+        if peer.get("name") == name:
+            return peer
+    return {}
+
+def direct_tcp_hole_punched(doc, name):
+    peer = find_peer(doc, name)
+    connection = peer.get("connection") or {}
+    hole_punch = peer.get("hole_punch") or {}
+    return (
+        "established" in connection
+        and hole_punch.get("established")
+        and hole_punch.get("transport") == "tcp"
+    )
+
+sys.exit(0 if direct_tcp_hole_punched(a, "b") and direct_tcp_hole_punched(b, "a") else 1)
 PY
 }
 
@@ -635,6 +668,30 @@ sys.exit(0)
 PY
 }
 
+tcp_nat_types_seen() {
+	python3 - "$WORK/a.json" "$WORK/b.json" <<'PY'
+import json
+import sys
+
+try:
+    a = json.load(open(sys.argv[1]))
+    b = json.load(open(sys.argv[2]))
+except Exception:
+    sys.exit(1)
+
+for doc in (a, b):
+    nat = doc.get("nat") or {}
+    if nat.get("tcp_available") is not True:
+        sys.exit(1)
+    if nat.get("tcp_type") not in ("no-pat", "full-cone", "open-internet"):
+        sys.exit(1)
+    if not nat.get("tcp_public_address"):
+        sys.exit(1)
+
+sys.exit(0)
+PY
+}
+
 make_public_link() {
 	local ns=$1 ifname=$2 host=$3
 	local peer="${host}p"
@@ -705,6 +762,8 @@ done
 
 run ip netns exec "$NS_RA" nft add rule ip nat prerouting iifname pub udp dport 10001 dnat to 10.52.1.2:10001
 run ip netns exec "$NS_RB" nft add rule ip nat prerouting iifname pub udp dport 10001 dnat to 10.52.2.2:10001
+run ip netns exec "$NS_RA" nft add rule ip nat prerouting iifname pub tcp dport 10001 dnat to 10.52.1.2:10001
+run ip netns exec "$NS_RB" nft add rule ip nat prerouting iifname pub tcp dport 10001 dnat to 10.52.2.2:10001
 run ip netns exec "$NS_RA" nft add rule ip nat postrouting ip saddr 10.52.1.0/24 oifname pub masquerade
 run ip netns exec "$NS_RB" nft add rule ip nat postrouting ip saddr 10.52.2.0/24 oifname pub masquerade
 
@@ -924,6 +983,54 @@ peer "b" { key "$PUB_B"; nat traversal yes; }
 EOF
 }
 
+write_tcp_punch_confs() {
+	cat > "$WORK/a.conf" <<EOF
+mode multitap;
+interface "fda-%n";
+persist interface no;
+method "salsa2012+umac";
+secret "$SEC_A";
+bind 0.0.0.0:10001;
+status socket "$WORK/a.status";
+stun server "10.52.0.1" port 3478;
+stun server "10.52.0.1" port 3479;
+$(punch_test_limits)
+peer "c" { key "$PUB_C"; remote 10.52.0.1 port 10000; transport tcp; }
+peer "b" { key "$PUB_B"; nat traversal yes; transport tcp; hole-punch tcp; }
+EOF
+
+	cat > "$WORK/b.conf" <<EOF
+mode multitap;
+interface "fdb-%n";
+persist interface no;
+method "salsa2012+umac";
+secret "$SEC_B";
+bind 0.0.0.0:10001;
+status socket "$WORK/b.status";
+stun server "10.52.0.1" port 3478;
+stun server "10.52.0.1" port 3479;
+$(punch_test_limits)
+peer "c" { key "$PUB_C"; remote 10.52.0.1 port 10000; transport tcp; }
+peer "a" { key "$PUB_A"; nat traversal yes; transport tcp; hole-punch tcp; }
+EOF
+
+	cat > "$WORK/c.conf" <<EOF
+mode multitap;
+interface "fdc-%n";
+persist interface no;
+method "salsa2012+umac";
+secret "$SEC_C";
+bind 10.52.0.1:10000;
+status socket "$WORK/c.status";
+forward no;
+peer discovery no;
+nat traversal yes;
+$(punch_test_limits)
+peer "a" { key "$PUB_A"; nat traversal yes; transport tcp; hole-punch tcp; }
+peer "b" { key "$PUB_B"; nat traversal yes; transport tcp; hole-punch tcp; }
+EOF
+}
+
 start_fake_stun() {
 	local mode=${1:-symmetric_to_cone}
 
@@ -952,6 +1059,9 @@ def stop(signum, frame):
 
 def mapped_endpoint(source):
     ip, port = source
+
+    if MODE == "tcp":
+        return ip, port
 
     if MODE == "hard_both" and ip == "10.52.0.2":
         sequence = (43100, 43250, 43180, 43320, 43140, 43290)
@@ -1001,21 +1111,79 @@ signal.signal(signal.SIGTERM, stop)
 signal.signal(signal.SIGINT, stop)
 
 sockets = []
-for port in (3478, 3479):
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind((SERVER_IP, port))
+socket_roles = {}
+tcp_buffers = {}
+
+
+def add_socket(sock, role):
+    sock.setblocking(False)
     sockets.append(sock)
+    socket_roles[sock] = role
+
+
+def close_socket(sock):
+    if sock in sockets:
+        sockets.remove(sock)
+    socket_roles.pop(sock, None)
+    tcp_buffers.pop(sock, None)
+    sock.close()
+
+
+for port in (3478, 3479):
+    udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    udp_sock.bind((SERVER_IP, port))
+    add_socket(udp_sock, "udp")
+
+    tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    tcp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    tcp_sock.bind((SERVER_IP, port))
+    tcp_sock.listen(16)
+    add_socket(tcp_sock, "tcp-listener")
 
 open(READY, "w").close()
 
 while running:
     readable, _, _ = select.select(sockets, [], [], 0.5)
     for sock in readable:
-        data, source = sock.recvfrom(2048)
-        response = stun_response(data, source)
-        if response:
-            sock.sendto(response, source)
+        role = socket_roles.get(sock)
+        if role == "udp":
+            data, source = sock.recvfrom(2048)
+            response = stun_response(data, source)
+            if response:
+                sock.sendto(response, source)
+        elif role == "tcp-listener":
+            while True:
+                try:
+                    conn, source = sock.accept()
+                except BlockingIOError:
+                    break
+                add_socket(conn, "tcp-client")
+                tcp_buffers[conn] = [b"", source]
+        elif role == "tcp-client":
+            try:
+                data = sock.recv(2048)
+            except BlockingIOError:
+                continue
+            if not data:
+                close_socket(sock)
+                continue
+
+            buf, source = tcp_buffers[sock]
+            buf += data
+            tcp_buffers[sock][0] = buf
+            if len(buf) < 20:
+                continue
+
+            msg_len = struct.unpack("!H", buf[2:4])[0]
+            total = 20 + msg_len
+            if len(buf) < total:
+                continue
+
+            response = stun_response(buf[:total], source)
+            if response:
+                sock.sendall(response)
+            close_socket(sock)
 
 for sock in sockets:
     sock.close()
@@ -1043,7 +1211,7 @@ start_fastds() {
 	: > "$WORK/b.ping"
 	: > "$WORK/c.ping"
 
-	ip netns exec "$NS_C" "$FASTD" --config "$WORK/c.conf" --log-level verbose > "$WORK/c.log" 2>&1 &
+	ip netns exec "$NS_C" "$FASTD" --config "$WORK/c.conf" --log-level "$FASTD_LOG_LEVEL" > "$WORK/c.log" 2>&1 &
 	PID_C=$!
 	PIDS=("$PID_C")
 
@@ -1053,9 +1221,9 @@ start_fastds() {
 		sleep "$SHORT_WAIT_SLEEP"
 	done
 
-	ip netns exec "$NS_A" "$FASTD" --config "$WORK/a.conf" --log-level verbose > "$WORK/a.log" 2>&1 &
+	ip netns exec "$NS_A" "$FASTD" --config "$WORK/a.conf" --log-level "$FASTD_LOG_LEVEL" > "$WORK/a.log" 2>&1 &
 	PIDS+=("$!")
-	ip netns exec "$NS_B" "$FASTD" --config "$WORK/b.conf" --log-level verbose > "$WORK/b.log" 2>&1 &
+	ip netns exec "$NS_B" "$FASTD" --config "$WORK/b.conf" --log-level "$FASTD_LOG_LEVEL" > "$WORK/b.log" 2>&1 &
 	PIDS+=("$!")
 }
 
@@ -1416,8 +1584,47 @@ run_iperf_tests() {
 	fi
 }
 
+run_tcp_tests() {
+	printf '1..1\n'
+	CURRENT_TEST=1
+
+	start_fake_stun tcp
+	write_tcp_punch_confs
+	start_fastds
+
+	ok=false
+	for _ in $(seq 1 "$FAST_WAIT_ATTEMPTS"); do
+		sleep "$FAST_WAIT_SLEEP"
+		check_fastds_alive
+		dump_statuses
+
+		if [[ -f "$WORK/a.json" && -f "$WORK/b.json" && -f "$WORK/c.json" ]] &&
+			tcp_nat_types_seen && direct_tcp_hole_punched && punch_results_seen; then
+			ok=true
+			break
+		fi
+	done
+
+	[[ "$ok" == true ]] || fail 'direct TCP punch path was not established'
+
+	run ip -n "$NS_A" addr add 10.52.10.1/30 dev fda-b
+	run ip -n "$NS_B" addr add 10.52.10.2/30 dev fdb-a
+	run ip -n "$NS_A" link set fda-b up
+	run ip -n "$NS_B" link set fdb-a up
+	ip -n "$NS_A" addr show dev fda-b > "$WORK/a.ip" 2>&1 || true
+	ip -n "$NS_B" addr show dev fdb-a > "$WORK/b.ip" 2>&1 || true
+	wait_for_direct_ping 'direct TCP-punched A/B data path failed'
+
+	printf 'ok 1 - control relay establishes a direct TCP punch path through port-preserving mappings\n'
+}
+
 if [[ "$IPERF_MODE" == 1 ]]; then
 	run_iperf_tests
+	exit 0
+fi
+
+if [[ "$TCP_MODE" == 1 ]]; then
+	run_tcp_tests
 	exit 0
 fi
 

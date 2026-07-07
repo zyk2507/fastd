@@ -676,6 +676,11 @@ static fastd_socket_t *open_tcp_listener(fastd_socket_t *udp_sock) {
 	if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)))
 		pr_warn_errno("setsockopt: unable to set SO_REUSEADDR");
 
+#ifdef SO_REUSEPORT
+	if (setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one)))
+		pr_warn_errno("setsockopt: unable to set SO_REUSEPORT");
+#endif
+
 	if (addr->sa.sa_family == AF_INET6) {
 		int val = (udp_sock->addr && udp_sock->addr->addr.sa.sa_family == AF_INET6);
 		if (setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &val, sizeof(val))) {

@@ -202,6 +202,8 @@ struct fastd_peer {
 
 	fastd_peer_address_t last_handshake_address;          /**< The address the last handshake was sent to */
 	fastd_peer_address_t last_handshake_response_address; /**< The address the last handshake was received from */
+	fastd_peer_transport_t last_handshake_transport;      /**< The transport used for the last sent handshake */
+	fastd_peer_transport_t last_handshake_response_transport; /**< Transport used for the last handshake response */
 	ssize_t next_remote;                                  /**< An index into the field remotes or -1 */
 	fastd_peer_transport_t transport_probe; /**< Transport currently probed for automatic transport mode */
 	fastd_timeout_t turn_fallback_timeout;  /**< Timeout before automatic TURN fallback is used */

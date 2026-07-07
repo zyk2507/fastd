@@ -34,7 +34,7 @@ static bool direct_candidate_valid(const fastd_peer_direct_candidate_t *candidat
 static void clear_direct_candidate_cache(fastd_peer_t *peer);
 static bool send_handshake_address(fastd_peer_t *peer, const fastd_peer_address_t *addr);
 static bool send_handshake_address_transport(
-	fastd_peer_t *peer, const fastd_peer_address_t *addr, fastd_peer_transport_t preferred_transport);
+	fastd_peer_t *peer, const fastd_peer_address_t *addr, fastd_peer_transport_t preferred_transport, bool force_send);
 
 /** Adds address and port of an fastd_peer_address_t to \e env */
 static void fastd_peer_set_shell_env_addr(
@@ -436,6 +436,7 @@ void fastd_peer_transport_failed(fastd_peer_t *peer, fastd_peer_transport_t tran
 	peer->transport_probe = TRANSPORT_UDP;
 	peer->last_handshake_timeout = ctx.now;
 	peer->last_handshake_address.sa.sa_family = AF_UNSPEC;
+	peer->last_handshake_transport = TRANSPORT_UNSET;
 	fastd_peer_schedule_handshake(peer, 0);
 }
 
@@ -586,9 +587,11 @@ static void setup_peer(fastd_peer_t *peer) {
 
 	peer->last_handshake_timeout = ctx.now;
 	peer->last_handshake_address.sa.sa_family = AF_UNSPEC;
+	peer->last_handshake_transport = TRANSPORT_UNSET;
 
 	peer->last_handshake_response_timeout = ctx.now;
 	peer->last_handshake_response_address.sa.sa_family = AF_UNSPEC;
+	peer->last_handshake_response_transport = TRANSPORT_UNSET;
 
 	peer->establish_handshake_timeout = ctx.now;
 	peer->turn_fallback_timeout = FASTD_TIMEOUT_INV;
@@ -2082,14 +2085,17 @@ bool fastd_peer_send_backup_handshake(fastd_peer_t *peer) {
 	if (!fastd_peer_has_backup_path(peer) || !peer->backup_sock)
 		return false;
 
+	fastd_peer_transport_t transport = peer->backup_sock && fastd_socket_is_tcp(peer->backup_sock) ? TRANSPORT_TCP : TRANSPORT_UDP;
 	if (!fastd_timed_out(peer->last_handshake_timeout) &&
-	    fastd_peer_address_equal(&peer->backup_address, &peer->last_handshake_address)) {
+	    fastd_peer_address_equal(&peer->backup_address, &peer->last_handshake_address) &&
+	    peer->last_handshake_transport == transport) {
 		pr_debug("not sending a backup handshake to %P as we sent one a short time ago", peer);
 		return false;
 	}
 
 	peer->last_handshake_timeout = ctx.now + MIN_HANDSHAKE_INTERVAL;
 	peer->last_handshake_address = peer->backup_address;
+	peer->last_handshake_transport = transport;
 	conf.protocol->handshake_init(
 		peer->backup_sock, &peer->backup_local_address, &peer->backup_address, peer, FLAG_INITIAL);
 
@@ -2438,7 +2444,7 @@ static fastd_socket_t *default_udp_socket_for_address(const fastd_peer_address_t
 
 /** Sends a new handshake to a specific peer address, optionally forcing a concrete transport */
 static bool send_handshake_address_transport(
-	fastd_peer_t *peer, const fastd_peer_address_t *addr, fastd_peer_transport_t preferred_transport) {
+	fastd_peer_t *peer, const fastd_peer_address_t *addr, fastd_peer_transport_t preferred_transport, bool force_send) {
 	fastd_socket_t *sock = peer->sock;
 	fastd_peer_address_t local_address = peer->local_address;
 	const fastd_peer_address_t *handshake_addr = addr;
@@ -2511,14 +2517,17 @@ static bool send_handshake_address_transport(
 		}
 	}
 
-	if (!fastd_timed_out(peer->last_handshake_timeout) &&
-	    fastd_peer_address_equal(handshake_addr, &peer->last_handshake_address)) {
+	fastd_peer_transport_t actual_transport = fastd_socket_is_tcp(sock) ? TRANSPORT_TCP : TRANSPORT_UDP;
+	if (!force_send && !fastd_timed_out(peer->last_handshake_timeout) &&
+	    fastd_peer_address_equal(handshake_addr, &peer->last_handshake_address) &&
+	    peer->last_handshake_transport == actual_transport) {
 		pr_debug("not sending a handshake to %P as we sent one a short time ago", peer);
 		return false;
 	}
 
 	peer->last_handshake_timeout = ctx.now + MIN_HANDSHAKE_INTERVAL;
 	peer->last_handshake_address = *handshake_addr;
+	peer->last_handshake_transport = actual_transport;
 	conf.protocol->handshake_init(sock, &local_address, handshake_addr, peer, FLAG_INITIAL);
 
 	if (preferred_transport != TRANSPORT_TCP && !current_exact_udp_punch &&
@@ -2541,7 +2550,7 @@ static bool send_handshake_address_transport(
 
 /** Sends a new handshake to a specific peer address */
 static bool send_handshake_address(fastd_peer_t *peer, const fastd_peer_address_t *addr) {
-	return send_handshake_address_transport(peer, addr, TRANSPORT_AUTO);
+	return send_handshake_address_transport(peer, addr, TRANSPORT_AUTO, false);
 }
 
 /** Sends an immediate direct punch handshake to a candidate endpoint */
@@ -2557,7 +2566,7 @@ bool fastd_peer_send_direct_handshake_transport(
 		return false;
 
 	bool was_established = fastd_peer_is_established(peer);
-	bool sent = send_handshake_address_transport(peer, addr, transport);
+	bool sent = send_handshake_address_transport(peer, addr, transport, true);
 	if (sent && !was_established)
 		peer->state = STATE_HANDSHAKE;
 

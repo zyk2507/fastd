@@ -230,11 +230,13 @@ static bool send_probe_handshake(
 		return false;
 
 	if (!fastd_timed_out(peer->last_handshake_timeout) &&
-	    fastd_peer_address_equal(remote_addr, &peer->last_handshake_address))
+	    fastd_peer_address_equal(remote_addr, &peer->last_handshake_address) &&
+	    peer->last_handshake_transport == TRANSPORT_UDP)
 		return false;
 
 	peer->last_handshake_timeout = ctx.now + MIN_HANDSHAKE_INTERVAL;
 	peer->last_handshake_address = *remote_addr;
+	peer->last_handshake_transport = TRANSPORT_UDP;
 	conf.protocol->handshake_init(sock, local_addr, remote_addr, peer, FLAG_INITIAL);
 
 	if (!fastd_peer_is_established(peer))

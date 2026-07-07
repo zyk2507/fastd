@@ -916,8 +916,10 @@ void fastd_protocol_ec25519_fhmqvc_handshake_handle(
 	memcpy(&peer_handshake_key, handshake->records[RECORD_SENDER_HANDSHAKE_KEY].data, PUBLICKEYBYTES);
 
 	if (handshake->type == 1) {
+		fastd_peer_transport_t actual_transport = get_socket_transport(sock);
 		if (!fastd_timed_out(peer->last_handshake_response_timeout) &&
-		    fastd_peer_address_equal(remote_addr, &peer->last_handshake_response_address)) {
+		    fastd_peer_address_equal(remote_addr, &peer->last_handshake_response_address) &&
+		    peer->last_handshake_response_transport == actual_transport) {
 			pr_debug("not responding to repeated handshake from %P[%I]", peer, remote_addr);
 			return;
 		}
@@ -928,6 +930,7 @@ void fastd_protocol_ec25519_fhmqvc_handshake_handle(
 
 		peer->last_handshake_response_timeout = ctx.now + MIN_HANDSHAKE_INTERVAL;
 		peer->last_handshake_response_address = *remote_addr;
+		peer->last_handshake_response_transport = actual_transport;
 		respond_handshake(sock, local_addr, remote_addr, peer, &peer_handshake_key, handshake->flags);
 		return;
 	}
