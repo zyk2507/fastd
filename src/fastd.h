@@ -448,6 +448,9 @@ struct fastd_config {
 /** Maximum number of peer-pair punch runtime states kept by the task manager */
 #define FASTD_PUNCH_PAIR_STATE_LIMIT 1024
 
+/** Number of recently handled punch results remembered for duplicate suppression */
+#define FASTD_PUNCH_RESULT_DEDUP_HISTORY 64
+
 /** Lifecycle stage for one collected peer-pair punch task */
 typedef enum fastd_punch_pair_task_stage {
 	PUNCH_PAIR_TASK_STAGE_NONE = 0,      /**< No peer-pair task has been recorded */
@@ -496,6 +499,19 @@ typedef struct fastd_punch_pair_runtime {
 	uint16_t result_count;                 /**< Number of remote command results observed */
 	uint16_t busy_count;                   /**< Number of busy/suppressed/no-peer results observed */
 } fastd_punch_pair_runtime_t;
+
+/** Recently handled punch result key used to suppress legacy/extended duplicate result packets */
+typedef struct fastd_punch_result_seen {
+	fastd_timeout_t updated;       /**< Time the result was first handled */
+	uint64_t sender_id;            /**< Peer that sent the result */
+	uint64_t subject_id;           /**< Peer the result refers to, if locally known */
+	uint64_t subject_key_hash;     /**< Hash of the result subject key */
+	fastd_peer_address_t endpoint; /**< Endpoint reported by the result */
+	uint16_t packet_count;         /**< Punch packet/socket count reported by the result */
+	uint8_t result;                /**< fastd_punch_result_t value */
+	uint8_t command_type;          /**< FASTD_PUNCH_SEND_* command type, if known */
+	bool used;                     /**< true if this slot carries a valid key */
+} fastd_punch_result_seen_t;
 
 
 /** The dynamic state of \em fastd */
@@ -581,6 +597,8 @@ struct fastd_context {
 	size_t punch_pair_task_pos;       /**< Next ring-buffer slot for peer-pair task snapshots */
 	size_t punch_pair_task_count;     /**< Number of valid peer-pair task snapshots in the ring buffer */
 	VECTOR(fastd_punch_pair_runtime_t) punch_pair_states; /**< Active punch-control peer-pair runtime states */
+	fastd_punch_result_seen_t punch_result_seen[FASTD_PUNCH_RESULT_DEDUP_HISTORY]; /**< Recent result dedup keys */
+	size_t punch_result_seen_pos;     /**< Next ring-buffer slot for punch result duplicate suppression */
 	uint32_t next_punch_listener_id;  /**< Monotonic ID for reusable public punch listeners */
 
 	bool has_floating; /**< Specifies if any of the configured peers have floating remotes */

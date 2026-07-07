@@ -103,6 +103,9 @@ void fastd_punch_test_task_manager_record_pair_task(
 	fastd_timeout_t next_retry, bool budget_exhausted);
 void fastd_punch_test_task_manager_record_pair_result(
 	fastd_peer_t *sender, fastd_peer_t *subject, uint8_t result, const fastd_peer_address_t *endpoint);
+bool fastd_punch_test_handle_remote_result(
+	fastd_peer_t *sender, fastd_peer_t *subject, uint8_t result, uint8_t command_type,
+	const fastd_peer_address_t *endpoint);
 void fastd_punch_test_refresh_observed_peer_punch_metadata(fastd_peer_t *peer);
 
 #endif

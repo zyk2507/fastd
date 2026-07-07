@@ -1814,8 +1814,14 @@ static void test_punch_pair_task_history_records_remote_results(void **state UNU
 	ctx.punch_pair_task_count = 0;
 	ctx.now = 1000;
 
-	fastd_peer_t sender = { .id = 40 };
-	fastd_peer_t subject = { .id = 30 };
+	fastd_peer_t sender = {
+		.id = 40,
+		.state = STATE_ESTABLISHED,
+	};
+	fastd_peer_t subject = {
+		.id = 30,
+		.state = STATE_ESTABLISHED,
+	};
 	fastd_peer_address_t endpoint = addr4(0xcb007105, 41000);
 
 	fastd_punch_test_task_manager_record_pair_result(
@@ -1849,6 +1855,81 @@ static void test_punch_pair_task_history_records_remote_results(void **state UNU
 	ctx.next_punch_pair_task_id = old_next_pair_task_id;
 	ctx.punch_pair_task_pos = old_pair_task_pos;
 	ctx.punch_pair_task_count = old_pair_task_count;
+	ctx.now = old_now;
+}
+
+static void test_punch_remote_result_ext_drives_state_and_legacy_is_deduped(void **state UNUSED) {
+	__typeof__(ctx.punch_pair_states) old_pair_states = ctx.punch_pair_states;
+	fastd_punch_pair_task_t old_pair_tasks[FASTD_PUNCH_PAIR_TASK_HISTORY];
+	memcpy(old_pair_tasks, ctx.punch_pair_tasks, sizeof(old_pair_tasks));
+	fastd_punch_result_seen_t old_seen[FASTD_PUNCH_RESULT_DEDUP_HISTORY];
+	memcpy(old_seen, ctx.punch_result_seen, sizeof(old_seen));
+	uint64_t old_next_pair_task_id = ctx.next_punch_pair_task_id;
+	size_t old_pair_task_pos = ctx.punch_pair_task_pos;
+	size_t old_pair_task_count = ctx.punch_pair_task_count;
+	size_t old_seen_pos = ctx.punch_result_seen_pos;
+	uint64_t old_result_rx = ctx.punch_result_rx;
+	uint64_t old_result_handshake = ctx.punch_task_manager_outcome_handshake;
+	int64_t old_now = ctx.now;
+
+	ctx.punch_pair_states = (__typeof__(ctx.punch_pair_states)){};
+	memset(ctx.punch_pair_tasks, 0, sizeof(ctx.punch_pair_tasks));
+	memset(ctx.punch_result_seen, 0, sizeof(ctx.punch_result_seen));
+	ctx.next_punch_pair_task_id = 0;
+	ctx.punch_pair_task_pos = 0;
+	ctx.punch_pair_task_count = 0;
+	ctx.punch_result_seen_pos = 0;
+	ctx.punch_result_rx = 0;
+	ctx.punch_task_manager_outcome_handshake = 0;
+	ctx.now = 1000;
+
+	fastd_peer_t sender = {
+		.id = 40,
+		.state = STATE_ESTABLISHED,
+	};
+	fastd_peer_t subject = {
+		.id = 30,
+		.state = STATE_ESTABLISHED,
+	};
+	fastd_peer_address_t endpoint = addr4(0xcb007105, 41000);
+
+	fastd_punch_test_pair_runtime_mark_launched(&sender, &subject);
+	assert_int_equal(VECTOR_LEN(ctx.punch_pair_states), 1);
+	assert_true(fastd_punch_test_pair_state(&sender, &subject).in_flight);
+
+	assert_true(fastd_punch_test_handle_remote_result(
+		&sender, &subject, TEST_PUNCH_RESULT_HANDSHAKE, TEST_PUNCH_SEND_HARD_SYM, &endpoint));
+	assert_int_equal(ctx.punch_result_rx, 1);
+	assert_int_equal(ctx.punch_task_manager_outcome_handshake, 1);
+	assert_false(fastd_punch_test_pair_state(&sender, &subject).in_flight);
+	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).result_count, 1);
+	assert_int_equal(ctx.punch_pair_task_count, 1);
+
+	assert_false(fastd_punch_test_handle_remote_result(
+		&sender, &subject, TEST_PUNCH_RESULT_HANDSHAKE, 0, &endpoint));
+	assert_int_equal(ctx.punch_result_rx, 1);
+	assert_int_equal(ctx.punch_task_manager_outcome_handshake, 1);
+	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).result_count, 1);
+	assert_int_equal(ctx.punch_pair_task_count, 1);
+
+	ctx.now += 2001;
+	assert_true(fastd_punch_test_handle_remote_result(
+		&sender, &subject, TEST_PUNCH_RESULT_HANDSHAKE, 0, &endpoint));
+	assert_int_equal(ctx.punch_result_rx, 2);
+	assert_int_equal(ctx.punch_task_manager_outcome_handshake, 2);
+	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).result_count, 2);
+	assert_int_equal(ctx.punch_pair_task_count, 2);
+
+	VECTOR_FREE(ctx.punch_pair_states);
+	ctx.punch_pair_states = old_pair_states;
+	memcpy(ctx.punch_pair_tasks, old_pair_tasks, sizeof(ctx.punch_pair_tasks));
+	memcpy(ctx.punch_result_seen, old_seen, sizeof(ctx.punch_result_seen));
+	ctx.next_punch_pair_task_id = old_next_pair_task_id;
+	ctx.punch_pair_task_pos = old_pair_task_pos;
+	ctx.punch_pair_task_count = old_pair_task_count;
+	ctx.punch_result_seen_pos = old_seen_pos;
+	ctx.punch_result_rx = old_result_rx;
+	ctx.punch_task_manager_outcome_handshake = old_result_handshake;
 	ctx.now = old_now;
 }
 
@@ -2992,6 +3073,7 @@ int main(void) {
 			cmocka_unit_test(test_punch_task_manager_outcome_accounting),
 		cmocka_unit_test(test_punch_pair_task_history_is_bounded_and_ordered),
 		cmocka_unit_test(test_punch_pair_task_history_records_remote_results),
+		cmocka_unit_test(test_punch_remote_result_ext_drives_state_and_legacy_is_deduped),
 #ifdef WITH_STATUS_SOCKET
 		cmocka_unit_test(test_status_hole_punch_exposes_peer_nat_metadata),
 		cmocka_unit_test(test_status_punch_exposes_udp_socket_pool),

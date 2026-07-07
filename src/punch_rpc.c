@@ -38,6 +38,7 @@
 #define FASTD_PUNCH_HARD_SYM_PORT_SPACE 65535U
 #define FASTD_PUNCH_NAT_INFO_GRACE 2000
 #define FASTD_PUNCH_PAIR_DEMAND_TIME 30000
+#define FASTD_PUNCH_RESULT_DEDUP_TIME 2000
 
 static const uint8_t fastd_punch_magic[4] = { 'f', 'p', 'c', 'h' };
 
@@ -837,6 +838,8 @@ static void pair_runtime_mark_result(
 void fastd_punch_cleanup(void) {
 	VECTOR_FREE(ctx.punch_pair_states);
 	ctx.punch_pair_states = (__typeof__(ctx.punch_pair_states)){};
+	memset(ctx.punch_result_seen, 0, sizeof(ctx.punch_result_seen));
+	ctx.punch_result_seen_pos = 0;
 }
 
 typedef struct fastd_punch_pair_state {
@@ -1201,6 +1204,20 @@ static fastd_punch_pair_task_stage_t punch_pair_task_stage_from_result(fastd_pun
 	}
 }
 
+/** Hashes a punch result subject key for duplicate suppression */
+static uint64_t punch_result_subject_key_hash(const void *key, size_t key_len) {
+	const uint8_t *bytes = key;
+	uint64_t hash = 1469598103934665603ULL;
+
+	size_t i;
+	for (i = 0; i < key_len; i++) {
+		hash ^= bytes[i];
+		hash *= 1099511628211ULL;
+	}
+
+	return hash ? hash : 1;
+}
+
 /** Records peer-pair lifecycle state returned by a remote punch command target */
 static void task_manager_record_pair_result(
 	fastd_peer_t *sender, fastd_peer_t *subject, fastd_punch_result_t result,
@@ -1220,6 +1237,46 @@ static void task_manager_record_pair_result(
 
 	task_manager_record_pair_task(
 		sender, subject, subject, sender, stage, 0, backoff_recorded, next_retry, false);
+}
+
+/** Returns true if this punch result has already been handled through a redundant result packet */
+static bool punch_result_duplicate(
+	fastd_peer_t *sender, fastd_peer_t *subject, const fastd_peer_address_t *endpoint, fastd_punch_result_t result,
+	uint8_t command_type, uint16_t packet_count, uint64_t subject_key_hash) {
+	uint64_t sender_id = sender ? sender->id : 0;
+	uint64_t subject_id = subject ? subject->id : 0;
+
+	size_t i;
+	for (i = 0; i < array_size(ctx.punch_result_seen); i++) {
+		fastd_punch_result_seen_t *seen = &ctx.punch_result_seen[i];
+		if (!seen->used)
+			continue;
+		if (fastd_timed_out(seen->updated + FASTD_PUNCH_RESULT_DEDUP_TIME)) {
+			seen->used = false;
+			continue;
+		}
+		bool command_matches = !seen->command_type || !command_type || seen->command_type == command_type;
+		if (seen->sender_id == sender_id && seen->subject_id == subject_id &&
+		    seen->subject_key_hash == subject_key_hash &&
+		    seen->result == (uint8_t)result && seen->packet_count == packet_count && command_matches &&
+		    fastd_peer_address_equal(&seen->endpoint, endpoint))
+			return true;
+	}
+
+	size_t pos = ctx.punch_result_seen_pos % array_size(ctx.punch_result_seen);
+	ctx.punch_result_seen[pos] = (fastd_punch_result_seen_t){
+		.updated = ctx.now,
+		.sender_id = sender_id,
+		.subject_id = subject_id,
+		.subject_key_hash = subject_key_hash,
+		.endpoint = *endpoint,
+		.packet_count = packet_count,
+		.result = (uint8_t)result,
+		.command_type = command_type,
+		.used = true,
+	};
+	ctx.punch_result_seen_pos = (pos + 1) % array_size(ctx.punch_result_seen);
+	return false;
 }
 
 /** Returns true for TCP NAT types where a mapped-address exchange is expected to be useful */
@@ -2341,6 +2398,23 @@ void fastd_punch_test_task_manager_record_pair_result(
 	task_manager_record_pair_result(sender, subject, (fastd_punch_result_t)result, endpoint);
 }
 
+/** Test wrapper for authoritative punch result handling with duplicate suppression */
+bool fastd_punch_test_handle_remote_result(
+	fastd_peer_t *sender, fastd_peer_t *subject, uint8_t result, uint8_t command_type,
+	const fastd_peer_address_t *endpoint) {
+	uint64_t subject_key_hash = subject ? subject->id : 0;
+	if (punch_result_duplicate(
+		    sender, subject, endpoint, (fastd_punch_result_t)result, command_type, 0, subject_key_hash))
+		return false;
+
+	ctx.punch_result_rx++;
+	if (sender && punch_result_causes_relay_backoff((fastd_punch_result_t)result))
+		fastd_peer_add_punch_relay_backoff(sender, endpoint);
+	task_manager_record_pair_result(sender, subject, (fastd_punch_result_t)result, endpoint);
+	task_manager_record_remote_result((fastd_punch_result_t)result);
+	return true;
+}
+
 /** Test wrapper for observed UDP control-path metadata fallback */
 void fastd_punch_test_refresh_observed_peer_punch_metadata(fastd_peer_t *peer) {
 	refresh_observed_peer_punch_metadata(peer);
@@ -3140,6 +3214,7 @@ static void handle_result(fastd_peer_t *sender, const fastd_punch_endpoint_t *pa
 
 	const uint8_t *key = endpoint_message_key(type, payload);
 	fastd_peer_t *subject = find_peer_by_key(key, key_len);
+	uint64_t subject_key_hash = punch_result_subject_key_hash(key, key_len);
 
 	fastd_peer_address_t endpoint;
 	if (!decode_address(&endpoint, payload))
@@ -3176,6 +3251,11 @@ static void handle_result(fastd_peer_t *sender, const fastd_punch_endpoint_t *pa
 		base_mapped_port_mapped =
 			(listener->base_mapped_addr.flags & FASTD_PUNCH_ADDRESS_PORT_MAPPED) != 0;
 	}
+
+	bool duplicate = punch_result_duplicate(
+		sender, subject, &endpoint, result, ext ? ext->command_type : 0, packet_count, subject_key_hash);
+	if (duplicate && !ext)
+		return;
 
 	const fastd_peer_address_t *base_mapped = have_base_mapped ? &base_mapped_endpoint : NULL;
 	record_punch_task_base(
@@ -3217,7 +3297,7 @@ static void handle_result(fastd_peer_t *sender, const fastd_punch_endpoint_t *pa
 			base_mapped_listener_id, true);
 	}
 
-	if (ext)
+	if (duplicate)
 		return;
 
 	ctx.punch_result_rx++;
