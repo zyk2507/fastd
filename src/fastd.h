@@ -213,6 +213,13 @@ struct fastd_socket {
 	fastd_peer_t *hole_punch_peer;    /**< Peer this unclaimed hole punching socket belongs to */
 	bool hole_punch;                  /**< Whether this socket was created by active hole punching */
 	bool deferred_free;               /**< Whether this dynamic socket is already queued for deferred free */
+	bool punch_public_listener;       /**< Whether this UDP punch socket is a reusable public punch listener */
+	bool punch_listener_port_mapped;  /**< Whether the listener endpoint came from explicit port mapping */
+	bool punch_listener_mapping_registered; /**< Whether a dynamic port mapping lease is registered for this socket */
+	uint32_t punch_listener_id;       /**< Stable runtime ID for reusable public punch listeners */
+	uint32_t punch_transaction_id;    /**< Transaction ID for dedicated UDP punch probe packets */
+	fastd_timeout_t punch_listener_selected; /**< Last time this public listener was selected */
+	fastd_peer_address_t punch_listener_public_addr; /**< Public endpoint of this punch listener */
 
 	uint8_t tcp_header[4]; /**< Partial TCP frame length prefix */
 	size_t tcp_header_len; /**< Number of TCP frame prefix bytes read */
@@ -254,6 +261,9 @@ struct fastd_stun_server {
 	uint16_t port; /**< STUN server port */
 };
 
+/** Maximum number of public endpoints retained from NAT detection */
+#define FASTD_NAT_MAX_PUBLIC_ENDPOINTS 8
+
 /** NAT behavior classification */
 typedef enum fastd_nat_type {
 	FASTD_NAT_UNKNOWN = 0,        /**< No usable NAT classification is available */
@@ -274,10 +284,20 @@ struct fastd_nat_status {
 	bool available;                 /**< true if a successful STUN result is available */
 	fastd_nat_type_t type;          /**< Detected NAT behavior */
 	fastd_peer_address_t reflexive; /**< Latest server-reflexive UDP endpoint */
+	fastd_peer_address_t reflexive_addrs[FASTD_NAT_MAX_PUBLIC_ENDPOINTS]; /**< Unique UDP reflexive endpoints */
+	size_t n_reflexive_addrs;       /**< Number of unique UDP reflexive endpoints */
 	uint16_t min_port;              /**< Lowest observed public UDP port, host byte order */
 	uint16_t max_port;              /**< Highest observed public UDP port, host byte order */
 	int port_delta;                 /**< Typical public port delta for easy symmetric NATs */
 	size_t responses;               /**< Number of successful STUN responses used for classification */
+	bool tcp_available;             /**< true if a successful TCP STUN result is available */
+	fastd_nat_type_t tcp_type;      /**< Detected TCP NAT behavior */
+	fastd_peer_address_t tcp_reflexive; /**< Latest server-reflexive TCP endpoint */
+	fastd_peer_address_t tcp_reflexive_addrs[FASTD_NAT_MAX_PUBLIC_ENDPOINTS]; /**< Unique TCP reflexive endpoints */
+	size_t n_tcp_reflexive_addrs;   /**< Number of unique TCP reflexive endpoints */
+	uint16_t tcp_min_port;          /**< Lowest observed public TCP port, host byte order */
+	uint16_t tcp_max_port;          /**< Highest observed public TCP port, host byte order */
+	size_t tcp_responses;           /**< Number of successful TCP STUN responses used for classification */
 	size_t servers;                 /**< Number of configured STUN servers in the worker snapshot */
 	fastd_timeout_t last_update;    /**< Monotonic timestamp of the latest completed detection run */
 };
@@ -421,6 +441,41 @@ struct fastd_config {
 };
 
 
+/** Maximum number of recent peer-pair punch tasks kept for status/debugging */
+#define FASTD_PUNCH_PAIR_TASK_HISTORY 64
+
+/** Lifecycle stage for one collected peer-pair punch task */
+typedef enum fastd_punch_pair_task_stage {
+	PUNCH_PAIR_TASK_STAGE_NONE = 0,      /**< No peer-pair task has been recorded */
+	PUNCH_PAIR_TASK_STAGE_COLLECTED,     /**< Pair was eligible for punch command generation */
+	PUNCH_PAIR_TASK_STAGE_LAUNCHED,      /**< Pair emitted at least one punch command */
+	PUNCH_PAIR_TASK_STAGE_WAITING,       /**< Pair has metadata, but is waiting for the relay interval */
+	PUNCH_PAIR_TASK_STAGE_BLACKLISTED,   /**< Pair was held by relay backoff */
+	PUNCH_PAIR_TASK_STAGE_SUPPRESSED,    /**< Pair was collected, but no command was emitted */
+	PUNCH_PAIR_TASK_STAGE_MISSING_METADATA, /**< Pair lacks usable NAT metadata */
+	PUNCH_PAIR_TASK_STAGE_RESULT_ACCEPTED,  /**< Remote peer accepted a punch command */
+	PUNCH_PAIR_TASK_STAGE_RESULT_HANDSHAKE, /**< Remote peer sent a handshake for a punch command */
+	PUNCH_PAIR_TASK_STAGE_RESULT_SUPPRESSED, /**< Remote peer suppressed a punch command */
+	PUNCH_PAIR_TASK_STAGE_RESULT_NO_PEER,   /**< Remote peer did not know the punch subject */
+	PUNCH_PAIR_TASK_STAGE_RESULT_BUSY,      /**< Remote peer was busy with an existing verified path */
+} fastd_punch_pair_task_stage_t;
+
+/** Recent task-manager lifecycle snapshot for one peer pair */
+typedef struct fastd_punch_pair_task {
+	uint64_t id;                         /**< Local monotonic peer-pair task ID */
+	fastd_timeout_t updated;             /**< Timestamp of this lifecycle snapshot */
+	fastd_timeout_t next_retry;          /**< Earliest future retry time known for this pair */
+	uint64_t peer_a_id;                  /**< Lower peer ID in the pair */
+	uint64_t peer_b_id;                  /**< Higher peer ID in the pair */
+	uint64_t subject_id;                 /**< Peer whose endpoint metadata was relayed, if applicable */
+	uint64_t destination_id;             /**< Peer receiving the punch command, if applicable */
+	fastd_punch_pair_task_stage_t stage; /**< Lifecycle stage */
+	uint16_t candidates_sent;            /**< Candidate commands emitted for this pair */
+	uint16_t backoff_skipped;            /**< Candidate commands skipped by relay backoff */
+	bool budget_exhausted;               /**< true if the global packet budget stopped this run */
+} fastd_punch_pair_task_t;
+
+
 /** The dynamic state of \em fastd */
 struct fastd_context {
 	bool log_initialized; /**< true if the logging facilities have been properly initialized */
@@ -466,12 +521,41 @@ struct fastd_context {
 	uint64_t punch_direct_failures;   /**< Number of attempted punch control candidates that expired */
 	uint64_t punch_direct_suppressed; /**< Number of punch control candidates suppressed after recent failures */
 	uint64_t punch_udp_exact_tx;      /**< Number of exact-endpoint UDP punch packets sent */
+	uint64_t punch_probe_tx;          /**< Number of UDP punch probe requests sent */
+	uint64_t punch_probe_rx;          /**< Number of UDP punch probe packets received */
+	uint64_t punch_probe_response_tx; /**< Number of UDP punch probe responses sent */
+	uint64_t punch_probe_matched;     /**< Number of matched UDP punch probe responses */
+	uint64_t punch_probe_handshakes;  /**< Number of handshakes sent after probe confirmation */
 	uint64_t punch_result_tx;         /**< Number of punch result packets sent */
 	uint64_t punch_result_rx;         /**< Number of punch result packets received */
 	uint64_t punch_result_accepted;   /**< Number of accepted punch result packets received */
 	uint64_t punch_result_handshake;  /**< Number of handshake-sent punch result packets received */
 	uint64_t punch_result_suppressed; /**< Number of suppressed punch result packets received */
 	uint64_t punch_result_no_peer;    /**< Number of no-peer punch result packets received */
+	uint64_t punch_result_busy;       /**< Number of busy punch result packets received */
+	uint64_t punch_task_manager_runs; /**< Number of punch task-manager collection runs */
+	uint64_t punch_task_manager_pairs; /**< Last task-manager run: established peer pairs considered */
+	uint64_t punch_task_manager_collected; /**< Last task-manager run: pairs with a launchable punch direction */
+	uint64_t punch_task_manager_launched; /**< Last task-manager run: pairs that emitted punch commands */
+	uint64_t punch_task_manager_waiting; /**< Last task-manager run: pairs waiting for relay interval */
+	uint64_t punch_task_manager_missing_metadata; /**< Last task-manager run: pairs missing useful NAT metadata */
+	uint64_t punch_task_manager_blacklisted; /**< Last task-manager run: pairs held by relay backoff */
+	uint64_t punch_task_manager_suppressed; /**< Last task-manager run: collected pairs that emitted no commands */
+	uint64_t punch_task_manager_budget_exhausted; /**< Last task-manager run: packet budget was exhausted */
+	fastd_timeout_t punch_task_manager_next_retry; /**< Last task-manager run: earliest future retry time */
+	uint64_t punch_task_manager_outcome_success; /**< Direct paths established from punch-control candidates */
+	uint64_t punch_task_manager_outcome_failed; /**< Attempted punch-control candidates that expired */
+	uint64_t punch_task_manager_outcome_accepted; /**< Remote peers accepted relayed punch commands */
+	uint64_t punch_task_manager_outcome_handshake; /**< Remote peers sent handshakes for relayed commands */
+	uint64_t punch_task_manager_outcome_suppressed; /**< Remote peers suppressed relayed commands */
+	uint64_t punch_task_manager_outcome_no_peer; /**< Remote peers reported missing punch subjects */
+	uint64_t punch_task_manager_outcome_busy; /**< Remote peers reported busy punch targets */
+	uint64_t next_punch_task_id;      /**< Monotonic ID for local punch-control task snapshots */
+	uint64_t next_punch_pair_task_id; /**< Monotonic ID for task-manager peer-pair snapshots */
+	fastd_punch_pair_task_t punch_pair_tasks[FASTD_PUNCH_PAIR_TASK_HISTORY]; /**< Recent peer-pair task snapshots */
+	size_t punch_pair_task_pos;       /**< Next ring-buffer slot for peer-pair task snapshots */
+	size_t punch_pair_task_count;     /**< Number of valid peer-pair task snapshots in the ring buffer */
+	uint32_t next_punch_listener_id;  /**< Monotonic ID for reusable public punch listeners */
 
 	bool has_floating; /**< Specifies if any of the configured peers have floating remotes */
 	uint16_t max_mtu;  /**< The maximum MTU of all peer-specific interfaces */
@@ -568,6 +652,15 @@ bool fastd_tcp_send(
 bool fastd_udp_punch_send(
 	fastd_peer_t *peer, const fastd_socket_t *sock, const fastd_peer_address_t *remote_addr,
 	const fastd_buffer_t *buffer);
+fastd_socket_t *fastd_udp_punch_find_socket(fastd_peer_t *peer, const fastd_peer_address_t *remote_addr);
+bool fastd_udp_punch_select_listener(
+	sa_family_t family, bool force_new, bool prefer_port_mapping, fastd_peer_address_t *public_addr,
+	bool *port_mapped, uint32_t *listener_id);
+void fastd_punch_probe_init_socket(fastd_socket_t *sock);
+bool fastd_punch_probe_send(fastd_socket_t *sock, const fastd_peer_address_t *remote_addr);
+bool fastd_punch_probe_handle(
+	fastd_socket_t *sock, const fastd_peer_address_t *local_addr, const fastd_peer_address_t *remote_addr,
+	const uint8_t *data, size_t len);
 void fastd_hole_punch_claim_socket(fastd_socket_t *sock);
 void fastd_hole_punch_close_peer(fastd_peer_t *peer);
 void fastd_udp_punch_maintenance(void);
@@ -584,7 +677,9 @@ void fastd_port_mapping_init(void);
 void fastd_port_mapping_refresh(void);
 void fastd_port_mapping_handle(void);
 void fastd_port_mapping_handle_task(void);
+bool fastd_port_mapping_register_socket(fastd_socket_t *sock);
 bool fastd_port_mapping_get_external_address(const fastd_socket_t *sock, fastd_peer_address_t *addr);
+void fastd_port_mapping_release_socket(fastd_socket_t *sock);
 void fastd_port_mapping_cleanup(void);
 
 bool fastd_turn_check(void);
@@ -598,10 +693,38 @@ void fastd_nat_handle_task(void);
 void fastd_nat_cleanup(void);
 bool fastd_nat_get_status(fastd_nat_status_t *status);
 bool fastd_nat_get_public_address(fastd_peer_address_t *addr);
+bool fastd_nat_get_tcp_public_address(fastd_peer_address_t *addr);
+bool fastd_nat_request_refresh(void);
 const char *fastd_nat_type_name(fastd_nat_type_t type);
 
 bool fastd_punch_handle_control(fastd_peer_t *peer, fastd_buffer_t *buffer);
 void fastd_punch_maintenance(void);
+
+#if defined(WITH_STATUS_SOCKET) && defined(WITH_TESTS)
+struct json_object *fastd_status_test_dump_hole_punch(const fastd_peer_t *peer);
+struct json_object *fastd_status_test_dump_punch(void);
+#endif
+
+#ifdef WITH_TESTS
+bool fastd_socket_test_udp_punch_exact_family_supported(sa_family_t family);
+bool fastd_socket_test_udp_punch_deterministic_family_supported(sa_family_t family);
+bool fastd_socket_test_udp_punch_public_listener_available(const fastd_socket_t *sock);
+size_t fastd_socket_test_udp_punch_public_listener_count(void);
+size_t fastd_socket_test_udp_punch_active_socket_count(void);
+bool fastd_socket_test_udp_punch_should_create_public_listener(
+	size_t current_listener_count, bool has_reusable_listener, bool has_port_mapping_listener, bool force_new,
+	bool prefer_port_mapping);
+uint32_t fastd_socket_test_udp_punch_select_public_listener_id(sa_family_t family, bool prefer_port_mapping);
+void fastd_port_mapping_test_begin(bool natpmp_requested, bool upnp_requested);
+void fastd_port_mapping_test_end(void);
+size_t fastd_port_mapping_test_entry_count(void);
+bool fastd_port_mapping_test_get_entry(
+	uint16_t port, bool *use_natpmp, bool *use_upnp_igd, uint16_t *dynamic_natpmp_refs,
+	uint16_t *dynamic_upnp_igd_refs);
+bool fastd_punch_probe_test_parse(
+	const uint8_t *data, size_t len, uint8_t *type, uint32_t *transaction, size_t *key_len);
+size_t fastd_punch_probe_test_build(uint8_t *out, size_t out_len, uint8_t type, uint32_t transaction, size_t key_len);
+#endif
 
 bool fastd_realm_check(void);
 void fastd_realm_init(void);

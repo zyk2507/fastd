@@ -76,9 +76,12 @@ Example config:
   mappings and removes them during shutdown. ``auto`` uses all automatic port mapping backends compiled into
   fastd. ``nat-pmp yes|no`` is kept as a compatibility alias for ``port-mapping nat-pmp|off``.
 
-  NAT-PMP and UPnP IGD do not apply to IPv6-only sockets or sockets created dynamically for individual peers. If
-  multiple peers share the same fixed bind socket, enabling port mapping for any of these peers maps the shared
-  local UDP port.
+  NAT-PMP and UPnP IGD do not apply to IPv6-only sockets or sockets created dynamically for individual peer attempts.
+  Reusable public UDP punch listeners created by punch-control can request dynamic mappings when automatic port
+  mapping is enabled; these leases are kept with the listener socket and released when the socket closes or during
+  shutdown. If multiple peers share the same fixed bind socket, enabling port mapping for any of these peers maps the
+  shared local UDP port. When a mapped address is available, fastd advertises it before STUN-only reflexive addresses
+  in realm rendezvous and punch-control NAT metadata so peers can punch directly at the stable mapped listener.
 
 | ``nat traversal yes|no;``
 
@@ -136,9 +139,11 @@ Example config:
 | ``stun server "<host>" port <port>;``
 
   Adds a global STUN server for periodic NAT type detection. Multiple servers may be configured. This is separate from
-  the optional STUN server embedded in ``realm server``: the global form classifies the local NAT type, public UDP
+  the optional STUN server embedded in ``realm server``: the global form classifies the local UDP NAT type, public UDP
   endpoint, observed public port range and easy-symmetric port direction for status output and punch control metadata.
-  It requires fastd to be built with ``nat_detect`` support, which uses libnice's STUN implementation.
+  The same server list is also probed over TCP when a server accepts TCP STUN, allowing status output and future TCP
+  punch coordination to distinguish open/no-PAT/full-cone TCP mappings from symmetric or unknown TCP NATs. It requires
+  fastd to be built with ``nat_detect`` support, which uses libnice's STUN implementation.
 
 | ``punch control relay yes|no;``
 
@@ -180,15 +185,18 @@ Example config:
 | ``punch max packet <1-4096>;``
 | ``punch max packets <1-4096>;``
 
-  Sets global punch control limits. ``punch max sockets`` limits the number of predicted or probed UDP sockets used for
-  one symmetric punch command; the default is 25. ``punch max attempts`` limits how often one punch-control endpoint is
-  selected for handshake attempts before it is left alone; the default is 1. Once a peer has an active path and a
-  backup path, fastd maintains those paths instead of replacing the backup with later predicted candidates.
+  Sets global punch control limits. ``punch max sockets`` limits the number of short-lived UDP sockets used for one
+  local symmetric punch command; the default is 84 for hard-symmetric NATs. Easy-symmetric prediction keeps a 25-port
+  window by default even when the hard-symmetric socket limit is higher. ``punch max attempts`` limits how often one
+  punch-control endpoint is selected for handshake attempts before it is left alone; the default is 1. Once a peer has
+  an active path and a backup path, fastd maintains those paths instead of replacing the backup with later predicted
+  candidates.
   ``punch max backups`` limits how many inactive direct candidates are kept warm with keepalive handshakes per peer; the
   default is 25. This limit affects maintenance traffic only and does not raise the sending limits above
   ``punch max sockets`` or ``punch max packets``.
   ``punch max packet`` and ``punch max packets`` are equivalent aliases that limit the number of punch control packets a
-  relay sends during one maintenance interval; the default is 256.
+  relay sends during one maintenance interval; the default is 800. Hard-symmetric relay scans use this packet budget as
+  their bounded remote port probe count.
 
 | ``turn relay yes|no;``
 | ``turn server "<address>" port <port> [user "<username>" password "<password>"];``

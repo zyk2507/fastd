@@ -28,12 +28,13 @@
 #define FASTD_DIRECT_CANDIDATE_ATTEMPT_INTERVAL 5000
 #define FASTD_DIRECT_CANDIDATE_PRIORITY_REALM 80
 #define FASTD_DIRECT_CANDIDATE_PRIORITY_DISCOVERY 100
-#define FASTD_PUNCH_SUPPRESSION_LIMIT 32
-#define FASTD_PUNCH_SUPPRESSION_TIME 60000
-
-
+#define FASTD_DIRECT_CANDIDATE_PRIORITY_EASY_SYM_PROBE 110
+#define FASTD_DIRECT_CANDIDATE_PRIORITY_PROBE 130
 static bool direct_candidate_valid(const fastd_peer_direct_candidate_t *candidate);
+static void clear_direct_candidate_cache(fastd_peer_t *peer);
 static bool send_handshake_address(fastd_peer_t *peer, const fastd_peer_address_t *addr);
+static bool send_handshake_address_transport(
+	fastd_peer_t *peer, const fastd_peer_address_t *addr, fastd_peer_transport_t preferred_transport);
 
 /** Adds address and port of an fastd_peer_address_t to \e env */
 static void fastd_peer_set_shell_env_addr(
@@ -232,6 +233,43 @@ bool fastd_peer_nat_traversal_keepalive_enabled(const fastd_peer_t *peer) {
 	return false;
 }
 
+/** Returns true if the peer's current NAT metadata needs endpoint-paired direct paths */
+static bool peer_has_endpoint_dependent_nat(const fastd_peer_t *peer) {
+	if (!peer || fastd_timed_out(peer->punch_timeout))
+		return false;
+
+	switch (peer->punch_nat_type) {
+	case FASTD_NAT_SYMMETRIC:
+	case FASTD_NAT_SYMMETRIC_EASY_INC:
+	case FASTD_NAT_SYMMETRIC_EASY_DEC:
+		return true;
+
+	default:
+		return false;
+	}
+}
+
+/** Returns true if the peer's current NAT metadata has predictable endpoint-dependent UDP ports */
+static bool peer_has_easy_symmetric_nat(const fastd_peer_t *peer) {
+	if (!peer || fastd_timed_out(peer->punch_timeout))
+		return false;
+
+	return peer->punch_nat_type == FASTD_NAT_SYMMETRIC_EASY_INC ||
+	       peer->punch_nat_type == FASTD_NAT_SYMMETRIC_EASY_DEC;
+}
+
+/** Returns the interval during which an active direct path is considered verified after authenticated traffic */
+unsigned fastd_peer_active_path_verify_interval(const fastd_peer_t *peer) {
+	if (!fastd_peer_nat_traversal_keepalive_enabled(peer))
+		return KEEPALIVE_TIMEOUT;
+
+	unsigned interval = conf.punch_keepalive_interval + 1000;
+	if (interval < 1500)
+		interval = 1500;
+
+	return interval;
+}
+
 /** Resets the active path keepalive timeout */
 void fastd_peer_clear_keepalive(fastd_peer_t *peer) {
 	unsigned interval =
@@ -361,6 +399,11 @@ static void schedule_peer_task(fastd_peer_t *peer) {
 	}
 }
 
+/** Reschedules a peer maintenance task after external code changes peer timeouts */
+void fastd_peer_reschedule(fastd_peer_t *peer) {
+	schedule_peer_task(peer);
+}
+
 /** Sets the timeout for the next handshake without actually rescheduling */
 static void set_next_handshake(fastd_peer_t *peer, int delay) {
 	peer->next_handshake = ctx.now + delay;
@@ -432,8 +475,23 @@ static void reset_peer(fastd_peer_t *peer) {
 	conf.protocol->reset_peer_state(peer);
 	fastd_peer_clear_backup_path(peer);
 	peer->active_path_timeout = FASTD_TIMEOUT_INV;
+	peer->active_path_proven_timeout = FASTD_TIMEOUT_INV;
+	peer->active_path_payload_seen = FASTD_TIMEOUT_INV;
+	peer->active_path_payload_sent = false;
 	peer->payload_candidate_timeout = FASTD_TIMEOUT_INV;
 	peer->payload_candidate_address.sa.sa_family = AF_UNSPEC;
+	peer->probe_candidate_timeout = FASTD_TIMEOUT_INV;
+	peer->probe_candidate_address.sa.sa_family = AF_UNSPEC;
+	peer->punch_hard_sym_port_index = 0;
+	peer->punch_hard_sym_round = 0;
+	peer->last_punch_task = (fastd_peer_punch_task_t){};
+	peer->n_punch_endpoints = 0;
+	peer->tcp_punch_endpoint.sa.sa_family = AF_UNSPEC;
+	peer->n_tcp_punch_endpoints = 0;
+	peer->tcp_punch_nat_type = FASTD_NAT_UNKNOWN;
+	peer->tcp_punch_min_port = 0;
+	peer->tcp_punch_max_port = 0;
+	peer->tcp_punch_timeout = FASTD_TIMEOUT_INV;
 
 	size_t i, deleted = 0;
 	for (i = 0; i < VECTOR_LEN(ctx.eth_addrs); i++) {
@@ -536,8 +594,18 @@ static void setup_peer(fastd_peer_t *peer) {
 	peer->turn_fallback_timeout = FASTD_TIMEOUT_INV;
 	peer->direct_established = false;
 	peer->punch_timeout = FASTD_TIMEOUT_INV;
+	peer->n_punch_endpoints = 0;
+	peer->tcp_punch_endpoint.sa.sa_family = AF_UNSPEC;
+	peer->n_tcp_punch_endpoints = 0;
+	peer->tcp_punch_nat_type = FASTD_NAT_UNKNOWN;
+	peer->tcp_punch_min_port = 0;
+	peer->tcp_punch_max_port = 0;
+	peer->tcp_punch_timeout = FASTD_TIMEOUT_INV;
 	peer->next_punch_announce = ctx.now;
 	peer->next_punch_relay = ctx.now;
+	peer->punch_hard_sym_port_index = 0;
+	peer->punch_hard_sym_round = 0;
+	peer->last_punch_task = (fastd_peer_punch_task_t){};
 	peer->punch_success_counted = false;
 
 #ifdef WITH_DYNAMIC_PEERS
@@ -549,9 +617,13 @@ static void setup_peer(fastd_peer_t *peer) {
 	peer->reset_timeout = FASTD_TIMEOUT_INV;
 	peer->keepalive_timeout = FASTD_TIMEOUT_INV;
 	peer->active_path_timeout = FASTD_TIMEOUT_INV;
+	peer->active_path_proven_timeout = FASTD_TIMEOUT_INV;
+	peer->active_path_payload_seen = FASTD_TIMEOUT_INV;
+	peer->active_path_payload_sent = false;
 	peer->backup_reset_timeout = FASTD_TIMEOUT_INV;
 	peer->backup_keepalive_timeout = FASTD_TIMEOUT_INV;
 	peer->payload_candidate_timeout = FASTD_TIMEOUT_INV;
+	peer->probe_candidate_timeout = FASTD_TIMEOUT_INV;
 
 	if (fastd_peer_is_dynamic(peer))
 		peer->reset_timeout = ctx.now;
@@ -612,6 +684,7 @@ void fastd_peer_free(fastd_peer_t *peer) {
 	VECTOR_FREE(peer->remotes);
 	VECTOR_FREE(peer->direct_candidates);
 	VECTOR_FREE(peer->punch_suppressions);
+	VECTOR_FREE(peer->punch_relay_backoffs);
 	VECTOR_FREE(peer->direct_macs);
 	fastd_turn_server_free(peer->turn_servers);
 
@@ -830,6 +903,62 @@ static bool direct_candidate_valid(const fastd_peer_direct_candidate_t *candidat
 	return candidate->remote.sa.sa_family != AF_UNSPEC && !fastd_timed_out(candidate->timeout);
 }
 
+/** Returns a normalized direct candidate transport mask */
+static uint8_t direct_candidate_transports(uint8_t transports) {
+	transports &= DIRECT_CANDIDATE_TRANSPORT_ANY;
+	return transports ? transports : DIRECT_CANDIDATE_TRANSPORT_ANY;
+}
+
+/** Returns the direct candidate transport bit for a concrete transport */
+static uint8_t direct_candidate_transport_bit(fastd_peer_transport_t transport) {
+	switch (transport) {
+	case TRANSPORT_UDP:
+		return DIRECT_CANDIDATE_TRANSPORT_UDP;
+
+	case TRANSPORT_TCP:
+		return DIRECT_CANDIDATE_TRANSPORT_TCP;
+
+	default:
+		return DIRECT_CANDIDATE_TRANSPORT_ANY;
+	}
+}
+
+/** Checks whether a candidate may be used with a concrete transport */
+static bool direct_candidate_transport_allows(
+	const fastd_peer_direct_candidate_t *candidate, fastd_peer_transport_t transport) {
+	return direct_candidate_transports(candidate->transports) & direct_candidate_transport_bit(transport);
+}
+
+/** Checks whether a transport mask allows a concrete transport */
+static bool direct_candidate_mask_allows(uint8_t transports, fastd_peer_transport_t transport) {
+	return direct_candidate_transports(transports) & direct_candidate_transport_bit(transport);
+}
+
+/** Returns the best direct candidate transport mask for an exact endpoint */
+static uint8_t direct_candidate_transports_for_address(const fastd_peer_t *peer, const fastd_peer_address_t *addr) {
+	bool found = false;
+	uint8_t priority = 0;
+	uint8_t order = UINT8_MAX;
+	uint8_t transports = 0;
+
+	size_t i;
+	for (i = 0; i < VECTOR_LEN(peer->direct_candidates); i++) {
+		const fastd_peer_direct_candidate_t *candidate = &VECTOR_INDEX(peer->direct_candidates, i);
+		if (!direct_candidate_valid(candidate) || !fastd_peer_address_equal(&candidate->remote, addr))
+			continue;
+
+		if (!found || candidate->priority > priority ||
+		    (candidate->priority == priority && candidate->order < order)) {
+			found = true;
+			priority = candidate->priority;
+			order = candidate->order;
+			transports = direct_candidate_transports(candidate->transports);
+		}
+	}
+
+	return found ? transports : 0;
+}
+
 /** Checks whether a punch-control candidate has exhausted its configured attempts */
 static bool direct_candidate_attempts_exhausted(const fastd_peer_direct_candidate_t *candidate) {
 	return candidate->source == DIRECT_CANDIDATE_PUNCH_CONTROL && conf.punch_max_attempts &&
@@ -853,6 +982,7 @@ static void clear_direct_candidate_cache(fastd_peer_t *peer) {
 	memset(&peer->direct_remote, 0, sizeof(peer->direct_remote));
 	peer->direct_remote_timeout = FASTD_TIMEOUT_INV;
 	peer->direct_remote_source = DIRECT_CANDIDATE_REALM;
+	peer->direct_remote_transports = 0;
 	peer->direct_remote_exact_udp = false;
 	peer->direct_remote_udp_punch_sockets = 0;
 }
@@ -873,6 +1003,9 @@ static void compact_punch_suppressions(fastd_peer_t *peer) {
 /** Suppresses one failed punch endpoint for a short cooldown period */
 static void suppress_punch_candidate(fastd_peer_t *peer, const fastd_peer_address_t *remote_addr) {
 	compact_punch_suppressions(peer);
+
+	if (fastd_peer_address_equal(&peer->direct_remote, remote_addr))
+		clear_direct_candidate_cache(peer);
 
 	size_t i;
 	for (i = 0; i < VECTOR_LEN(peer->punch_suppressions); i++) {
@@ -898,7 +1031,12 @@ static void suppress_punch_candidate(fastd_peer_t *peer, const fastd_peer_addres
 		peer->punch_suppressions, ((fastd_peer_punch_suppression_t){
 						  .remote = *remote_addr,
 						  .timeout = ctx.now + FASTD_PUNCH_SUPPRESSION_TIME,
-					  }));
+				  }));
+}
+
+/** Suppresses one punch endpoint after it was replaced by failover */
+void fastd_peer_suppress_punch_candidate(fastd_peer_t *peer, const fastd_peer_address_t *remote_addr) {
+	suppress_punch_candidate(peer, remote_addr);
 }
 
 #ifdef WITH_TESTS
@@ -916,6 +1054,7 @@ static void set_direct_candidate_cache(fastd_peer_t *peer, const fastd_peer_dire
 	peer->direct_remote = candidate->remote;
 	peer->direct_remote_timeout = candidate->timeout;
 	peer->direct_remote_source = candidate->source;
+	peer->direct_remote_transports = direct_candidate_transports(candidate->transports);
 	peer->direct_remote_exact_udp = candidate->exact_udp_punch;
 	peer->direct_remote_udp_punch_sockets = candidate->udp_punch_sockets;
 }
@@ -926,6 +1065,7 @@ static void count_direct_success(fastd_peer_t *peer, fastd_peer_direct_candidate
 		return;
 
 	ctx.punch_direct_success++;
+	ctx.punch_task_manager_outcome_success++;
 	peer->punch_success_counted = true;
 	VECTOR_RESIZE(peer->punch_suppressions, 0);
 
@@ -937,9 +1077,18 @@ static void count_direct_success(fastd_peer_t *peer, fastd_peer_direct_candidate
 	}
 }
 
+#ifdef WITH_TESTS
+
+/** Test wrapper for direct punch-control success accounting */
+void fastd_peer_test_count_direct_success(fastd_peer_t *peer, fastd_peer_direct_candidate_source_t source) {
+	count_direct_success(peer, source);
+}
+
+#endif
+
 /** Finds the source of a direct endpoint candidate matching an address exactly */
-bool fastd_peer_get_direct_candidate_source(
-	const fastd_peer_t *peer, const fastd_peer_address_t *remote_addr,
+bool fastd_peer_get_direct_candidate_source_transport(
+	const fastd_peer_t *peer, const fastd_peer_address_t *remote_addr, fastd_peer_transport_t transport,
 	fastd_peer_direct_candidate_source_t *source) {
 	bool found = false;
 	uint8_t priority = 0;
@@ -948,6 +1097,9 @@ bool fastd_peer_get_direct_candidate_source(
 	for (i = 0; i < VECTOR_LEN(peer->direct_candidates); i++) {
 		const fastd_peer_direct_candidate_t *candidate = &VECTOR_INDEX(peer->direct_candidates, i);
 		if (!direct_candidate_valid(candidate))
+			continue;
+
+		if (!direct_candidate_transport_allows(candidate, transport))
 			continue;
 
 		if (!fastd_peer_address_equal(&candidate->remote, remote_addr))
@@ -962,6 +1114,63 @@ bool fastd_peer_get_direct_candidate_source(
 	}
 
 	return found;
+}
+
+/** Finds the source of a direct endpoint candidate matching an address exactly */
+bool fastd_peer_get_direct_candidate_source(
+	const fastd_peer_t *peer, const fastd_peer_address_t *remote_addr,
+	fastd_peer_direct_candidate_source_t *source) {
+	return fastd_peer_get_direct_candidate_source_transport(peer, remote_addr, TRANSPORT_AUTO, source);
+}
+
+/** Returns true if a punch-control candidate with the same IP may describe this endpoint-dependent NAT path */
+bool fastd_peer_get_endpoint_dependent_candidate_source_transport(
+	const fastd_peer_t *peer, const fastd_peer_address_t *remote_addr, fastd_peer_transport_t transport,
+	fastd_peer_direct_candidate_source_t *source) {
+	if (fastd_timed_out(peer->punch_timeout))
+		return false;
+
+	switch (peer->punch_nat_type) {
+	case FASTD_NAT_SYMMETRIC:
+	case FASTD_NAT_SYMMETRIC_EASY_INC:
+	case FASTD_NAT_SYMMETRIC_EASY_DEC:
+		break;
+
+	default:
+		return false;
+	}
+
+	bool found = false;
+	uint8_t priority = 0;
+
+	size_t i;
+	for (i = 0; i < VECTOR_LEN(peer->direct_candidates); i++) {
+		const fastd_peer_direct_candidate_t *candidate = &VECTOR_INDEX(peer->direct_candidates, i);
+		if (candidate->source != DIRECT_CANDIDATE_PUNCH_CONTROL || !direct_candidate_valid(candidate))
+			continue;
+
+		if (!direct_candidate_transport_allows(candidate, transport))
+			continue;
+
+		if (!fastd_peer_address_ip_equal(&candidate->remote, remote_addr))
+			continue;
+
+		if (!found || candidate->priority > priority) {
+			found = true;
+			priority = candidate->priority;
+			if (source)
+				*source = candidate->source;
+		}
+	}
+
+	return found;
+}
+
+/** Returns true if a punch-control candidate with the same IP may describe this endpoint-dependent NAT path */
+bool fastd_peer_get_endpoint_dependent_candidate_source(
+	const fastd_peer_t *peer, const fastd_peer_address_t *remote_addr,
+	fastd_peer_direct_candidate_source_t *source) {
+	return fastd_peer_get_endpoint_dependent_candidate_source_transport(peer, remote_addr, TRANSPORT_AUTO, source);
 }
 
 /** Finds the selection quality of a direct endpoint candidate */
@@ -1010,6 +1219,18 @@ bool fastd_peer_direct_candidate_preferred(
 	return direct_candidate_preferred(peer, new_addr, old_addr);
 }
 
+/** Returns true if a direct candidate is compatible with the peer's configured transport */
+static bool direct_candidate_usable_for_peer(
+	const fastd_peer_t *peer, const fastd_peer_direct_candidate_t *candidate) {
+	fastd_peer_transport_t configured = fastd_peer_get_transport(peer);
+	uint8_t transports = direct_candidate_transports(candidate->transports);
+
+	if ((transports & DIRECT_CANDIDATE_TRANSPORT_UDP) && fastd_peer_transport_allows(configured, TRANSPORT_UDP))
+		return true;
+
+	return (transports & DIRECT_CANDIDATE_TRANSPORT_TCP) && fastd_peer_transport_allows(configured, TRANSPORT_TCP);
+}
+
 /** Marks an established peer as direct when its address matches a direct candidate */
 static void mark_direct_established(
 	fastd_peer_t *peer, const fastd_peer_address_t *remote_addr, fastd_peer_direct_candidate_source_t source) {
@@ -1035,6 +1256,7 @@ static void compact_direct_candidates(fastd_peer_t *peer) {
 			if (!fastd_peer_is_established(peer) && candidate->source == DIRECT_CANDIDATE_PUNCH_CONTROL &&
 			    candidate->attempts) {
 				ctx.punch_direct_failures++;
+				ctx.punch_task_manager_outcome_failed++;
 				suppress_punch_candidate(peer, &candidate->remote);
 			}
 			VECTOR_DELETE(peer->direct_candidates, i);
@@ -1042,7 +1264,9 @@ static void compact_direct_candidates(fastd_peer_t *peer) {
 		}
 
 		if (candidate->relay == peer->direct_relay &&
-		    fastd_peer_address_equal(&candidate->remote, &peer->direct_remote))
+		    fastd_peer_address_equal(&candidate->remote, &peer->direct_remote) &&
+		    (direct_candidate_transports(candidate->transports) &
+		     direct_candidate_transports(peer->direct_remote_transports)))
 			cache_valid = true;
 
 		i++;
@@ -1051,6 +1275,15 @@ static void compact_direct_candidates(fastd_peer_t *peer) {
 	if (!cache_valid)
 		clear_direct_candidate_cache(peer);
 }
+
+#ifdef WITH_TESTS
+
+/** Test wrapper for direct candidate expiry accounting */
+void fastd_peer_test_compact_direct_candidates(fastd_peer_t *peer) {
+	compact_direct_candidates(peer);
+}
+
+#endif
 
 /** Checks if a candidate already describes an established path */
 static bool direct_candidate_established(const fastd_peer_t *peer, const fastd_peer_direct_candidate_t *candidate) {
@@ -1072,6 +1305,12 @@ best_direct_candidate(fastd_peer_t *peer, bool require_ready, bool skip_establis
 			continue;
 
 		if (direct_candidate_attempts_exhausted(candidate))
+			continue;
+
+		if (fastd_peer_punch_candidate_suppressed(peer, &candidate->remote))
+			continue;
+
+		if (!direct_candidate_usable_for_peer(peer, candidate))
 			continue;
 
 		if (skip_established && direct_candidate_established(peer, candidate))
@@ -1110,7 +1349,14 @@ static void send_direct_candidate_keepalives(fastd_peer_t *peer) {
 	if (!fastd_peer_nat_traversal_keepalive_enabled(peer) || !conf.punch_max_backups)
 		return;
 
-	if (fastd_peer_has_verified_backup_path(peer))
+	if (peer_has_endpoint_dependent_nat(peer) && fastd_peer_has_backup_path(peer) &&
+	    fastd_peer_active_path_proven(peer) &&
+	    !fastd_peer_punch_candidate_suppressed(peer, &peer->backup_address))
+		return;
+
+	if (fastd_peer_has_verified_backup_path(peer) && fastd_peer_active_path_proven(peer) &&
+	    peer->backup_payload_proven &&
+	    !fastd_peer_punch_candidate_suppressed(peer, &peer->backup_address))
 		return;
 
 	if (select_direct_candidate(peer, true))
@@ -1149,12 +1395,15 @@ fastd_peer_direct_candidate_count_by_source(const fastd_peer_t *peer, fastd_peer
 }
 
 /** Checks if an address is the currently selected punch-control direct candidate */
-bool fastd_peer_is_current_punch_control_candidate(
-	const fastd_peer_t *peer, const fastd_peer_address_t *addr, bool *exact_udp_punch,
-	unsigned *udp_punch_sockets) {
+bool fastd_peer_is_current_punch_control_candidate_transport(
+	const fastd_peer_t *peer, const fastd_peer_address_t *addr, fastd_peer_transport_t transport,
+	bool *exact_udp_punch, unsigned *udp_punch_sockets) {
 	if (peer->direct_remote_source != DIRECT_CANDIDATE_PUNCH_CONTROL ||
 	    peer->direct_remote.sa.sa_family == AF_UNSPEC || fastd_timed_out(peer->direct_remote_timeout) ||
 	    !fastd_peer_address_equal(&peer->direct_remote, addr))
+		return false;
+
+	if (!direct_candidate_mask_allows(peer->direct_remote_transports, transport))
 		return false;
 
 	if (exact_udp_punch)
@@ -1165,15 +1414,25 @@ bool fastd_peer_is_current_punch_control_candidate(
 	return true;
 }
 
+/** Checks if an address is the currently selected punch-control direct candidate */
+bool fastd_peer_is_current_punch_control_candidate(
+	const fastd_peer_t *peer, const fastd_peer_address_t *addr, bool *exact_udp_punch,
+	unsigned *udp_punch_sockets) {
+	return fastd_peer_is_current_punch_control_candidate_transport(
+		peer, addr, TRANSPORT_AUTO, exact_udp_punch, udp_punch_sockets);
+}
+
 /** Checks if an address is the currently selected exact-UDP punch-control direct candidate */
 bool fastd_peer_is_current_punch_candidate(const fastd_peer_t *peer, const fastd_peer_address_t *addr) {
 	bool exact_udp_punch = false;
-	return fastd_peer_is_current_punch_control_candidate(peer, addr, &exact_udp_punch, NULL) && exact_udp_punch;
+	return fastd_peer_is_current_punch_control_candidate_transport(peer, addr, TRANSPORT_UDP, &exact_udp_punch, NULL) &&
+	       exact_udp_punch;
 }
 
 /** Checks if an address is any punch-control direct candidate */
-bool fastd_peer_is_punch_control_candidate(
-	const fastd_peer_t *peer, const fastd_peer_address_t *addr, bool *exact_udp_punch, unsigned *udp_punch_sockets) {
+bool fastd_peer_is_punch_control_candidate_transport(
+	const fastd_peer_t *peer, const fastd_peer_address_t *addr, fastd_peer_transport_t transport,
+	bool *exact_udp_punch, unsigned *udp_punch_sockets) {
 	bool found = false;
 	uint8_t priority = 0;
 	uint8_t order = UINT8_MAX;
@@ -1190,7 +1449,11 @@ bool fastd_peer_is_punch_control_candidate(
 		    !fastd_peer_address_equal(&candidate->remote, addr))
 			continue;
 
-		if (!found || candidate->priority > priority || (candidate->priority == priority && candidate->order < order)) {
+		if (!direct_candidate_transport_allows(candidate, transport))
+			continue;
+
+		if (!found || candidate->priority > priority ||
+		    (candidate->priority == priority && candidate->order < order)) {
 			found = true;
 			priority = candidate->priority;
 			order = candidate->order;
@@ -1208,10 +1471,19 @@ end:
 	return found;
 }
 
+/** Checks if an address is any punch-control direct candidate */
+bool fastd_peer_is_punch_control_candidate(
+	const fastd_peer_t *peer, const fastd_peer_address_t *addr, bool *exact_udp_punch,
+	unsigned *udp_punch_sockets) {
+	return fastd_peer_is_punch_control_candidate_transport(
+		peer, addr, TRANSPORT_AUTO, exact_udp_punch, udp_punch_sockets);
+}
+
 /** Checks if an address is any exact-UDP punch-control direct candidate */
 bool fastd_peer_is_punch_candidate(const fastd_peer_t *peer, const fastd_peer_address_t *addr) {
 	bool exact_udp_punch = false;
-	return fastd_peer_is_punch_control_candidate(peer, addr, &exact_udp_punch, NULL) && exact_udp_punch;
+	return fastd_peer_is_punch_control_candidate_transport(peer, addr, TRANSPORT_UDP, &exact_udp_punch, NULL) &&
+	       exact_udp_punch;
 }
 
 /** Checks if a punch-control candidate endpoint is temporarily suppressed */
@@ -1238,10 +1510,83 @@ size_t fastd_peer_punch_suppression_count(const fastd_peer_t *peer) {
 	return count;
 }
 
+/** Removes expired relay backoff entries */
+static void compact_punch_relay_backoffs(fastd_peer_t *peer) {
+	size_t i;
+	for (i = 0; i < VECTOR_LEN(peer->punch_relay_backoffs);) {
+		if (punch_suppression_valid(&VECTOR_INDEX(peer->punch_relay_backoffs, i))) {
+			i++;
+			continue;
+		}
+
+		VECTOR_DELETE(peer->punch_relay_backoffs, i);
+	}
+}
+
+/** Checks whether relay commands for an endpoint should temporarily be held back */
+bool fastd_peer_punch_relay_backoff_active(const fastd_peer_t *peer, const fastd_peer_address_t *addr) {
+	return fastd_peer_punch_relay_backoff_timeout(peer, addr) != FASTD_TIMEOUT_INV;
+}
+
+/** Returns the active relay backoff timeout for an endpoint, or FASTD_TIMEOUT_INV */
+fastd_timeout_t fastd_peer_punch_relay_backoff_timeout(const fastd_peer_t *peer, const fastd_peer_address_t *addr) {
+	size_t i;
+	for (i = 0; i < VECTOR_LEN(peer->punch_relay_backoffs); i++) {
+		const fastd_peer_punch_suppression_t *entry = &VECTOR_INDEX(peer->punch_relay_backoffs, i);
+		if (punch_suppression_valid(entry) && fastd_peer_address_equal(&entry->remote, addr))
+			return entry->timeout;
+	}
+
+	return FASTD_TIMEOUT_INV;
+}
+
+/** Counts active relay backoff entries */
+size_t fastd_peer_punch_relay_backoff_count(const fastd_peer_t *peer) {
+	size_t count = 0;
+	size_t i;
+	for (i = 0; i < VECTOR_LEN(peer->punch_relay_backoffs); i++) {
+		if (punch_suppression_valid(&VECTOR_INDEX(peer->punch_relay_backoffs, i)))
+			count++;
+	}
+
+	return count;
+}
+
+/** Adds or refreshes a relay backoff for an endpoint rejected by this peer */
+void fastd_peer_add_punch_relay_backoff(fastd_peer_t *peer, const fastd_peer_address_t *remote_addr) {
+	compact_punch_relay_backoffs(peer);
+
+	size_t i;
+	for (i = 0; i < VECTOR_LEN(peer->punch_relay_backoffs); i++) {
+		fastd_peer_punch_suppression_t *entry = &VECTOR_INDEX(peer->punch_relay_backoffs, i);
+		if (fastd_peer_address_equal(&entry->remote, remote_addr)) {
+			entry->timeout = ctx.now + FASTD_PUNCH_SUPPRESSION_TIME;
+			return;
+		}
+	}
+
+	if (VECTOR_LEN(peer->punch_relay_backoffs) >= FASTD_PUNCH_SUPPRESSION_LIMIT) {
+		size_t victim = 0;
+		for (i = 1; i < VECTOR_LEN(peer->punch_relay_backoffs); i++) {
+			if (VECTOR_INDEX(peer->punch_relay_backoffs, i).timeout <
+			    VECTOR_INDEX(peer->punch_relay_backoffs, victim).timeout)
+				victim = i;
+		}
+
+		VECTOR_DELETE(peer->punch_relay_backoffs, victim);
+	}
+
+	VECTOR_ADD(
+		peer->punch_relay_backoffs, ((fastd_peer_punch_suppression_t){
+						    .remote = *remote_addr,
+						    .timeout = ctx.now + FASTD_PUNCH_SUPPRESSION_TIME,
+					    }));
+}
+
 /** Adds or refreshes a direct endpoint candidate for a peer */
-void fastd_peer_add_direct_candidate_source(
+void fastd_peer_add_direct_candidate_source_transport(
 	fastd_peer_t *peer, fastd_peer_t *relay, const fastd_peer_address_t *remote_addr, const fastd_eth_addr_t *macs,
-	size_t n_macs, fastd_peer_direct_candidate_source_t source, uint8_t priority) {
+	size_t n_macs, fastd_peer_direct_candidate_source_t source, uint8_t priority, uint8_t transports) {
 	if (relay && source == DIRECT_CANDIDATE_DISCOVERY && !conf.peer_discovery)
 		return;
 
@@ -1250,6 +1595,8 @@ void fastd_peer_add_direct_candidate_source(
 
 	if (remote_addr->sa.sa_family != AF_INET && remote_addr->sa.sa_family != AF_INET6)
 		return;
+
+	transports = direct_candidate_transports(transports);
 
 	compact_direct_candidates(peer);
 
@@ -1285,16 +1632,20 @@ void fastd_peer_add_direct_candidate_source(
 
 		VECTOR_ADD(
 			peer->direct_candidates, ((fastd_peer_direct_candidate_t){
-							 .remote = *remote_addr,
-							 .relay = relay,
-							 .last_attempt = 0,
-							 .order = UINT8_MAX,
-							 .source = source,
-						 }));
+						 .remote = *remote_addr,
+						 .relay = relay,
+						 .last_attempt = 0,
+						 .probe_timeout = FASTD_TIMEOUT_INV,
+						 .payload_probe_timeout = FASTD_TIMEOUT_INV,
+						 .order = UINT8_MAX,
+						 .transports = transports,
+						 .source = source,
+					 }));
 		candidate = &VECTOR_INDEX(peer->direct_candidates, VECTOR_LEN(peer->direct_candidates) - 1);
 	}
 
 	candidate->timeout = ctx.now + PEER_STALE_TIME;
+	candidate->transports = direct_candidate_transports(candidate->transports) | transports;
 	if (priority >= candidate->priority) {
 		candidate->priority = priority;
 		candidate->source = source;
@@ -1329,6 +1680,14 @@ void fastd_peer_add_direct_candidate_source(
 	fastd_peer_schedule_handshake(peer, 0);
 }
 
+/** Adds or refreshes a direct endpoint candidate for a peer */
+void fastd_peer_add_direct_candidate_source(
+	fastd_peer_t *peer, fastd_peer_t *relay, const fastd_peer_address_t *remote_addr, const fastd_eth_addr_t *macs,
+	size_t n_macs, fastd_peer_direct_candidate_source_t source, uint8_t priority) {
+	fastd_peer_add_direct_candidate_source_transport(
+		peer, relay, remote_addr, macs, n_macs, source, priority, DIRECT_CANDIDATE_TRANSPORT_ANY);
+}
+
 /** Adds or refreshes a relay/realm-discovered direct endpoint for a peer */
 void fastd_peer_add_direct_candidate(
 	fastd_peer_t *peer, fastd_peer_t *relay, const fastd_peer_address_t *remote_addr, const fastd_eth_addr_t *macs,
@@ -1339,25 +1698,30 @@ void fastd_peer_add_direct_candidate(
 }
 
 /** Adds or refreshes a punch-control direct endpoint for a peer */
-bool fastd_peer_add_punch_control_candidate(
+bool fastd_peer_add_punch_control_candidate_transport(
 	fastd_peer_t *peer, const fastd_peer_address_t *remote_addr, uint8_t priority, bool exact_udp_punch,
-	unsigned udp_punch_sockets, uint8_t order) {
+	unsigned udp_punch_sockets, uint8_t order, uint8_t transports) {
 	if (!fastd_peer_is_established(peer) && fastd_peer_punch_candidate_suppressed(peer, remote_addr)) {
 		ctx.punch_direct_suppressed++;
 		pr_debug("suppressing punch-control candidate for %P[%I] after recent failures", peer, remote_addr);
 		return false;
 	}
 
-	fastd_peer_add_direct_candidate_source(
-		peer, NULL, remote_addr, NULL, 0, DIRECT_CANDIDATE_PUNCH_CONTROL, priority);
+	transports = direct_candidate_transports(transports);
+
+	fastd_peer_add_direct_candidate_source_transport(
+		peer, NULL, remote_addr, NULL, 0, DIRECT_CANDIDATE_PUNCH_CONTROL, priority, transports);
 
 	size_t i;
 	for (i = 0; i < VECTOR_LEN(peer->direct_candidates); i++) {
 		fastd_peer_direct_candidate_t *candidate = &VECTOR_INDEX(peer->direct_candidates, i);
 		if (candidate->source == DIRECT_CANDIDATE_PUNCH_CONTROL &&
 		    direct_candidate_equal(candidate, NULL, remote_addr)) {
-			candidate->exact_udp_punch = exact_udp_punch;
-			candidate->udp_punch_sockets = udp_punch_sockets;
+			candidate->transports = direct_candidate_transports(candidate->transports) | transports;
+			if (transports & DIRECT_CANDIDATE_TRANSPORT_UDP) {
+				candidate->exact_udp_punch = exact_udp_punch;
+				candidate->udp_punch_sockets = udp_punch_sockets;
+			}
 			if (order < candidate->order)
 				candidate->order = order;
 
@@ -1375,6 +1739,15 @@ bool fastd_peer_add_punch_control_candidate(
 	}
 
 	return false;
+}
+
+/** Adds or refreshes a UDP punch-control direct endpoint for a peer */
+bool fastd_peer_add_punch_control_candidate(
+	fastd_peer_t *peer, const fastd_peer_address_t *remote_addr, uint8_t priority, bool exact_udp_punch,
+	unsigned udp_punch_sockets, uint8_t order) {
+	return fastd_peer_add_punch_control_candidate_transport(
+		peer, remote_addr, priority, exact_udp_punch, udp_punch_sockets, order,
+		DIRECT_CANDIDATE_TRANSPORT_UDP);
 }
 
 /** Returns true if a peer has an established backup path */
@@ -1412,6 +1785,8 @@ void fastd_peer_clear_backup_path(fastd_peer_t *peer) {
 	peer->backup_direct_established = false;
 	peer->backup_direct_source = DIRECT_CANDIDATE_REALM;
 	peer->backup_path_verified = false;
+	peer->backup_payload_proven = false;
+	peer->backup_probe_proven = false;
 }
 
 /** Checks whether one packet belongs to the peer's backup path */
@@ -1448,15 +1823,43 @@ fastd_peer_t *fastd_peer_find_backup_path(
 }
 
 /** Finds an established peer with a direct candidate matching an address */
-fastd_peer_t *fastd_peer_find_direct_candidate(const fastd_peer_address_t *remote_addr) {
+fastd_peer_t *
+fastd_peer_find_direct_candidate_transport(const fastd_peer_address_t *remote_addr, fastd_peer_transport_t transport) {
 	size_t i;
 	for (i = 0; i < VECTOR_LEN(ctx.peers); i++) {
 		fastd_peer_t *peer = VECTOR_INDEX(ctx.peers, i);
-		if (fastd_peer_is_established(peer) && fastd_peer_get_direct_candidate_source(peer, remote_addr, NULL))
+		if (fastd_peer_is_established(peer) &&
+		    fastd_peer_get_direct_candidate_source_transport(peer, remote_addr, transport, NULL))
 			return peer;
 	}
 
 	return NULL;
+}
+
+/** Finds an established peer with an endpoint-dependent punch candidate matching the address IP */
+fastd_peer_t *fastd_peer_find_endpoint_dependent_candidate_transport(
+	const fastd_peer_address_t *remote_addr, fastd_peer_transport_t transport) {
+	fastd_peer_t *found = NULL;
+	size_t i;
+
+	for (i = 0; i < VECTOR_LEN(ctx.peers); i++) {
+		fastd_peer_t *peer = VECTOR_INDEX(ctx.peers, i);
+		if (!fastd_peer_is_established(peer) ||
+		    !fastd_peer_get_endpoint_dependent_candidate_source_transport(peer, remote_addr, transport, NULL))
+			continue;
+
+		if (found)
+			return NULL;
+
+		found = peer;
+	}
+
+	return found;
+}
+
+/** Finds an established peer with a direct candidate matching an address */
+fastd_peer_t *fastd_peer_find_direct_candidate(const fastd_peer_address_t *remote_addr) {
+	return fastd_peer_find_direct_candidate_transport(remote_addr, TRANSPORT_AUTO);
 }
 
 /** Claims a socket/address tuple as a peer's backup path */
@@ -1473,12 +1876,51 @@ bool fastd_peer_claim_backup_path(
 		return false;
 
 	bool payload_candidate = fastd_peer_is_payload_candidate(peer, remote_addr);
-	if (fastd_peer_has_backup_path(peer) && !fastd_peer_address_equal(&peer->backup_address, remote_addr) &&
-	    !payload_candidate)
-		return false;
+	bool probe_candidate = fastd_peer_is_probe_candidate(peer, remote_addr);
+	bool endpoint_dependent_nat =
+		!fastd_timed_out(peer->punch_timeout) &&
+		(peer->punch_nat_type == FASTD_NAT_SYMMETRIC ||
+		 peer->punch_nat_type == FASTD_NAT_SYMMETRIC_EASY_INC ||
+		 peer->punch_nat_type == FASTD_NAT_SYMMETRIC_EASY_DEC);
+	bool new_dynamic_path = sock && (sock->hole_punch || sock->type == SOCKET_TYPE_TCP_CONNECTION);
+	bool existing_dynamic_path =
+		peer->backup_sock &&
+		(peer->backup_sock->hole_punch || peer->backup_sock->type == SOCKET_TYPE_TCP_CONNECTION);
+	if (endpoint_dependent_nat && !new_dynamic_path) {
+		fastd_socket_t *punch_sock = fastd_udp_punch_find_socket(peer, remote_addr);
+		if (punch_sock && fastd_socket_is_open(punch_sock)) {
+			sock = punch_sock;
+			if (sock->bound_addr)
+				local_addr = sock->bound_addr;
+			new_dynamic_path = true;
+		}
+	}
 
 	bool has_actual_transport = sock != NULL;
-	fastd_peer_transport_t actual_transport = fastd_socket_is_tcp(sock) ? TRANSPORT_TCP : TRANSPORT_UDP;
+	fastd_peer_transport_t actual_transport =
+		has_actual_transport && fastd_socket_is_tcp(sock) ? TRANSPORT_TCP : TRANSPORT_UDP;
+	bool exact_punch_candidate = fastd_peer_is_punch_candidate(peer, remote_addr);
+
+	if (endpoint_dependent_nat && actual_transport == TRANSPORT_UDP && peer_has_easy_symmetric_nat(peer) &&
+	    !exact_punch_candidate && !payload_candidate)
+		return false;
+
+	if (endpoint_dependent_nat && fastd_peer_has_verified_backup_path(peer) && peer->backup_payload_proven &&
+	    !fastd_peer_address_equal(&peer->backup_address, remote_addr) && !payload_candidate)
+		return false;
+	if (endpoint_dependent_nat && fastd_peer_has_backup_path(peer) && fastd_peer_active_path_proven(peer) &&
+	    !fastd_peer_address_equal(&peer->backup_address, remote_addr) && !payload_candidate)
+		return false;
+	if (fastd_peer_has_backup_path(peer) && !fastd_peer_address_equal(&peer->backup_address, remote_addr) &&
+	    !(endpoint_dependent_nat && new_dynamic_path && !existing_dynamic_path) && !payload_candidate) {
+		bool existing_payload_candidate = fastd_peer_is_payload_candidate(peer, &peer->backup_address);
+		bool existing_probe_candidate = fastd_peer_is_probe_candidate(peer, &peer->backup_address);
+		bool better_candidate = direct_candidate_preferred(peer, remote_addr, &peer->backup_address);
+
+		if (existing_payload_candidate || !probe_candidate || (existing_probe_candidate && !better_candidate))
+			return false;
+	}
+
 	if (has_actual_transport && !fastd_peer_transport_allows(fastd_peer_get_transport(peer), actual_transport))
 		return false;
 
@@ -1516,13 +1958,20 @@ bool fastd_peer_claim_backup_path(
 	}
 
 	fastd_peer_direct_candidate_source_t source;
-	if (fastd_peer_get_direct_candidate_source(peer, remote_addr, &source)) {
+	if (fastd_peer_get_direct_candidate_source_transport(peer, remote_addr, actual_transport, &source) ||
+	    fastd_peer_get_endpoint_dependent_candidate_source_transport(peer, remote_addr, actual_transport, &source)) {
 		peer->backup_direct_established = true;
 		peer->backup_direct_source = source;
 		count_direct_success(peer, source);
+	} else if (peer->direct_established && fastd_peer_address_ip_equal(&peer->address, remote_addr)) {
+		peer->backup_direct_established = true;
+		peer->backup_direct_source = peer->direct_remote_source;
+		count_direct_success(peer, peer->direct_remote_source);
 	}
 
-	peer->backup_path_verified = false;
+	peer->backup_path_verified = payload_candidate;
+	peer->backup_payload_proven = payload_candidate;
+	peer->backup_probe_proven = false;
 	if (fastd_peer_nat_traversal_keepalive_enabled(peer)) {
 		unsigned verify_timeout = 2 * conf.punch_keepalive_interval;
 		if (verify_timeout < 5000)
@@ -1547,11 +1996,43 @@ bool fastd_peer_promote_backup_path(fastd_peer_t *peer) {
 	fastd_peer_address_t old_address = peer->address;
 	fastd_timeout_t old_reset_timeout = peer->reset_timeout;
 	fastd_timeout_t old_keepalive_timeout = peer->keepalive_timeout;
+	bool old_backup_direct_established = peer->backup_direct_established;
+	fastd_peer_direct_candidate_source_t old_backup_direct_source = peer->backup_direct_source;
 	bool old_direct_established = peer->direct_established;
 	fastd_peer_direct_candidate_source_t old_direct_source = peer->direct_remote_source;
 	bool old_backup_verified = peer->backup_path_verified;
+	bool old_backup_payload_proven = peer->backup_payload_proven;
 	bool old_active_verified =
 		peer->active_path_timeout != FASTD_TIMEOUT_INV && !fastd_timed_out(peer->active_path_timeout);
+	bool old_active_payload_recent =
+		peer->active_path_payload_seen != FASTD_TIMEOUT_INV &&
+		ctx.now < peer->active_path_payload_seen + fastd_peer_active_path_verify_interval(peer);
+	bool old_active_timed_out =
+		peer->active_path_timeout != FASTD_TIMEOUT_INV && fastd_timed_out(peer->active_path_timeout);
+	bool old_active_failed = old_reset_timeout != FASTD_TIMEOUT_INV && fastd_timed_out(old_reset_timeout);
+	bool old_active_keepable_backup =
+		old_direct_established && old_address.sa.sa_family != AF_UNSPEC && !old_active_failed &&
+		!fastd_peer_punch_candidate_suppressed(peer, &old_address);
+	bool old_active_backup_verified =
+		old_active_verified || (old_active_payload_recent && !old_active_timed_out) || old_active_keepable_backup;
+	bool old_active_backup_payload_proven = old_active_payload_recent && old_direct_established;
+
+	if (!old_backup_direct_established) {
+		fastd_peer_transport_t backup_transport =
+			peer->backup_sock && fastd_socket_is_tcp(peer->backup_sock) ? TRANSPORT_TCP : TRANSPORT_UDP;
+
+		if (fastd_peer_get_direct_candidate_source_transport(
+			    peer, &peer->backup_address, backup_transport, &old_backup_direct_source) ||
+		    fastd_peer_get_endpoint_dependent_candidate_source_transport(
+			    peer, &peer->backup_address, backup_transport, &old_backup_direct_source)) {
+			old_backup_direct_established = true;
+			count_direct_success(peer, old_backup_direct_source);
+		} else if (old_direct_established && fastd_peer_address_ip_equal(&old_address, &peer->backup_address)) {
+			old_backup_direct_established = true;
+			old_backup_direct_source = old_direct_source;
+			count_direct_success(peer, old_backup_direct_source);
+		}
+	}
 
 	fastd_peer_hashtable_remove(peer);
 
@@ -1560,12 +2041,14 @@ bool fastd_peer_promote_backup_path(fastd_peer_t *peer) {
 	peer->address = peer->backup_address;
 	peer->reset_timeout = peer->backup_reset_timeout;
 	peer->keepalive_timeout = peer->backup_keepalive_timeout;
-	peer->active_path_timeout = old_backup_verified ? ctx.now + (fastd_peer_nat_traversal_keepalive_enabled(peer)
-									     ? conf.punch_keepalive_interval
-									     : KEEPALIVE_TIMEOUT)
-							: FASTD_TIMEOUT_INV;
-	peer->direct_established = peer->backup_direct_established;
-	peer->direct_remote_source = peer->backup_direct_source;
+	peer->active_path_timeout =
+		old_backup_verified ? ctx.now + fastd_peer_active_path_verify_interval(peer) : FASTD_TIMEOUT_INV;
+	peer->active_path_payload_seen = old_backup_payload_proven ? ctx.now : FASTD_TIMEOUT_INV;
+	peer->active_path_payload_sent = false;
+	if (old_backup_payload_proven)
+		fastd_peer_prove_active_path(peer);
+	peer->direct_established = old_backup_direct_established;
+	peer->direct_remote_source = old_backup_direct_source;
 
 	peer->backup_sock = old_sock;
 	peer->backup_local_address = old_local_address;
@@ -1574,8 +2057,11 @@ bool fastd_peer_promote_backup_path(fastd_peer_t *peer) {
 	peer->backup_keepalive_timeout = old_keepalive_timeout;
 	peer->backup_direct_established = old_direct_established;
 	peer->backup_direct_source = old_direct_source;
-	peer->backup_path_verified = old_active_verified;
+	peer->backup_path_verified = old_active_backup_verified;
+	peer->backup_payload_proven = old_active_backup_payload_proven;
+	peer->backup_probe_proven = false;
 	peer->payload_candidate_timeout = FASTD_TIMEOUT_INV;
+	peer->probe_candidate_timeout = FASTD_TIMEOUT_INV;
 
 	if (peer->sock && socket_ref_dynamic(peer->sock))
 		peer->sock->peer = peer;
@@ -1621,6 +2107,53 @@ bool fastd_peer_is_payload_candidate(const fastd_peer_t *peer, const fastd_peer_
 	return peer->payload_candidate_address.sa.sa_family != AF_UNSPEC &&
 	       !fastd_timed_out(peer->payload_candidate_timeout) &&
 	       fastd_peer_address_equal(&peer->payload_candidate_address, remote_addr);
+}
+
+/** Records a direct path that has completed a matched UDP punch probe */
+void fastd_peer_note_probe_candidate(fastd_peer_t *peer, const fastd_peer_address_t *remote_addr) {
+	fastd_timeout_t timeout = ctx.now + fastd_peer_active_path_verify_interval(peer);
+	uint8_t priority = peer_has_easy_symmetric_nat(peer) ? FASTD_DIRECT_CANDIDATE_PRIORITY_EASY_SYM_PROBE :
+							 FASTD_DIRECT_CANDIDATE_PRIORITY_PROBE;
+
+	fastd_peer_add_direct_candidate_source_transport(
+		peer, NULL, remote_addr, NULL, 0, DIRECT_CANDIDATE_PUNCH_CONTROL,
+		priority, DIRECT_CANDIDATE_TRANSPORT_UDP);
+
+	peer->probe_candidate_address = *remote_addr;
+	peer->probe_candidate_timeout = timeout;
+
+	size_t i;
+	for (i = 0; i < VECTOR_LEN(peer->direct_candidates); i++) {
+		fastd_peer_direct_candidate_t *candidate = &VECTOR_INDEX(peer->direct_candidates, i);
+		if (direct_candidate_valid(candidate) && fastd_peer_address_equal(&candidate->remote, remote_addr))
+			candidate->probe_timeout = timeout;
+	}
+}
+
+/** Checks if an address matches the current probe-proven candidate */
+bool fastd_peer_is_probe_candidate(const fastd_peer_t *peer, const fastd_peer_address_t *remote_addr) {
+	size_t i;
+	for (i = 0; i < VECTOR_LEN(peer->direct_candidates); i++) {
+		const fastd_peer_direct_candidate_t *candidate = &VECTOR_INDEX(peer->direct_candidates, i);
+		if (direct_candidate_valid(candidate) && fastd_peer_address_equal(&candidate->remote, remote_addr) &&
+		    candidate->probe_timeout != FASTD_TIMEOUT_INV && !fastd_timed_out(candidate->probe_timeout))
+			return true;
+	}
+
+	return peer->probe_candidate_address.sa.sa_family != AF_UNSPEC &&
+	       !fastd_timed_out(peer->probe_candidate_timeout) &&
+	       fastd_peer_address_equal(&peer->probe_candidate_address, remote_addr);
+}
+
+/** Marks the active direct path as proven by authenticated traffic */
+void fastd_peer_prove_active_path(fastd_peer_t *peer) {
+	peer->active_path_proven_timeout = ctx.now + fastd_peer_active_path_verify_interval(peer);
+}
+
+/** Returns true if the active direct path has recent authenticated traffic proof */
+bool fastd_peer_active_path_proven(const fastd_peer_t *peer) {
+	return peer->active_path_proven_timeout != FASTD_TIMEOUT_INV &&
+	       !fastd_timed_out(peer->active_path_proven_timeout);
 }
 
 /**
@@ -1684,6 +2217,15 @@ bool fastd_peer_claim_address(
 	fastd_peer_hashtable_remove(new_peer);
 	new_peer->address = *remote_addr;
 	fastd_peer_hashtable_insert(new_peer);
+
+	if (address_changed)
+		new_peer->active_path_proven_timeout = FASTD_TIMEOUT_INV;
+
+	if (address_changed)
+		new_peer->active_path_payload_seen = FASTD_TIMEOUT_INV;
+
+	if (address_changed)
+		new_peer->active_path_payload_sent = false;
 
 	if (address_changed && fastd_peer_get_transport(new_peer) == TRANSPORT_AUTO)
 		new_peer->transport_probe = TRANSPORT_UNSET;
@@ -1894,21 +2436,48 @@ static fastd_socket_t *default_udp_socket_for_address(const fastd_peer_address_t
 	}
 }
 
-/** Sends a new handshake to a specific peer address */
-static bool send_handshake_address(fastd_peer_t *peer, const fastd_peer_address_t *addr) {
+/** Sends a new handshake to a specific peer address, optionally forcing a concrete transport */
+static bool send_handshake_address_transport(
+	fastd_peer_t *peer, const fastd_peer_address_t *addr, fastd_peer_transport_t preferred_transport) {
 	fastd_socket_t *sock = peer->sock;
 	fastd_peer_address_t local_address = peer->local_address;
 	const fastd_peer_address_t *handshake_addr = addr;
+	uint8_t candidate_transports = direct_candidate_transports_for_address(peer, addr);
 
 	if (!fastd_peer_is_established(peer)) {
 		fastd_peer_claim_address(peer, NULL, NULL, addr, false);
+
+		if (fastd_peer_get_transport(peer) == TRANSPORT_AUTO) {
+			if ((preferred_transport == TRANSPORT_TCP || preferred_transport == TRANSPORT_UDP) &&
+			    direct_candidate_mask_allows(candidate_transports, preferred_transport))
+				peer->transport_probe = preferred_transport;
+			else if (candidate_transports && direct_candidate_mask_allows(candidate_transports, TRANSPORT_TCP) &&
+			    !direct_candidate_mask_allows(candidate_transports, TRANSPORT_UDP))
+				peer->transport_probe = TRANSPORT_TCP;
+			else if (direct_candidate_mask_allows(candidate_transports, TRANSPORT_UDP) &&
+				 !direct_candidate_mask_allows(candidate_transports, TRANSPORT_TCP))
+				peer->transport_probe = TRANSPORT_UDP;
+		}
+
 		fastd_peer_reset_socket(peer);
 
 		sock = peer->sock;
 		local_address = peer->local_address;
 		handshake_addr = &peer->address;
-	} else if (!fastd_peer_address_equal(addr, &peer->address) && (!sock || fastd_socket_is_tcp(sock))) {
-		if (fastd_peer_transport_allows(fastd_peer_get_transport(peer), TRANSPORT_UDP)) {
+	} else if (!fastd_peer_address_equal(addr, &peer->address)) {
+		bool force_tcp_candidate =
+			preferred_transport == TRANSPORT_TCP && direct_candidate_mask_allows(candidate_transports, TRANSPORT_TCP);
+		bool tcp_only_candidate =
+			candidate_transports && direct_candidate_mask_allows(candidate_transports, TRANSPORT_TCP) &&
+			!direct_candidate_mask_allows(candidate_transports, TRANSPORT_UDP);
+
+		if ((force_tcp_candidate || tcp_only_candidate) && fastd_peer_hole_punch_allows(peer, TRANSPORT_TCP) &&
+		    fastd_peer_transport_allows(fastd_peer_get_transport(peer), TRANSPORT_TCP)) {
+			const fastd_socket_t *base_sock = default_udp_socket_for_address(addr);
+			sock = fastd_socket_open_tcp(peer, base_sock, addr);
+		} else if (preferred_transport != TRANSPORT_TCP && (!sock || fastd_socket_is_tcp(sock)) &&
+			   direct_candidate_mask_allows(candidate_transports, TRANSPORT_UDP) &&
+			   fastd_peer_transport_allows(fastd_peer_get_transport(peer), TRANSPORT_UDP)) {
 			switch (addr->sa.sa_family) {
 			case AF_INET:
 				sock = ctx.sock_default_v4;
@@ -1932,7 +2501,8 @@ static bool send_handshake_address(fastd_peer_t *peer, const fastd_peer_address_
 		return false;
 	}
 
-	bool current_exact_udp_punch = fastd_peer_is_current_punch_candidate(peer, handshake_addr);
+	bool current_exact_udp_punch =
+		preferred_transport != TRANSPORT_TCP && fastd_peer_is_current_punch_candidate(peer, handshake_addr);
 	if (current_exact_udp_punch) {
 		fastd_socket_t *udp_sock = default_udp_socket_for_address(handshake_addr);
 		if (udp_sock && udp_sock->bound_addr) {
@@ -1951,7 +2521,9 @@ static bool send_handshake_address(fastd_peer_t *peer, const fastd_peer_address_
 	peer->last_handshake_address = *handshake_addr;
 	conf.protocol->handshake_init(sock, &local_address, handshake_addr, peer, FLAG_INITIAL);
 
-	if (!current_exact_udp_punch && fastd_peer_get_transport(peer) == TRANSPORT_AUTO &&
+	if (preferred_transport != TRANSPORT_TCP && !current_exact_udp_punch &&
+	    fastd_peer_get_transport(peer) == TRANSPORT_AUTO &&
+	    direct_candidate_mask_allows(candidate_transports, TRANSPORT_UDP) &&
 	    fastd_peer_hole_punch_allows(peer, TRANSPORT_UDP) && fastd_socket_is_tcp(sock)) {
 		fastd_socket_t *udp_sock = default_udp_socket_for_address(handshake_addr);
 		if (udp_sock && udp_sock->bound_addr) {
@@ -1967,20 +2539,34 @@ static bool send_handshake_address(fastd_peer_t *peer, const fastd_peer_address_
 	return true;
 }
 
+/** Sends a new handshake to a specific peer address */
+static bool send_handshake_address(fastd_peer_t *peer, const fastd_peer_address_t *addr) {
+	return send_handshake_address_transport(peer, addr, TRANSPORT_AUTO);
+}
+
 /** Sends an immediate direct punch handshake to a candidate endpoint */
-bool fastd_peer_send_direct_handshake(fastd_peer_t *peer, const fastd_peer_address_t *addr) {
+bool fastd_peer_send_direct_handshake_transport(
+	fastd_peer_t *peer, const fastd_peer_address_t *addr, fastd_peer_transport_t transport) {
 	if (!peer || !fastd_peer_is_enabled(peer))
 		return false;
 
 	if (!fastd_peer_may_connect(peer))
 		return false;
 
+	if (transport != TRANSPORT_AUTO && !fastd_peer_transport_allows(fastd_peer_get_transport(peer), transport))
+		return false;
+
 	bool was_established = fastd_peer_is_established(peer);
-	bool sent = send_handshake_address(peer, addr);
+	bool sent = send_handshake_address_transport(peer, addr, transport);
 	if (sent && !was_established)
 		peer->state = STATE_HANDSHAKE;
 
 	return sent;
+}
+
+/** Sends an immediate direct punch handshake to a candidate endpoint */
+bool fastd_peer_send_direct_handshake(fastd_peer_t *peer, const fastd_peer_address_t *addr) {
+	return fastd_peer_send_direct_handshake_transport(peer, addr, TRANSPORT_AUTO);
 }
 
 /** Sends a new handshake to the current address of the given remote of a peer */
@@ -2201,6 +2787,10 @@ void fastd_peer_handle_task(fastd_task_t *task) {
 	/* check for backup path timeout or closed backing socket */
 	if (peer->backup_address.sa.sa_family != AF_UNSPEC && !fastd_peer_has_backup_path(peer))
 		conf.protocol->drop_backup_path(peer);
+
+	if (fastd_peer_is_established(peer) && peer->active_path_timeout == FASTD_TIMEOUT_INV &&
+	    fastd_peer_has_backup_path(peer) && conf.protocol->promote_backup_path(peer))
+		return;
 
 	if (fastd_peer_is_established(peer) && peer->active_path_timeout != FASTD_TIMEOUT_INV &&
 	    fastd_timed_out(peer->active_path_timeout) && fastd_peer_has_backup_path(peer) &&

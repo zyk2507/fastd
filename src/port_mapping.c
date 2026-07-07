@@ -15,6 +15,7 @@
 #include "peer.h"
 
 #include <arpa/inet.h>
+#include <limits.h>
 
 
 #ifdef WITH_NATPMP
@@ -55,6 +56,10 @@ typedef struct fastd_port_mapping_entry {
 	uint16_t port;     /**< The local UDP port in host byte order */
 	bool use_natpmp;   /**< Specifies if this port should be mapped using NAT-PMP */
 	bool use_upnp_igd; /**< Specifies if this port should be mapped using UPnP IGD */
+	bool fixed_natpmp; /**< Specifies if this port is used by a fixed socket with NAT-PMP enabled */
+	bool fixed_upnp_igd; /**< Specifies if this port is used by a fixed socket with UPnP IGD enabled */
+	uint16_t dynamic_natpmp_refs; /**< Number of dynamic listeners using NAT-PMP for this port */
+	uint16_t dynamic_upnp_igd_refs; /**< Number of dynamic listeners using UPnP IGD for this port */
 
 #ifdef WITH_NATPMP
 	uint16_t natpmp_public_port; /**< The NAT-PMP mapped public UDP port in host byte order */
@@ -88,11 +93,19 @@ struct fastd_port_mapping {
 	struct UPNPUrls upnp_urls;               /**< UPnP IGD control URLs */
 	struct IGDdatas upnp_data;               /**< UPnP IGD service metadata */
 	fastd_peer_address_t upnp_external_addr; /**< External address reported by the UPnP IGD */
+	char upnp_lanaddr[64];                   /**< LAN address selected by UPNP_GetValidIGD() */
 	bool upnp_initialized;                   /**< Specifies if upnp_urls has been initialized */
+#endif
+
+#ifdef WITH_TESTS
+	bool test_no_backend_activation; /**< Suppresses real gateway calls in unit tests */
 #endif
 
 	VECTOR(fastd_port_mapping_entry_t) mappings; /**< Configured UDP port mappings */
 };
+
+static void compact_unused_mappings(fastd_port_mapping_t *mapping);
+static void activate_mapping_backends(fastd_port_mapping_t *mapping);
 
 
 /** Returns a port mapping entry or NULL if the port is not in the mapping list */
@@ -107,10 +120,40 @@ static fastd_port_mapping_entry_t *find_mapping(const fastd_port_mapping_t *mapp
 	return NULL;
 }
 
+/** Refreshes the effective backend flags of a mapping entry */
+static void update_entry_backends(fastd_port_mapping_entry_t *entry) {
+	entry->use_natpmp = entry->fixed_natpmp || entry->dynamic_natpmp_refs;
+	entry->use_upnp_igd = entry->fixed_upnp_igd || entry->dynamic_upnp_igd_refs;
+}
+
+/** Returns true if a mapping entry is still referenced by any socket */
+static bool entry_has_users(const fastd_port_mapping_entry_t *entry) {
+	return entry->fixed_natpmp || entry->fixed_upnp_igd || entry->dynamic_natpmp_refs ||
+	       entry->dynamic_upnp_igd_refs;
+}
+
+/** Recomputes global backend use flags after entries changed */
+static void recompute_mapping_backends(fastd_port_mapping_t *mapping) {
+	mapping->use_natpmp = false;
+	mapping->use_upnp_igd = false;
+
+	size_t i;
+	for (i = 0; i < VECTOR_LEN(mapping->mappings); i++) {
+		const fastd_port_mapping_entry_t *entry = &VECTOR_INDEX(mapping->mappings, i);
+		mapping->use_natpmp |= entry->use_natpmp;
+		mapping->use_upnp_igd |= entry->use_upnp_igd;
+	}
+}
+
 /** Returns true if a socket can be mapped through IPv4 gateway protocols */
 static bool socket_is_mappable(const fastd_socket_t *sock) {
-	if (!sock->addr || !sock->bound_addr)
+	if (!sock || !sock->bound_addr)
 		return false;
+
+	if (!sock->addr)
+		return sock->type == SOCKET_TYPE_UDP && (sock->punch_public_listener ||
+							 sock->punch_listener_mapping_registered) &&
+		       sock->bound_addr->sa.sa_family == AF_INET;
 
 	if (sock->bound_addr->sa.sa_family == AF_INET6 && sock->addr->addr.sa.sa_family != AF_UNSPEC)
 		return false;
@@ -191,10 +234,36 @@ add_socket_mapping(fastd_port_mapping_t *mapping, const fastd_socket_t *sock, bo
 		entry = &VECTOR_INDEX(mapping->mappings, VECTOR_LEN(mapping->mappings) - 1);
 	}
 
-	entry->use_natpmp |= use_natpmp;
-	entry->use_upnp_igd |= use_upnp_igd;
-	mapping->use_natpmp |= use_natpmp;
-	mapping->use_upnp_igd |= use_upnp_igd;
+	entry->fixed_natpmp |= use_natpmp;
+	entry->fixed_upnp_igd |= use_upnp_igd;
+	update_entry_backends(entry);
+	recompute_mapping_backends(mapping);
+}
+
+/** Adds a runtime UDP punch listener's bound port to the mapping list */
+static bool add_dynamic_socket_mapping(
+	fastd_port_mapping_t *mapping, const fastd_socket_t *sock, bool use_natpmp, bool use_upnp_igd) {
+	if (!socket_is_mappable(sock) || (!use_natpmp && !use_upnp_igd))
+		return false;
+
+	uint16_t port = ntohs(fastd_peer_address_get_port(sock->bound_addr));
+	if (!port)
+		return false;
+
+	fastd_port_mapping_entry_t *entry = find_mapping(mapping, port);
+	if (!entry) {
+		VECTOR_ADD(mapping->mappings, ((fastd_port_mapping_entry_t){ .port = port }));
+		entry = &VECTOR_INDEX(mapping->mappings, VECTOR_LEN(mapping->mappings) - 1);
+	}
+
+	if (use_natpmp && entry->dynamic_natpmp_refs != UINT16_MAX)
+		entry->dynamic_natpmp_refs++;
+	if (use_upnp_igd && entry->dynamic_upnp_igd_refs != UINT16_MAX)
+		entry->dynamic_upnp_igd_refs++;
+
+	update_entry_backends(entry);
+	recompute_mapping_backends(mapping);
+	return entry->use_natpmp || entry->use_upnp_igd;
 }
 
 /** Collects mappable UDP ports from fixed sockets enabled by peer configuration */
@@ -309,6 +378,7 @@ static void schedule_request_timeout(fastd_port_mapping_t *mapping) {
 static void schedule_retry(fastd_port_mapping_t *mapping) {
 	mapping->request_pending = false;
 	mapping->current = 0;
+	compact_unused_mappings(mapping);
 	schedule_natpmp_task(mapping, ctx.now + FASTD_NATPMP_RETRY_INTERVAL);
 }
 
@@ -329,6 +399,8 @@ static int64_t renewal_delay(const fastd_port_mapping_t *mapping) {
 
 /** Starts a NAT-PMP mapping request for a given mapping index */
 static void request_mapping(fastd_port_mapping_t *mapping, size_t i) {
+	compact_unused_mappings(mapping);
+
 	while (i < VECTOR_LEN(mapping->mappings) && !VECTOR_INDEX(mapping->mappings, i).use_natpmp)
 		i++;
 
@@ -353,6 +425,22 @@ static void request_mapping(fastd_port_mapping_t *mapping, size_t i) {
 
 	mapping->request_pending = true;
 	schedule_request_timeout(mapping);
+}
+
+/** Sends a best-effort NAT-PMP deletion request for one active mapping */
+static void release_natpmp_mapping_entry(fastd_port_mapping_entry_t *entry) {
+	if (!entry->natpmp_mapped)
+		return;
+
+	natpmp_t natpmp;
+	if (initnatpmp(&natpmp, 0, 0) >= 0) {
+		sendnewportmappingrequest(&natpmp, NATPMP_PROTOCOL_UDP, entry->port, entry->natpmp_public_port, 0);
+		closenatpmp(&natpmp);
+	}
+
+	entry->natpmp_mapped = false;
+	entry->natpmp_public_port = 0;
+	entry->natpmp_lifetime = 0;
 }
 
 /** Handles the result of a NAT-PMP request */
@@ -391,6 +479,12 @@ static void handle_mapping_response(fastd_port_mapping_t *mapping, const natpmpr
 	entry->natpmp_public_port = public_port;
 	entry->natpmp_lifetime = lifetime;
 
+	if (!entry->use_natpmp) {
+		release_natpmp_mapping_entry(entry);
+		request_mapping(mapping, mapping->current + 1);
+		return;
+	}
+
 	if (entry->natpmp_public_port == entry->port) {
 		pr_verbose("mapped UDP port %u using NAT-PMP", entry->port);
 	} else {
@@ -427,6 +521,7 @@ static void handle_pending_request(fastd_port_mapping_t *mapping) {
 
 	mapping->request_pending = false;
 	handle_mapping_response(mapping, &response);
+	compact_unused_mappings(mapping);
 }
 
 /** Initializes automatic NAT-PMP port mapping */
@@ -452,15 +547,10 @@ static void release_natpmp_mappings(fastd_port_mapping_t *mapping) {
 	size_t i;
 	for (i = 0; i < VECTOR_LEN(mapping->mappings); i++) {
 		fastd_port_mapping_entry_t *entry = &VECTOR_INDEX(mapping->mappings, i);
-		if (!entry->use_natpmp || !entry->natpmp_mapped)
+		if (!entry->natpmp_mapped)
 			continue;
 
-		natpmp_t natpmp;
-		if (initnatpmp(&natpmp, 0, 0) < 0)
-			continue;
-
-		sendnewportmappingrequest(&natpmp, NATPMP_PROTOCOL_UDP, entry->port, entry->natpmp_public_port, 0);
-		closenatpmp(&natpmp);
+		release_natpmp_mapping_entry(entry);
 	}
 }
 
@@ -506,6 +596,46 @@ static void format_port(char buf[static 6], uint16_t port) {
 	snprintf(buf, 6, "%u", port);
 }
 
+/** Adds one UPnP IGD mapping */
+static void add_upnp_mapping(fastd_port_mapping_t *mapping, fastd_port_mapping_entry_t *entry) {
+	if (!mapping->upnp_initialized || !entry->use_upnp_igd || entry->upnp_mapped)
+		return;
+
+	char port[6];
+	format_port(port, entry->port);
+
+	int ret = UPNP_AddPortMapping(
+		mapping->upnp_urls.controlURL, mapping->upnp_data.first.servicetype, port, port, mapping->upnp_lanaddr,
+		"fastd", "UDP", NULL, "0");
+	if (ret != UPNPCOMMAND_SUCCESS) {
+		pr_warn("unable to add UPnP IGD mapping for UDP port %u: %s", entry->port, upnp_error(ret));
+		return;
+	}
+
+	entry->upnp_mapped = true;
+	entry->upnp_public_port = entry->port;
+	pr_verbose("mapped UDP port %u using UPnP IGD", entry->port);
+}
+
+/** Sends a best-effort UPnP IGD deletion request for one active mapping */
+static void release_upnp_mapping_entry(fastd_port_mapping_t *mapping, fastd_port_mapping_entry_t *entry) {
+	if (!mapping->upnp_initialized || !entry->upnp_mapped)
+		return;
+
+	char port[6];
+	format_port(port, entry->upnp_public_port);
+
+	int ret = UPNP_DeletePortMapping(
+		mapping->upnp_urls.controlURL, mapping->upnp_data.first.servicetype, port, "UDP", NULL);
+	if (ret != UPNPCOMMAND_SUCCESS)
+		pr_debug(
+			"unable to delete UPnP IGD mapping for UDP port %u: %s", entry->upnp_public_port,
+			upnp_error(ret));
+
+	entry->upnp_mapped = false;
+	entry->upnp_public_port = 0;
+}
+
 /** Stores the external address reported by the UPnP IGD, if it is parseable */
 static void set_upnp_external_address(fastd_port_mapping_t *mapping, const char *wanaddr) {
 	fastd_peer_address_t addr = {};
@@ -525,26 +655,13 @@ static void set_upnp_external_address(fastd_port_mapping_t *mapping, const char 
 
 /** Adds UPnP IGD mappings for all configured ports */
 static void add_upnp_mappings(fastd_port_mapping_t *mapping, const char *lanaddr) {
+	strncpy(mapping->upnp_lanaddr, lanaddr, sizeof(mapping->upnp_lanaddr) - 1);
+	mapping->upnp_lanaddr[sizeof(mapping->upnp_lanaddr) - 1] = 0;
+
 	size_t i;
 	for (i = 0; i < VECTOR_LEN(mapping->mappings); i++) {
 		fastd_port_mapping_entry_t *entry = &VECTOR_INDEX(mapping->mappings, i);
-		if (!entry->use_upnp_igd)
-			continue;
-
-		char port[6];
-		format_port(port, entry->port);
-
-		int ret = UPNP_AddPortMapping(
-			mapping->upnp_urls.controlURL, mapping->upnp_data.first.servicetype, port, port, lanaddr,
-			"fastd", "UDP", NULL, "0");
-		if (ret != UPNPCOMMAND_SUCCESS) {
-			pr_warn("unable to add UPnP IGD mapping for UDP port %u: %s", entry->port, upnp_error(ret));
-			continue;
-		}
-
-		entry->upnp_mapped = true;
-		entry->upnp_public_port = entry->port;
-		pr_verbose("mapped UDP port %u using UPnP IGD", entry->port);
+		add_upnp_mapping(mapping, entry);
 	}
 }
 
@@ -600,18 +717,10 @@ static void release_upnp_mappings(fastd_port_mapping_t *mapping) {
 	size_t i;
 	for (i = 0; i < VECTOR_LEN(mapping->mappings); i++) {
 		fastd_port_mapping_entry_t *entry = &VECTOR_INDEX(mapping->mappings, i);
-		if (!entry->use_upnp_igd || !entry->upnp_mapped)
+		if (!entry->upnp_mapped)
 			continue;
 
-		char port[6];
-		format_port(port, entry->upnp_public_port);
-
-		int ret = UPNP_DeletePortMapping(
-			mapping->upnp_urls.controlURL, mapping->upnp_data.first.servicetype, port, "UDP", NULL);
-		if (ret != UPNPCOMMAND_SUCCESS)
-			pr_debug(
-				"unable to delete UPnP IGD mapping for UDP port %u: %s", entry->upnp_public_port,
-				upnp_error(ret));
+		release_upnp_mapping_entry(mapping, entry);
 	}
 }
 
@@ -627,6 +736,108 @@ static void cleanup_upnp_igd(fastd_port_mapping_t *mapping) {
 
 #endif
 
+
+/** Returns true if a mapping entry still has an active gateway lease */
+static bool entry_has_active_lease(const fastd_port_mapping_entry_t *entry) {
+#ifdef WITH_NATPMP
+	if (entry->natpmp_mapped)
+		return true;
+#endif
+
+#ifdef WITH_UPNP_IGD
+	if (entry->upnp_mapped)
+		return true;
+#endif
+
+	return false;
+}
+
+/** Releases active leases for an entry that is no longer referenced */
+static void release_entry_leases(fastd_port_mapping_t *mapping, fastd_port_mapping_entry_t *entry) {
+#ifdef WITH_NATPMP
+	release_natpmp_mapping_entry(entry);
+#endif
+
+#ifdef WITH_UPNP_IGD
+	release_upnp_mapping_entry(mapping, entry);
+#endif
+}
+
+/** Removes disabled mapping entries whose leases have been released */
+static void compact_unused_mappings(fastd_port_mapping_t *mapping) {
+	size_t i;
+	for (i = 0; i < VECTOR_LEN(mapping->mappings);) {
+		fastd_port_mapping_entry_t *entry = &VECTOR_INDEX(mapping->mappings, i);
+		if (entry_has_users(entry)) {
+			i++;
+			continue;
+		}
+
+#ifdef WITH_NATPMP
+		if (mapping->request_pending && mapping->current == i) {
+			i++;
+			continue;
+		}
+#endif
+
+		release_entry_leases(mapping, entry);
+		if (entry_has_active_lease(entry)) {
+			i++;
+			continue;
+		}
+
+		VECTOR_DELETE(mapping->mappings, i);
+
+#ifdef WITH_NATPMP
+		if (mapping->request_pending && mapping->current > i)
+			mapping->current--;
+#endif
+	}
+
+	recompute_mapping_backends(mapping);
+}
+
+/** Starts or refreshes gateway backend work after the mapping set changed */
+static void activate_mapping_backends(fastd_port_mapping_t *mapping) {
+#ifdef WITH_TESTS
+	if (mapping->test_no_backend_activation)
+		return;
+#endif
+
+#ifdef WITH_NATPMP
+	if (mapping->use_natpmp) {
+		if (!mapping->initialized)
+			init_natpmp(mapping);
+		else if (!mapping->request_pending)
+			request_mapping(mapping, 0);
+	}
+#endif
+
+#ifdef WITH_UPNP_IGD
+	if (mapping->use_upnp_igd) {
+		if (!mapping->upnp_initialized)
+			init_upnp_igd(mapping);
+		else {
+			size_t i;
+			for (i = 0; i < VECTOR_LEN(mapping->mappings); i++)
+				add_upnp_mapping(mapping, &VECTOR_INDEX(mapping->mappings, i));
+		}
+	}
+#endif
+}
+
+/** Clears dynamic socket-side registration flags after the global mapping state is torn down */
+static void clear_dynamic_socket_mapping_flags(void) {
+	size_t i;
+	for (i = 0; i < VECTOR_LEN(ctx.udp_punch_socks); i++) {
+		fastd_socket_t *sock = VECTOR_INDEX(ctx.udp_punch_socks, i);
+		if (!sock || !sock->punch_listener_mapping_registered)
+			continue;
+
+		sock->punch_listener_mapping_registered = false;
+		sock->punch_listener_port_mapped = false;
+	}
+}
 
 /** Checks if the configured automatic port mapping support is available */
 bool fastd_port_mapping_check(void) {
@@ -645,8 +856,10 @@ void fastd_port_mapping_init(void) {
 
 	collect_socket_mappings(mapping);
 	if (!mapping->use_natpmp && !mapping->use_upnp_igd) {
-		pr_warn("automatic port mapping is enabled, but no enabled peer uses a fixed IPv4 bind socket");
-		free(mapping);
+		pr_debug(
+			"automatic port mapping is enabled, but no enabled peer uses a fixed IPv4 bind socket; "
+			"dynamic punch listeners may still request mappings");
+		ctx.port_mapping = mapping;
 		return;
 	}
 
@@ -683,6 +896,21 @@ void fastd_port_mapping_handle_task(void) {
 	if (ctx.port_mapping)
 		handle_pending_request(ctx.port_mapping);
 #endif
+}
+
+/** Registers a dynamic UDP socket for automatic port mapping */
+bool fastd_port_mapping_register_socket(fastd_socket_t *sock) {
+	if (!ctx.port_mapping || !sock || sock->punch_listener_mapping_registered)
+		return false;
+
+	bool use_natpmp = ctx.port_mapping->natpmp_requested;
+	bool use_upnp_igd = ctx.port_mapping->upnp_igd_requested;
+	if (!add_dynamic_socket_mapping(ctx.port_mapping, sock, use_natpmp, use_upnp_igd))
+		return false;
+
+	sock->punch_listener_mapping_registered = true;
+	activate_mapping_backends(ctx.port_mapping);
+	return true;
 }
 
 /** Returns the external address for a mapped fixed UDP socket, if one is known */
@@ -735,6 +963,29 @@ bool fastd_port_mapping_get_external_address(const fastd_socket_t *sock, fastd_p
 	}
 }
 
+/** Releases a dynamic UDP socket's automatic port mapping lease */
+void fastd_port_mapping_release_socket(fastd_socket_t *sock) {
+	if (!ctx.port_mapping || !sock || !sock->punch_listener_mapping_registered)
+		return;
+
+	if (socket_is_mappable(sock)) {
+		uint16_t local_port = ntohs(fastd_peer_address_get_port(sock->bound_addr));
+		fastd_port_mapping_entry_t *entry = find_mapping(ctx.port_mapping, local_port);
+		if (entry) {
+			if (entry->dynamic_natpmp_refs)
+				entry->dynamic_natpmp_refs--;
+			if (entry->dynamic_upnp_igd_refs)
+				entry->dynamic_upnp_igd_refs--;
+			update_entry_backends(entry);
+			if (!entry_has_users(entry))
+				release_entry_leases(ctx.port_mapping, entry);
+		}
+	}
+
+	sock->punch_listener_mapping_registered = false;
+	compact_unused_mappings(ctx.port_mapping);
+}
+
 /** Frees resources used by automatic port mapping */
 void fastd_port_mapping_cleanup(void) {
 	fastd_port_mapping_t *mapping = ctx.port_mapping;
@@ -749,7 +1000,58 @@ void fastd_port_mapping_cleanup(void) {
 	cleanup_upnp_igd(mapping);
 #endif
 
+	clear_dynamic_socket_mapping_flags();
 	VECTOR_FREE(mapping->mappings);
 	free(mapping);
 	ctx.port_mapping = NULL;
 }
+
+#ifdef WITH_TESTS
+
+/** Creates an isolated port mapping state for unit tests */
+void fastd_port_mapping_test_begin(bool natpmp_requested, bool upnp_requested) {
+	ctx.port_mapping = fastd_new0(fastd_port_mapping_t);
+	ctx.port_mapping->natpmp_requested = natpmp_requested;
+	ctx.port_mapping->upnp_igd_requested = upnp_requested;
+	ctx.port_mapping->test_no_backend_activation = true;
+}
+
+/** Frees the isolated port mapping state created by fastd_port_mapping_test_begin() */
+void fastd_port_mapping_test_end(void) {
+	if (!ctx.port_mapping)
+		return;
+
+	VECTOR_FREE(ctx.port_mapping->mappings);
+	free(ctx.port_mapping);
+	ctx.port_mapping = NULL;
+}
+
+/** Returns the number of entries in the isolated test mapping state */
+size_t fastd_port_mapping_test_entry_count(void) {
+	return ctx.port_mapping ? VECTOR_LEN(ctx.port_mapping->mappings) : 0;
+}
+
+/** Looks up one entry in the isolated test mapping state */
+bool fastd_port_mapping_test_get_entry(
+	uint16_t port, bool *use_natpmp, bool *use_upnp_igd, uint16_t *dynamic_natpmp_refs,
+	uint16_t *dynamic_upnp_igd_refs) {
+	if (!ctx.port_mapping)
+		return false;
+
+	fastd_port_mapping_entry_t *entry = find_mapping(ctx.port_mapping, port);
+	if (!entry)
+		return false;
+
+	if (use_natpmp)
+		*use_natpmp = entry->use_natpmp;
+	if (use_upnp_igd)
+		*use_upnp_igd = entry->use_upnp_igd;
+	if (dynamic_natpmp_refs)
+		*dynamic_natpmp_refs = entry->dynamic_natpmp_refs;
+	if (dynamic_upnp_igd_refs)
+		*dynamic_upnp_igd_refs = entry->dynamic_upnp_igd_refs;
+
+	return true;
+}
+
+#endif

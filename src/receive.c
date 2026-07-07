@@ -210,7 +210,10 @@ static inline bool can_receive_data(
 	if (fastd_peer_address_equal(&peer->address, remote_addr))
 		return true;
 
-	if (fastd_peer_get_direct_candidate_source(peer, remote_addr, NULL))
+	if (fastd_peer_get_direct_candidate_source_transport(peer, remote_addr, get_socket_transport(sock), NULL))
+		return true;
+
+	if (fastd_peer_get_endpoint_dependent_candidate_source_transport(peer, remote_addr, get_socket_transport(sock), NULL))
 		return true;
 
 	return fastd_peer_address_equal(&peer->local_address, local_addr) ||
@@ -253,11 +256,17 @@ void fastd_receive_packet(
 	if (sock->parent)
 		sock = sock->parent;
 
+	if (fastd_punch_probe_handle(sock, local_addr, remote_addr, buffer->data, buffer->len)) {
+		fastd_buffer_free(buffer);
+		return;
+	}
+
 	if (sock->peer) {
 		if (!fastd_peer_address_equal(&sock->peer->address, remote_addr) &&
 		    !fastd_peer_is_backup_path(sock->peer, sock, local_addr, remote_addr)) {
 			if (!fastd_peer_is_established(sock->peer) ||
-			    !fastd_peer_get_direct_candidate_source(sock->peer, remote_addr, NULL)) {
+			    !fastd_peer_get_direct_candidate_source_transport(
+				    sock->peer, remote_addr, get_socket_transport(sock), NULL)) {
 				pr_debug2("ignoring packet from %I on dynamic socket of %P", remote_addr, sock->peer);
 				fastd_buffer_free(buffer);
 				return;
@@ -267,7 +276,8 @@ void fastd_receive_packet(
 		peer = sock->peer;
 	} else if (sock->hole_punch_peer) {
 		if (!fastd_peer_address_equal(&sock->peer_addr, remote_addr) &&
-		    !fastd_peer_get_direct_candidate_source(sock->hole_punch_peer, remote_addr, NULL)) {
+		    !fastd_peer_get_direct_candidate_source_transport(
+			    sock->hole_punch_peer, remote_addr, TRANSPORT_UDP, NULL)) {
 			pr_debug2(
 				"ignoring packet from %I on hole punching socket of %P", remote_addr,
 				sock->hole_punch_peer);
@@ -308,8 +318,11 @@ void fastd_receive_packet(
 		has_control_header = true;
 	}
 
-	if (!peer && is_data_packet(packet_type))
-		peer = fastd_peer_find_direct_candidate(remote_addr);
+	if (!peer && is_data_packet(packet_type)) {
+		peer = fastd_peer_find_direct_candidate_transport(remote_addr, get_socket_transport(sock));
+		if (!peer)
+			peer = fastd_peer_find_endpoint_dependent_candidate_transport(remote_addr, get_socket_transport(sock));
+	}
 
 	if (peer && !fastd_peer_transport_allows(fastd_peer_get_transport(peer), get_socket_transport(sock))) {
 		pr_debug("ignoring packet from %P[%I] on disallowed transport", peer, remote_addr);
@@ -326,7 +339,8 @@ void fastd_receive_packet(
 		if (peer && fastd_peer_is_established(peer)) {
 			if (!backoff_unknown(*remote_addr) &&
 			    (sock->hole_punch_peer == peer ||
-			     fastd_peer_get_direct_candidate_source(peer, remote_addr, NULL))) {
+			     fastd_peer_get_direct_candidate_source_transport(
+				     peer, remote_addr, get_socket_transport(sock), NULL))) {
 				unsigned flags = packet_type == PACKET_DATA_COMPAT ? 0 : FLAG_L2TP_SUPPORT;
 				fastd_peer_note_payload_candidate(peer, remote_addr);
 				pr_debug(

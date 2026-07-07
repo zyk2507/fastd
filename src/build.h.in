@@ -141,6 +141,18 @@
 /** The default interval between relay-generated punch commands */
 #define DEFAULT_PUNCH_RELAY_INTERVAL 10000 /* 10 seconds */
 
+/** Default easy-symmetric prediction window */
+#define DEFAULT_PUNCH_EASY_SYM_SOCKETS 25
+
+/** Default hard-symmetric local socket count */
+#define DEFAULT_PUNCH_HARD_SYM_SOCKETS 84
+
+/** Default hard-symmetric remote port probe budget */
+#define DEFAULT_PUNCH_HARD_SYM_PACKETS 800
+
+/** Maximum reusable STUN-probed public UDP punch listeners */
+#define DEFAULT_PUNCH_PUBLIC_LISTENERS 4
+
 /** The time after with a peer is reset if no traffic is received from it */
 #define PEER_STALE_TIME 90000		/* 90 seconds */
 

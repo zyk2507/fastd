@@ -61,6 +61,7 @@ src = [
 	'polling.c',
 	'port_mapping.c',
 	'pqueue.c',
+	'punch_probe.c',
 	'punch_rpc.c',
 	'random.c',
 	'receive.c',

@@ -391,10 +391,14 @@ static void print_nat_table(json_object *nat) {
 	}
 
 	bool available = get_bool_member(nat, "available");
+	bool tcp_available = get_bool_member(nat, "tcp_available");
 	add_key_value_row(table, "Enabled", onoff(get_bool_member(nat, "enabled")));
-	add_key_value_row(table, "Available", available ? "yes" : "no");
-	add_key_value_row(table, "Type", value_or_dash(get_string_member(nat, "type")));
-	add_key_value_row(table, "Public address", get_string_member(nat, "public_address"));
+	add_key_value_row(table, "UDP available", available ? "yes" : "no");
+	add_key_value_row(table, "UDP type", value_or_dash(get_string_member(nat, "udp_type")));
+	add_key_value_row(table, "UDP public address", get_string_member(nat, "udp_public_address"));
+	add_key_value_row(table, "TCP available", tcp_available ? "yes" : "no");
+	add_key_value_row(table, "TCP type", value_or_dash(get_string_member(nat, "tcp_type")));
+	add_key_value_row(table, "TCP public address", get_string_member(nat, "tcp_public_address"));
 
 	char ports[64];
 	format_port_range(ports, nat);
@@ -449,14 +453,44 @@ static void print_punch_table(json_object *punch) {
 	add_key_value_row(table, "Active candidates", value);
 	format_counter(value, get_int_member(punch, "active_suppressions"));
 	add_key_value_row(table, "Suppressed endpoints", value);
+	format_counter(value, get_int_member(punch, "active_relay_backoffs"));
+	add_key_value_row(table, "Relay backoffs", value);
+
+	json_object *task_summary = get_object_member(punch, "task_summary");
+	if (task_summary) {
+		format_counter(value, get_int_member(task_summary, "latest_tasks"));
+		add_key_value_row(table, "Latest tasks", value);
+		format_counter(value, get_int_member(task_summary, "waiting_tasks"));
+		add_key_value_row(table, "Waiting tasks", value);
+		format_counter(value, get_int_member(task_summary, "relay_tasks"));
+		add_key_value_row(table, "Relay tasks", value);
+		format_counter(value, get_int_member(task_summary, "handshake_sent"));
+		add_key_value_row(table, "Handshake tasks", value);
+	}
+
+	json_object *task_manager = get_object_member(punch, "task_manager");
+	if (task_manager) {
+		static const char *const names[] = {
+			"runs",		"pairs",	"collected",	"launched",
+			"waiting",	"blacklisted",	"suppressed",	"missing_metadata",
+			"history_count", "outcome_success", "outcome_failed", "outcome_busy",
+		};
+
+		size_t i;
+		for (i = 0; i < array_size(names); i++) {
+			format_counter(value, get_int_member(task_manager, names[i]));
+			add_key_value_row(table, names[i], value);
+		}
+	}
 
 	json_object *counters = get_object_member(punch, "counters");
 	if (counters) {
 		static const char *const names[] = {
-			"control_tx",      "control_rx",        "direct_handshakes", "direct_success",
-			"direct_failures", "direct_suppressed", "udp_exact_tx",      "result_tx",
-			"result_rx",       "result_accepted",   "result_handshake",  "result_suppressed",
-			"result_no_peer",
+			"control_tx",        "control_rx",        "direct_handshakes", "direct_success",
+			"direct_failures",   "direct_suppressed", "udp_exact_tx",      "probe_tx",
+			"probe_rx",          "probe_response_tx", "probe_matched",     "probe_handshakes",
+			"result_tx",         "result_rx",         "result_accepted",   "result_handshake",
+			"result_suppressed", "result_no_peer",    "result_busy",
 		};
 
 		size_t i;
@@ -668,6 +702,282 @@ static json_object *wrap_string_or_null(const char *str) {
 	return str ? json_object_new_string(str) : NULL;
 }
 
+/** Returns true if a peer address contains an IP endpoint */
+static bool peer_address_available(const fastd_peer_address_t *addr) {
+	return addr && (addr->sa.sa_family == AF_INET || addr->sa.sa_family == AF_INET6);
+}
+
+/** Returns a peer address string as a json_object *, allows unavailable addresses to be passed */
+static json_object *wrap_peer_address_or_null(const fastd_peer_address_t *addr) {
+	if (!peer_address_available(addr))
+		return NULL;
+
+	char addr_buf[1 + INET6_ADDRSTRLEN + 2 + IFNAMSIZ + 1 + 5 + 1];
+	fastd_snprint_peer_address(addr_buf, sizeof(addr_buf), addr, NULL, false, false);
+	return json_object_new_string(addr_buf);
+}
+
+/** Returns an array of peer address strings */
+static json_object *wrap_peer_address_array(const fastd_peer_address_t *addrs, size_t n_addrs) {
+	struct json_object *ret = json_object_new_array();
+
+	size_t i;
+	for (i = 0; i < n_addrs; i++) {
+		if (peer_address_available(&addrs[i]))
+			json_object_array_add(ret, wrap_peer_address_or_null(&addrs[i]));
+	}
+
+	return ret;
+}
+
+/** Returns an array of punch endpoint address strings */
+static json_object *wrap_punch_endpoint_address_array(const fastd_peer_punch_endpoint_t *endpoints, size_t n_endpoints) {
+	struct json_object *ret = json_object_new_array();
+
+	size_t i;
+	for (i = 0; i < n_endpoints; i++) {
+		if (peer_address_available(&endpoints[i].address))
+			json_object_array_add(ret, wrap_peer_address_or_null(&endpoints[i].address));
+	}
+
+	return ret;
+}
+
+/** Returns detailed per-endpoint NAT metadata */
+static json_object *wrap_punch_endpoint_detail_array(const fastd_peer_punch_endpoint_t *endpoints, size_t n_endpoints) {
+	struct json_object *ret = json_object_new_array();
+
+	size_t i;
+	for (i = 0; i < n_endpoints; i++) {
+		const fastd_peer_punch_endpoint_t *endpoint = &endpoints[i];
+		if (!peer_address_available(&endpoint->address))
+			continue;
+
+		struct json_object *entry = json_object_new_object();
+		json_object_object_add(entry, "endpoint", wrap_peer_address_or_null(&endpoint->address));
+		json_object_object_add(entry, "type", json_object_new_string(fastd_nat_type_name(endpoint->nat_type)));
+		json_object_object_add(entry, "min_port", json_object_new_int(endpoint->min_port));
+		json_object_object_add(entry, "max_port", json_object_new_int(endpoint->max_port));
+		json_object_object_add(entry, "port_delta", json_object_new_int(endpoint->port_delta));
+		json_object_object_add(entry, "hard_symmetric_port_index", json_object_new_int64(endpoint->hard_sym_port_index));
+		json_object_object_add(entry, "hard_symmetric_round", json_object_new_int64(endpoint->hard_sym_round));
+		json_object_array_add(ret, entry);
+	}
+
+	return ret;
+}
+
+/** Returns the remaining lifetime of a timeout in milliseconds */
+static int64_t timeout_remaining(fastd_timeout_t timeout) {
+	if (timeout == FASTD_TIMEOUT_INV || fastd_timed_out(timeout))
+		return 0;
+
+	return timeout - ctx.now;
+}
+
+/** Returns the elapsed age of a timestamp in milliseconds */
+static int64_t timeout_age(fastd_timeout_t timeout) {
+	if (timeout == FASTD_TIMEOUT_INV || !timeout || timeout > ctx.now)
+		return 0;
+
+	return ctx.now - timeout;
+}
+
+/** Returns a string for a direct candidate source */
+static const char *direct_candidate_source_name(fastd_peer_direct_candidate_source_t source) {
+	switch (source) {
+	case DIRECT_CANDIDATE_REALM:
+		return "realm";
+
+	case DIRECT_CANDIDATE_DISCOVERY:
+		return "discovery";
+
+	case DIRECT_CANDIDATE_PUNCH_CONTROL:
+		return "punch-control";
+
+	default:
+		return "unknown";
+	}
+}
+
+/** Returns a string for a punch task role */
+static const char *punch_task_role_name(fastd_peer_punch_task_role_t role) {
+	switch (role) {
+	case PEER_PUNCH_TASK_ROLE_NONE:
+		return "none";
+
+	case PEER_PUNCH_TASK_ROLE_RELAY_SUBJECT:
+		return "relay-subject";
+
+	case PEER_PUNCH_TASK_ROLE_RELAY_DEST:
+		return "relay-destination";
+
+	case PEER_PUNCH_TASK_ROLE_COMMAND_TARGET:
+		return "command-target";
+
+	case PEER_PUNCH_TASK_ROLE_RESULT_SENDER:
+		return "result-sender";
+
+	case PEER_PUNCH_TASK_ROLE_RESULT_SUBJECT:
+		return "result-subject";
+
+	default:
+		return "unknown";
+	}
+}
+
+/** Returns a string for a punch task command */
+static const char *punch_task_command_name(fastd_peer_punch_task_command_t command) {
+	switch (command) {
+	case PEER_PUNCH_TASK_COMMAND_NONE:
+		return "none";
+
+	case PEER_PUNCH_TASK_COMMAND_CONE:
+		return "cone";
+
+	case PEER_PUNCH_TASK_COMMAND_EASY_SYM:
+		return "easy-symmetric";
+
+	case PEER_PUNCH_TASK_COMMAND_HARD_SYM:
+		return "hard-symmetric";
+
+	case PEER_PUNCH_TASK_COMMAND_BOTH_EASY_SYM:
+		return "both-easy-symmetric";
+
+	case PEER_PUNCH_TASK_COMMAND_TCP:
+		return "tcp";
+
+	default:
+		return "unknown";
+	}
+}
+
+/** Returns a string for a punch task result */
+static const char *punch_task_result_name(fastd_peer_punch_task_result_t result) {
+	switch (result) {
+	case PEER_PUNCH_TASK_RESULT_NONE:
+		return "none";
+
+	case PEER_PUNCH_TASK_RESULT_ACCEPTED:
+		return "accepted";
+
+	case PEER_PUNCH_TASK_RESULT_HANDSHAKE:
+		return "handshake";
+
+	case PEER_PUNCH_TASK_RESULT_SUPPRESSED:
+		return "suppressed";
+
+	case PEER_PUNCH_TASK_RESULT_NO_PEER:
+		return "no-peer";
+
+	case PEER_PUNCH_TASK_RESULT_BUSY:
+		return "busy";
+
+	default:
+		return "unknown";
+	}
+}
+
+/** Returns a string for a peer-pair punch task stage */
+static const char *punch_pair_task_stage_name(fastd_punch_pair_task_stage_t stage) {
+	switch (stage) {
+	case PUNCH_PAIR_TASK_STAGE_NONE:
+		return "none";
+
+	case PUNCH_PAIR_TASK_STAGE_COLLECTED:
+		return "collected";
+
+	case PUNCH_PAIR_TASK_STAGE_LAUNCHED:
+		return "launched";
+
+	case PUNCH_PAIR_TASK_STAGE_WAITING:
+		return "waiting";
+
+	case PUNCH_PAIR_TASK_STAGE_BLACKLISTED:
+		return "blacklisted";
+
+	case PUNCH_PAIR_TASK_STAGE_SUPPRESSED:
+		return "suppressed";
+
+	case PUNCH_PAIR_TASK_STAGE_MISSING_METADATA:
+		return "missing-metadata";
+
+	case PUNCH_PAIR_TASK_STAGE_RESULT_ACCEPTED:
+		return "result-accepted";
+
+	case PUNCH_PAIR_TASK_STAGE_RESULT_HANDSHAKE:
+		return "result-handshake";
+
+	case PUNCH_PAIR_TASK_STAGE_RESULT_SUPPRESSED:
+		return "result-suppressed";
+
+	case PUNCH_PAIR_TASK_STAGE_RESULT_NO_PEER:
+		return "result-no-peer";
+
+	case PUNCH_PAIR_TASK_STAGE_RESULT_BUSY:
+		return "result-busy";
+
+	default:
+		return "unknown";
+	}
+}
+
+/** Returns a string for a punch task cause */
+static const char *punch_task_cause_name(fastd_peer_punch_task_cause_t cause) {
+	switch (cause) {
+	case PEER_PUNCH_TASK_CAUSE_NONE:
+		return "none";
+
+	case PEER_PUNCH_TASK_CAUSE_RELAY_UDP:
+		return "relay-udp-metadata";
+
+	case PEER_PUNCH_TASK_CAUSE_RELAY_TCP:
+		return "relay-tcp-metadata";
+
+	case PEER_PUNCH_TASK_CAUSE_REMOTE_COMMAND:
+		return "remote-command";
+
+	case PEER_PUNCH_TASK_CAUSE_REMOTE_RESULT:
+		return "remote-result";
+
+	case PEER_PUNCH_TASK_CAUSE_MISSING_PEER:
+		return "missing-peer";
+
+	case PEER_PUNCH_TASK_CAUSE_VERIFIED_BACKUP:
+		return "verified-backup";
+
+	case PEER_PUNCH_TASK_CAUSE_LOCAL_POLICY:
+		return "local-policy";
+
+	case PEER_PUNCH_TASK_CAUSE_CANDIDATE_ADDED:
+		return "candidate-added";
+
+	case PEER_PUNCH_TASK_CAUSE_HANDSHAKE_SENT:
+		return "handshake-sent";
+
+	default:
+		return "unknown";
+	}
+}
+
+/** Returns a normalized direct candidate transport mask */
+static uint8_t direct_candidate_transport_mask(uint8_t transports) {
+	transports &= DIRECT_CANDIDATE_TRANSPORT_ANY;
+	return transports ? transports : DIRECT_CANDIDATE_TRANSPORT_ANY;
+}
+
+/** Returns true if a direct candidate should be exposed as active status */
+static bool direct_candidate_available(const fastd_peer_direct_candidate_t *candidate) {
+	return peer_address_available(&candidate->remote) && candidate->timeout != FASTD_TIMEOUT_INV &&
+	       !fastd_timed_out(candidate->timeout);
+}
+
+/** Returns true if a punch suppression/backoff entry should be exposed as active status */
+static bool punch_suppression_available(const fastd_peer_punch_suppression_t *entry) {
+	return peer_address_available(&entry->remote) && entry->timeout != FASTD_TIMEOUT_INV &&
+	       !fastd_timed_out(entry->timeout);
+}
+
 /** Returns a string for a hole punching mode */
 static const char *hole_punch_mode_name(fastd_hole_punch_mode_t mode) {
 	switch (mode) {
@@ -688,12 +998,194 @@ static const char *hole_punch_mode_name(fastd_hole_punch_mode_t mode) {
 	}
 }
 
+/** Dumps UDP punch metadata learned from a peer */
+static json_object *dump_udp_punch_metadata(const fastd_peer_t *peer) {
+	bool available = peer_address_available(&peer->punch_endpoint) && peer->punch_timeout != FASTD_TIMEOUT_INV &&
+			 !fastd_timed_out(peer->punch_timeout);
+
+	struct json_object *ret = json_object_new_object();
+	json_object_object_add(ret, "available", json_object_new_boolean(available));
+	json_object_object_add(ret, "type", json_object_new_string(fastd_nat_type_name(peer->punch_nat_type)));
+	json_object_object_add(ret, "endpoint", available ? wrap_peer_address_or_null(&peer->punch_endpoint) : NULL);
+	json_object_object_add(
+		ret, "endpoints",
+		available ? wrap_punch_endpoint_address_array(peer->punch_endpoints, peer->n_punch_endpoints) :
+			    json_object_new_array());
+	json_object_object_add(
+		ret, "endpoint_details",
+		available ? wrap_punch_endpoint_detail_array(peer->punch_endpoints, peer->n_punch_endpoints) :
+			    json_object_new_array());
+	json_object_object_add(ret, "min_port", available ? json_object_new_int(peer->punch_min_port) : NULL);
+	json_object_object_add(ret, "max_port", available ? json_object_new_int(peer->punch_max_port) : NULL);
+	json_object_object_add(ret, "port_delta", available ? json_object_new_int(peer->punch_port_delta) : NULL);
+	json_object_object_add(
+		ret, "listener_id", available && peer->punch_listener_id ? json_object_new_int64(peer->punch_listener_id) : NULL);
+	json_object_object_add(ret, "expires_in", json_object_new_int64(timeout_remaining(peer->punch_timeout)));
+	return ret;
+}
+
+/** Dumps TCP punch metadata learned from a peer */
+static json_object *dump_tcp_punch_metadata(const fastd_peer_t *peer) {
+	bool available = peer_address_available(&peer->tcp_punch_endpoint) && peer->tcp_punch_timeout != FASTD_TIMEOUT_INV &&
+			 !fastd_timed_out(peer->tcp_punch_timeout);
+
+	struct json_object *ret = json_object_new_object();
+	json_object_object_add(ret, "available", json_object_new_boolean(available));
+	json_object_object_add(ret, "type", json_object_new_string(fastd_nat_type_name(peer->tcp_punch_nat_type)));
+	json_object_object_add(ret, "endpoint", available ? wrap_peer_address_or_null(&peer->tcp_punch_endpoint) : NULL);
+	json_object_object_add(
+		ret, "endpoints",
+		available ? wrap_peer_address_array(peer->tcp_punch_endpoints, peer->n_tcp_punch_endpoints) :
+			    json_object_new_array());
+	json_object_object_add(ret, "min_port", available ? json_object_new_int(peer->tcp_punch_min_port) : NULL);
+	json_object_object_add(ret, "max_port", available ? json_object_new_int(peer->tcp_punch_max_port) : NULL);
+	json_object_object_add(ret, "expires_in", json_object_new_int64(timeout_remaining(peer->tcp_punch_timeout)));
+	return ret;
+}
+
+/** Dumps the currently selected direct candidate cache */
+static json_object *dump_current_direct_candidate(const fastd_peer_t *peer) {
+	bool available = peer_address_available(&peer->direct_remote) &&
+			 peer->direct_remote_timeout != FASTD_TIMEOUT_INV &&
+			 !fastd_timed_out(peer->direct_remote_timeout);
+	uint8_t transports = available ? direct_candidate_transport_mask(peer->direct_remote_transports) : 0;
+
+	struct json_object *ret = json_object_new_object();
+	json_object_object_add(ret, "available", json_object_new_boolean(available));
+	json_object_object_add(ret, "endpoint", available ? wrap_peer_address_or_null(&peer->direct_remote) : NULL);
+	json_object_object_add(
+		ret, "source",
+		available ? json_object_new_string(direct_candidate_source_name(peer->direct_remote_source)) : NULL);
+	json_object_object_add(ret, "udp", json_object_new_boolean(transports & DIRECT_CANDIDATE_TRANSPORT_UDP));
+	json_object_object_add(ret, "tcp", json_object_new_boolean(transports & DIRECT_CANDIDATE_TRANSPORT_TCP));
+	json_object_object_add(ret, "exact_udp", json_object_new_boolean(available && peer->direct_remote_exact_udp));
+	json_object_object_add(
+		ret, "udp_punch_sockets",
+		json_object_new_int64(available ? peer->direct_remote_udp_punch_sockets : 0));
+	json_object_object_add(ret, "expires_in", json_object_new_int64(timeout_remaining(peer->direct_remote_timeout)));
+	return ret;
+}
+
+/** Dumps one active direct candidate */
+static json_object *dump_direct_candidate(const fastd_peer_direct_candidate_t *candidate) {
+	uint8_t transports = direct_candidate_transport_mask(candidate->transports);
+
+	struct json_object *ret = json_object_new_object();
+	json_object_object_add(ret, "endpoint", wrap_peer_address_or_null(&candidate->remote));
+	json_object_object_add(ret, "source", json_object_new_string(direct_candidate_source_name(candidate->source)));
+	json_object_object_add(ret, "relay", candidate->relay ? wrap_string_or_null(candidate->relay->name) : NULL);
+	json_object_object_add(ret, "udp", json_object_new_boolean(transports & DIRECT_CANDIDATE_TRANSPORT_UDP));
+	json_object_object_add(ret, "tcp", json_object_new_boolean(transports & DIRECT_CANDIDATE_TRANSPORT_TCP));
+	json_object_object_add(ret, "exact_udp", json_object_new_boolean(candidate->exact_udp_punch));
+	json_object_object_add(ret, "udp_punch_sockets", json_object_new_int64(candidate->udp_punch_sockets));
+	json_object_object_add(ret, "priority", json_object_new_int(candidate->priority));
+	json_object_object_add(ret, "order", json_object_new_int(candidate->order));
+	json_object_object_add(ret, "attempts", json_object_new_int64(candidate->attempts));
+	json_object_object_add(ret, "expires_in", json_object_new_int64(timeout_remaining(candidate->timeout)));
+	json_object_object_add(ret, "last_attempt_age", json_object_new_int64(timeout_age(candidate->last_attempt)));
+	json_object_object_add(ret, "probe_expires_in", json_object_new_int64(timeout_remaining(candidate->probe_timeout)));
+	json_object_object_add(
+		ret, "payload_probe_expires_in", json_object_new_int64(timeout_remaining(candidate->payload_probe_timeout)));
+	return ret;
+}
+
+/** Dumps active direct candidates for one peer */
+static json_object *dump_direct_candidate_list(const fastd_peer_t *peer) {
+	struct json_object *ret = json_object_new_array();
+
+	size_t i;
+	for (i = 0; i < VECTOR_LEN(peer->direct_candidates); i++) {
+		const fastd_peer_direct_candidate_t *candidate = &VECTOR_INDEX(peer->direct_candidates, i);
+		if (direct_candidate_available(candidate))
+			json_object_array_add(ret, dump_direct_candidate(candidate));
+	}
+
+	return ret;
+}
+
+/** Dumps one active punch suppression or relay backoff entry */
+static json_object *dump_punch_suppression_entry(const fastd_peer_punch_suppression_t *entry) {
+	struct json_object *ret = json_object_new_object();
+	json_object_object_add(ret, "endpoint", wrap_peer_address_or_null(&entry->remote));
+	json_object_object_add(ret, "expires_in", json_object_new_int64(timeout_remaining(entry->timeout)));
+	return ret;
+}
+
+/** Dumps active punch suppression or relay backoff entries */
+static json_object *dump_punch_suppression_list(
+	const fastd_peer_punch_suppression_t *entries, size_t n_entries) {
+	struct json_object *ret = json_object_new_array();
+
+	size_t i;
+	for (i = 0; i < n_entries; i++) {
+		const fastd_peer_punch_suppression_t *entry = &entries[i];
+		if (punch_suppression_available(entry))
+			json_object_array_add(ret, dump_punch_suppression_entry(entry));
+	}
+
+	return ret;
+}
+
+/** Dumps the latest punch-control task snapshot for a peer */
+static json_object *dump_last_punch_task(const fastd_peer_t *peer) {
+	const fastd_peer_punch_task_t *task = &peer->last_punch_task;
+	bool available = task->id != 0;
+
+	struct json_object *ret = json_object_new_object();
+	json_object_object_add(ret, "available", json_object_new_boolean(available));
+	json_object_object_add(ret, "id", available ? json_object_new_int64(task->id) : NULL);
+	json_object_object_add(ret, "updated_age", available ? json_object_new_int64(ctx.now - task->updated) : NULL);
+	json_object_object_add(
+		ret, "role", available ? json_object_new_string(punch_task_role_name(task->role)) : NULL);
+	json_object_object_add(
+		ret, "cause", available ? json_object_new_string(punch_task_cause_name(task->cause)) : NULL);
+	json_object_object_add(
+		ret, "command", available ? json_object_new_string(punch_task_command_name(task->command)) : NULL);
+	json_object_object_add(
+		ret, "result", available ? json_object_new_string(punch_task_result_name(task->result)) : NULL);
+	json_object_object_add(
+		ret, "next_retry_ms",
+		available && task->next_retry != FASTD_TIMEOUT_INV ? json_object_new_int64(timeout_remaining(task->next_retry)) :
+								      NULL);
+	json_object_object_add(
+		ret, "endpoint",
+		available && peer_address_available(&task->endpoint) ? wrap_peer_address_or_null(&task->endpoint) : NULL);
+	json_object_object_add(
+		ret, "base_mapped_endpoint",
+		available && task->base_mapped_available && peer_address_available(&task->base_mapped_endpoint)
+			? wrap_peer_address_or_null(&task->base_mapped_endpoint)
+			: NULL);
+	json_object_object_add(
+		ret, "base_mapped_port_mapped",
+		available ? json_object_new_boolean(task->base_mapped_port_mapped) : NULL);
+	json_object_object_add(
+		ret, "base_mapped_listener_id",
+		available && task->base_mapped_listener_id ? json_object_new_int64(task->base_mapped_listener_id) : NULL);
+	json_object_object_add(ret, "packet_count", available ? json_object_new_int(task->packet_count) : NULL);
+	json_object_object_add(ret, "candidate_count", available ? json_object_new_int(task->candidate_count) : NULL);
+	json_object_object_add(ret, "candidates_sent", available ? json_object_new_int(task->candidates_sent) : NULL);
+	json_object_object_add(ret, "order", available ? json_object_new_int(task->order) : NULL);
+	json_object_object_add(
+		ret, "udp_punch_sockets", available ? json_object_new_int64(task->udp_punch_sockets) : NULL);
+	json_object_object_add(
+		ret, "hard_symmetric_port_index",
+		available ? json_object_new_int64(task->hard_sym_port_index) : NULL);
+	json_object_object_add(
+		ret, "hard_symmetric_next_port_index",
+		available ? json_object_new_int64(task->hard_sym_next_port_index) : NULL);
+	json_object_object_add(
+		ret, "hard_symmetric_round", available ? json_object_new_int64(task->hard_sym_round) : NULL);
+	json_object_object_add(ret, "wait_window_ms", available ? json_object_new_int64(task->wait_window_ms) : NULL);
+	return ret;
+}
+
 /** Dumps a peer's hole punching status as a JSON object */
 static json_object *dump_hole_punch(const fastd_peer_t *peer) {
 	fastd_hole_punch_mode_t mode = fastd_peer_get_hole_punch(peer);
 	bool established = fastd_peer_is_established(peer) && fastd_socket_is_open(peer->sock) &&
 			   (fastd_socket_is_hole_punch(peer->sock) || peer->direct_established);
 	bool verified = peer->active_path_timeout != FASTD_TIMEOUT_INV && !fastd_timed_out(peer->active_path_timeout);
+	bool proven = fastd_peer_active_path_proven(peer);
 	bool backup_established = fastd_peer_has_backup_path(peer);
 	bool backup_verified = fastd_peer_has_verified_backup_path(peer);
 
@@ -703,8 +1195,11 @@ static json_object *dump_hole_punch(const fastd_peer_t *peer) {
 	json_object_object_add(ret, "enabled", json_object_new_boolean(mode != HOLE_PUNCH_OFF));
 	json_object_object_add(ret, "established", json_object_new_boolean(established));
 	json_object_object_add(ret, "verified", json_object_new_boolean(verified));
+	json_object_object_add(ret, "proven", json_object_new_boolean(proven));
 	json_object_object_add(ret, "backup_established", json_object_new_boolean(backup_established));
 	json_object_object_add(ret, "backup_verified", json_object_new_boolean(backup_verified));
+	json_object_object_add(ret, "backup_payload_proven", json_object_new_boolean(peer->backup_payload_proven));
+	json_object_object_add(ret, "backup_probe_proven", json_object_new_boolean(peer->backup_probe_proven));
 	json_object_object_add(ret, "symmetric", json_object_new_boolean(fastd_peer_get_punch_symmetric(peer)));
 	json_object_object_add(
 		ret, "direct_candidates", json_object_new_int64(fastd_peer_direct_candidate_count(peer)));
@@ -712,6 +1207,23 @@ static json_object *dump_hole_punch(const fastd_peer_t *peer) {
 		ret, "punch_control_candidates",
 		json_object_new_int64(
 			fastd_peer_direct_candidate_count_by_source(peer, DIRECT_CANDIDATE_PUNCH_CONTROL)));
+	json_object_object_add(
+		ret, "punch_suppressions", json_object_new_int64(fastd_peer_punch_suppression_count(peer)));
+	json_object_object_add(ret, "relay_backoffs", json_object_new_int64(fastd_peer_punch_relay_backoff_count(peer)));
+	json_object_object_add(ret, "hard_symmetric_port_index", json_object_new_int64(peer->punch_hard_sym_port_index));
+	json_object_object_add(ret, "hard_symmetric_round", json_object_new_int64(peer->punch_hard_sym_round));
+	json_object_object_add(ret, "udp_metadata", dump_udp_punch_metadata(peer));
+	json_object_object_add(ret, "tcp_metadata", dump_tcp_punch_metadata(peer));
+	json_object_object_add(ret, "current_direct_candidate", dump_current_direct_candidate(peer));
+	json_object_object_add(ret, "direct_candidate_list", dump_direct_candidate_list(peer));
+	json_object_object_add(
+		ret, "punch_suppression_list",
+		dump_punch_suppression_list(VECTOR_DATA(peer->punch_suppressions), VECTOR_LEN(peer->punch_suppressions)));
+	json_object_object_add(
+		ret, "relay_backoff_list",
+		dump_punch_suppression_list(
+			VECTOR_DATA(peer->punch_relay_backoffs), VECTOR_LEN(peer->punch_relay_backoffs)));
+	json_object_object_add(ret, "last_punch_task", dump_last_punch_task(peer));
 
 	if (established) {
 		json_object_object_add(
@@ -746,6 +1258,15 @@ static json_object *dump_hole_punch(const fastd_peer_t *peer) {
 	return ret;
 }
 
+#ifdef WITH_TESTS
+
+/** Test wrapper for a peer's hole punching status */
+struct json_object *fastd_status_test_dump_hole_punch(const fastd_peer_t *peer) {
+	return dump_hole_punch(peer);
+}
+
+#endif
+
 /** Dumps NAT detection status as a JSON object */
 static json_object *dump_nat(void) {
 	fastd_nat_status_t status = {};
@@ -756,17 +1277,31 @@ static json_object *dump_nat(void) {
 		json_object_object_add(ret, "available", json_object_new_boolean(false));
 		json_object_object_add(ret, "type", json_object_new_string(fastd_nat_type_name(FASTD_NAT_UNKNOWN)));
 		json_object_object_add(ret, "public_address", NULL);
+		json_object_object_add(ret, "udp_type", json_object_new_string(fastd_nat_type_name(FASTD_NAT_UNKNOWN)));
+		json_object_object_add(ret, "udp_public_address", NULL);
+		json_object_object_add(ret, "udp_public_addresses", json_object_new_array());
+		json_object_object_add(ret, "tcp_available", json_object_new_boolean(false));
+		json_object_object_add(ret, "tcp_type", json_object_new_string(fastd_nat_type_name(FASTD_NAT_UNKNOWN)));
+		json_object_object_add(ret, "tcp_public_address", NULL);
+		json_object_object_add(ret, "tcp_public_addresses", json_object_new_array());
 		return ret;
 	}
 
 	json_object_object_add(ret, "enabled", json_object_new_boolean(status.enabled));
 	json_object_object_add(ret, "available", json_object_new_boolean(status.available));
 	json_object_object_add(ret, "type", json_object_new_string(fastd_nat_type_name(status.type)));
+	json_object_object_add(ret, "udp_type", json_object_new_string(fastd_nat_type_name(status.type)));
+	json_object_object_add(ret, "tcp_available", json_object_new_boolean(status.tcp_available));
+	json_object_object_add(ret, "tcp_type", json_object_new_string(fastd_nat_type_name(status.tcp_type)));
 
 	if (status.available) {
 		char addr_buf[1 + INET6_ADDRSTRLEN + 2 + IFNAMSIZ + 1 + 5 + 1];
 		fastd_snprint_peer_address(addr_buf, sizeof(addr_buf), &status.reflexive, NULL, false, false);
 		json_object_object_add(ret, "public_address", json_object_new_string(addr_buf));
+		json_object_object_add(ret, "udp_public_address", json_object_new_string(addr_buf));
+		json_object_object_add(
+			ret, "udp_public_addresses",
+			wrap_peer_address_array(status.reflexive_addrs, status.n_reflexive_addrs));
 		json_object_object_add(ret, "min_port", json_object_new_int(status.min_port));
 		json_object_object_add(ret, "max_port", json_object_new_int(status.max_port));
 		json_object_object_add(ret, "port_delta", json_object_new_int(status.port_delta));
@@ -776,6 +1311,8 @@ static json_object *dump_nat(void) {
 		json_object_object_add(ret, "last_update_age", json_object_new_int64(ctx.now - status.last_update));
 	} else {
 		json_object_object_add(ret, "public_address", NULL);
+		json_object_object_add(ret, "udp_public_address", NULL);
+		json_object_object_add(ret, "udp_public_addresses", json_object_new_array());
 		json_object_object_add(ret, "min_port", NULL);
 		json_object_object_add(ret, "max_port", NULL);
 		json_object_object_add(ret, "port_delta", NULL);
@@ -785,6 +1322,267 @@ static json_object *dump_nat(void) {
 		json_object_object_add(ret, "last_update_age", NULL);
 	}
 
+	if (status.tcp_available) {
+		char addr_buf[1 + INET6_ADDRSTRLEN + 2 + IFNAMSIZ + 1 + 5 + 1];
+		fastd_snprint_peer_address(addr_buf, sizeof(addr_buf), &status.tcp_reflexive, NULL, false, false);
+		json_object_object_add(ret, "tcp_public_address", json_object_new_string(addr_buf));
+		json_object_object_add(
+			ret, "tcp_public_addresses",
+			wrap_peer_address_array(status.tcp_reflexive_addrs, status.n_tcp_reflexive_addrs));
+		json_object_object_add(ret, "tcp_min_port", json_object_new_int(status.tcp_min_port));
+		json_object_object_add(ret, "tcp_max_port", json_object_new_int(status.tcp_max_port));
+		json_object_object_add(ret, "tcp_responses", json_object_new_int64(status.tcp_responses));
+	} else {
+		json_object_object_add(ret, "tcp_public_address", NULL);
+		json_object_object_add(ret, "tcp_public_addresses", json_object_new_array());
+		json_object_object_add(ret, "tcp_min_port", NULL);
+		json_object_object_add(ret, "tcp_max_port", NULL);
+		json_object_object_add(ret, "tcp_responses", json_object_new_int64(status.tcp_responses));
+	}
+
+	return ret;
+}
+
+/** Returns true if a UDP punch socket is active and should be exposed */
+static bool udp_punch_socket_available(const fastd_socket_t *sock) {
+	return sock && sock->type == SOCKET_TYPE_UDP && sock->hole_punch &&
+	       sock->hole_punch_timeout != FASTD_TIMEOUT_INV && !fastd_timed_out(sock->hole_punch_timeout);
+}
+
+/** Dumps one active UDP punch socket */
+static json_object *dump_udp_punch_socket(const fastd_socket_t *sock) {
+	struct json_object *ret = json_object_new_object();
+	json_object_object_add(
+		ret, "kind", json_object_new_string(sock->punch_public_listener ? "public-listener" : "peer-punch"));
+	json_object_object_add(ret, "peer", sock->hole_punch_peer ? wrap_string_or_null(sock->hole_punch_peer->name) : NULL);
+	json_object_object_add(ret, "peer_id", sock->hole_punch_peer ? json_object_new_int64(sock->hole_punch_peer->id) : NULL);
+	json_object_object_add(ret, "remote", wrap_peer_address_or_null(&sock->peer_addr));
+	json_object_object_add(ret, "public_endpoint", wrap_peer_address_or_null(&sock->punch_listener_public_addr));
+	json_object_object_add(
+		ret, "listener_id", sock->punch_listener_id ? json_object_new_int64(sock->punch_listener_id) : NULL);
+	json_object_object_add(
+		ret, "local",
+		sock->bound_addr && peer_address_available(sock->bound_addr) ? wrap_peer_address_or_null(sock->bound_addr)
+									     : NULL);
+	json_object_object_add(ret, "expires_in", json_object_new_int64(timeout_remaining(sock->hole_punch_timeout)));
+	json_object_object_add(ret, "selected_age", json_object_new_int64(timeout_age(sock->punch_listener_selected)));
+	json_object_object_add(
+		ret, "mapping_registered", json_object_new_boolean(sock->punch_listener_mapping_registered));
+	json_object_object_add(ret, "port_mapped", json_object_new_boolean(sock->punch_listener_port_mapped));
+	json_object_object_add(ret, "transaction_id", json_object_new_int64(sock->punch_transaction_id));
+	return ret;
+}
+
+/** Dumps the UDP punch socket pool */
+static json_object *dump_udp_punch_socket_pool(void) {
+	struct json_object *ret = json_object_new_object();
+	struct json_object *sockets = json_object_new_array();
+	size_t active = 0;
+	size_t public_listeners = 0;
+
+	size_t i;
+	for (i = 0; i < VECTOR_LEN(ctx.udp_punch_socks); i++) {
+		const fastd_socket_t *sock = VECTOR_INDEX(ctx.udp_punch_socks, i);
+		if (!udp_punch_socket_available(sock))
+			continue;
+
+		if (sock->punch_public_listener)
+			public_listeners++;
+		else
+			active++;
+		json_object_array_add(sockets, dump_udp_punch_socket(sock));
+	}
+
+	json_object_object_add(ret, "limit", json_object_new_int64(conf.punch_max_sockets));
+	json_object_object_add(ret, "public_listener_limit", json_object_new_int64(DEFAULT_PUNCH_PUBLIC_LISTENERS));
+	json_object_object_add(ret, "active", json_object_new_int64(active));
+	json_object_object_add(ret, "public_listeners", json_object_new_int64(public_listeners));
+	json_object_object_add(ret, "allocated", json_object_new_int64(VECTOR_LEN(ctx.udp_punch_socks)));
+	json_object_object_add(ret, "sockets", sockets);
+	return ret;
+}
+
+/** Dumps global punch-control task aggregation */
+static json_object *dump_punch_task_summary(void) {
+	size_t latest_tasks = 0;
+	size_t waiting_tasks = 0;
+	size_t relay_tasks = 0;
+	size_t remote_result_tasks = 0;
+	size_t candidate_added = 0;
+	size_t handshake_sent = 0;
+	size_t local_policy = 0;
+	size_t result_accepted = 0;
+	size_t result_handshake = 0;
+	size_t result_suppressed = 0;
+	size_t result_no_peer = 0;
+	size_t result_busy = 0;
+	int64_t min_next_retry = -1;
+
+	size_t i;
+	for (i = 0; i < VECTOR_LEN(ctx.peers); i++) {
+		const fastd_peer_t *peer = VECTOR_INDEX(ctx.peers, i);
+		const fastd_peer_punch_task_t *task = &peer->last_punch_task;
+		if (!task->id)
+			continue;
+
+		latest_tasks++;
+		if (task->next_retry != FASTD_TIMEOUT_INV && !fastd_timed_out(task->next_retry)) {
+			int64_t remaining = timeout_remaining(task->next_retry);
+			waiting_tasks++;
+			if (min_next_retry < 0 || remaining < min_next_retry)
+				min_next_retry = remaining;
+		}
+
+		switch (task->role) {
+		case PEER_PUNCH_TASK_ROLE_RELAY_SUBJECT:
+		case PEER_PUNCH_TASK_ROLE_RELAY_DEST:
+			relay_tasks++;
+			break;
+
+		case PEER_PUNCH_TASK_ROLE_RESULT_SENDER:
+		case PEER_PUNCH_TASK_ROLE_RESULT_SUBJECT:
+			remote_result_tasks++;
+			break;
+
+		default:
+			break;
+		}
+
+		switch (task->cause) {
+		case PEER_PUNCH_TASK_CAUSE_CANDIDATE_ADDED:
+			candidate_added++;
+			break;
+
+		case PEER_PUNCH_TASK_CAUSE_HANDSHAKE_SENT:
+			handshake_sent++;
+			break;
+
+		case PEER_PUNCH_TASK_CAUSE_LOCAL_POLICY:
+			local_policy++;
+			break;
+
+		default:
+			break;
+		}
+
+		switch (task->result) {
+		case PEER_PUNCH_TASK_RESULT_ACCEPTED:
+			result_accepted++;
+			break;
+
+		case PEER_PUNCH_TASK_RESULT_HANDSHAKE:
+			result_handshake++;
+			break;
+
+		case PEER_PUNCH_TASK_RESULT_SUPPRESSED:
+			result_suppressed++;
+			break;
+
+		case PEER_PUNCH_TASK_RESULT_NO_PEER:
+			result_no_peer++;
+			break;
+
+		case PEER_PUNCH_TASK_RESULT_BUSY:
+			result_busy++;
+			break;
+
+		default:
+			break;
+		}
+	}
+
+	struct json_object *ret = json_object_new_object();
+	json_object_object_add(ret, "latest_tasks", json_object_new_int64(latest_tasks));
+	json_object_object_add(ret, "waiting_tasks", json_object_new_int64(waiting_tasks));
+	json_object_object_add(ret, "relay_tasks", json_object_new_int64(relay_tasks));
+	json_object_object_add(ret, "remote_result_tasks", json_object_new_int64(remote_result_tasks));
+	json_object_object_add(ret, "candidate_added", json_object_new_int64(candidate_added));
+	json_object_object_add(ret, "handshake_sent", json_object_new_int64(handshake_sent));
+	json_object_object_add(ret, "local_policy", json_object_new_int64(local_policy));
+	json_object_object_add(ret, "result_accepted", json_object_new_int64(result_accepted));
+	json_object_object_add(ret, "result_handshake", json_object_new_int64(result_handshake));
+	json_object_object_add(ret, "result_suppressed", json_object_new_int64(result_suppressed));
+	json_object_object_add(ret, "result_no_peer", json_object_new_int64(result_no_peer));
+	json_object_object_add(ret, "result_busy", json_object_new_int64(result_busy));
+	json_object_object_add(
+		ret, "next_retry_min_ms", min_next_retry >= 0 ? json_object_new_int64(min_next_retry) : NULL);
+	return ret;
+}
+
+/** Returns a peer display name by runtime ID, if the peer still exists */
+static json_object *wrap_peer_name_by_id(uint64_t id) {
+	fastd_peer_t *peer = id ? fastd_peer_find_by_id(id) : NULL;
+	return peer ? wrap_string_or_null(peer->name) : NULL;
+}
+
+/** Dumps one recent peer-pair task-manager lifecycle snapshot */
+static json_object *dump_punch_pair_task(const fastd_punch_pair_task_t *task) {
+	struct json_object *ret = json_object_new_object();
+	json_object_object_add(ret, "id", json_object_new_int64(task->id));
+	json_object_object_add(ret, "updated_age", json_object_new_int64(timeout_age(task->updated)));
+	json_object_object_add(ret, "stage", json_object_new_string(punch_pair_task_stage_name(task->stage)));
+	json_object_object_add(ret, "peer_a_id", json_object_new_int64(task->peer_a_id));
+	json_object_object_add(ret, "peer_b_id", json_object_new_int64(task->peer_b_id));
+	json_object_object_add(ret, "peer_a", wrap_peer_name_by_id(task->peer_a_id));
+	json_object_object_add(ret, "peer_b", wrap_peer_name_by_id(task->peer_b_id));
+	json_object_object_add(ret, "subject_id", task->subject_id ? json_object_new_int64(task->subject_id) : NULL);
+	json_object_object_add(
+		ret, "destination_id", task->destination_id ? json_object_new_int64(task->destination_id) : NULL);
+	json_object_object_add(ret, "subject", wrap_peer_name_by_id(task->subject_id));
+	json_object_object_add(ret, "destination", wrap_peer_name_by_id(task->destination_id));
+	json_object_object_add(ret, "candidates_sent", json_object_new_int(task->candidates_sent));
+	json_object_object_add(ret, "backoff_skipped", json_object_new_int(task->backoff_skipped));
+	json_object_object_add(ret, "budget_exhausted", json_object_new_boolean(task->budget_exhausted));
+	json_object_object_add(
+		ret, "next_retry_ms",
+		task->next_retry != FASTD_TIMEOUT_INV && !fastd_timed_out(task->next_retry)
+			? json_object_new_int64(timeout_remaining(task->next_retry))
+			: NULL);
+	return ret;
+}
+
+/** Dumps recent peer-pair task-manager lifecycle snapshots newest-first */
+static json_object *dump_punch_pair_task_history(void) {
+	struct json_object *ret = json_object_new_array();
+
+	size_t i;
+	for (i = 0; i < ctx.punch_pair_task_count; i++) {
+		size_t pos = (ctx.punch_pair_task_pos + FASTD_PUNCH_PAIR_TASK_HISTORY - 1 - i) %
+			     FASTD_PUNCH_PAIR_TASK_HISTORY;
+		if (ctx.punch_pair_tasks[pos].id)
+			json_object_array_add(ret, dump_punch_pair_task(&ctx.punch_pair_tasks[pos]));
+	}
+
+	return ret;
+}
+
+/** Dumps punch task-manager runtime counters */
+static json_object *dump_punch_task_manager(void) {
+	struct json_object *ret = json_object_new_object();
+	json_object_object_add(ret, "runs", json_object_new_int64(ctx.punch_task_manager_runs));
+	json_object_object_add(ret, "pairs", json_object_new_int64(ctx.punch_task_manager_pairs));
+	json_object_object_add(ret, "collected", json_object_new_int64(ctx.punch_task_manager_collected));
+	json_object_object_add(ret, "launched", json_object_new_int64(ctx.punch_task_manager_launched));
+	json_object_object_add(ret, "waiting", json_object_new_int64(ctx.punch_task_manager_waiting));
+	json_object_object_add(ret, "missing_metadata", json_object_new_int64(ctx.punch_task_manager_missing_metadata));
+	json_object_object_add(ret, "blacklisted", json_object_new_int64(ctx.punch_task_manager_blacklisted));
+	json_object_object_add(ret, "suppressed", json_object_new_int64(ctx.punch_task_manager_suppressed));
+	json_object_object_add(ret, "budget_exhausted", json_object_new_int64(ctx.punch_task_manager_budget_exhausted));
+	json_object_object_add(
+		ret, "next_retry_min_ms",
+		ctx.punch_task_manager_next_retry != FASTD_TIMEOUT_INV && !fastd_timed_out(ctx.punch_task_manager_next_retry)
+			? json_object_new_int64(timeout_remaining(ctx.punch_task_manager_next_retry))
+			: NULL);
+	json_object_object_add(ret, "outcome_success", json_object_new_int64(ctx.punch_task_manager_outcome_success));
+	json_object_object_add(ret, "outcome_failed", json_object_new_int64(ctx.punch_task_manager_outcome_failed));
+	json_object_object_add(ret, "outcome_accepted", json_object_new_int64(ctx.punch_task_manager_outcome_accepted));
+	json_object_object_add(ret, "outcome_handshake", json_object_new_int64(ctx.punch_task_manager_outcome_handshake));
+	json_object_object_add(ret, "outcome_suppressed", json_object_new_int64(ctx.punch_task_manager_outcome_suppressed));
+	json_object_object_add(ret, "outcome_no_peer", json_object_new_int64(ctx.punch_task_manager_outcome_no_peer));
+	json_object_object_add(ret, "outcome_busy", json_object_new_int64(ctx.punch_task_manager_outcome_busy));
+	json_object_object_add(ret, "history_limit", json_object_new_int64(FASTD_PUNCH_PAIR_TASK_HISTORY));
+	json_object_object_add(ret, "history_count", json_object_new_int64(ctx.punch_pair_task_count));
+	json_object_object_add(ret, "history", dump_punch_pair_task_history());
 	return ret;
 }
 
@@ -807,14 +1605,20 @@ static json_object *dump_punch(void) {
 
 	size_t active_candidates = 0;
 	size_t active_suppressions = 0;
+	size_t active_relay_backoffs = 0;
 	size_t i;
 	for (i = 0; i < VECTOR_LEN(ctx.peers); i++) {
 		active_candidates += fastd_peer_direct_candidate_count_by_source(
 			VECTOR_INDEX(ctx.peers, i), DIRECT_CANDIDATE_PUNCH_CONTROL);
 		active_suppressions += fastd_peer_punch_suppression_count(VECTOR_INDEX(ctx.peers, i));
+		active_relay_backoffs += fastd_peer_punch_relay_backoff_count(VECTOR_INDEX(ctx.peers, i));
 	}
 	json_object_object_add(ret, "active_candidates", json_object_new_int64(active_candidates));
 	json_object_object_add(ret, "active_suppressions", json_object_new_int64(active_suppressions));
+	json_object_object_add(ret, "active_relay_backoffs", json_object_new_int64(active_relay_backoffs));
+	json_object_object_add(ret, "udp_punch_socket_pool", dump_udp_punch_socket_pool());
+	json_object_object_add(ret, "task_summary", dump_punch_task_summary());
+	json_object_object_add(ret, "task_manager", dump_punch_task_manager());
 
 	struct json_object *counters = json_object_new_object();
 	json_object_object_add(counters, "control_tx", json_object_new_int64(ctx.punch_control_tx));
@@ -824,16 +1628,31 @@ static json_object *dump_punch(void) {
 	json_object_object_add(counters, "direct_failures", json_object_new_int64(ctx.punch_direct_failures));
 	json_object_object_add(counters, "direct_suppressed", json_object_new_int64(ctx.punch_direct_suppressed));
 	json_object_object_add(counters, "udp_exact_tx", json_object_new_int64(ctx.punch_udp_exact_tx));
+	json_object_object_add(counters, "probe_tx", json_object_new_int64(ctx.punch_probe_tx));
+	json_object_object_add(counters, "probe_rx", json_object_new_int64(ctx.punch_probe_rx));
+	json_object_object_add(counters, "probe_response_tx", json_object_new_int64(ctx.punch_probe_response_tx));
+	json_object_object_add(counters, "probe_matched", json_object_new_int64(ctx.punch_probe_matched));
+	json_object_object_add(counters, "probe_handshakes", json_object_new_int64(ctx.punch_probe_handshakes));
 	json_object_object_add(counters, "result_tx", json_object_new_int64(ctx.punch_result_tx));
 	json_object_object_add(counters, "result_rx", json_object_new_int64(ctx.punch_result_rx));
 	json_object_object_add(counters, "result_accepted", json_object_new_int64(ctx.punch_result_accepted));
 	json_object_object_add(counters, "result_handshake", json_object_new_int64(ctx.punch_result_handshake));
 	json_object_object_add(counters, "result_suppressed", json_object_new_int64(ctx.punch_result_suppressed));
 	json_object_object_add(counters, "result_no_peer", json_object_new_int64(ctx.punch_result_no_peer));
+	json_object_object_add(counters, "result_busy", json_object_new_int64(ctx.punch_result_busy));
 	json_object_object_add(ret, "counters", counters);
 
 	return ret;
 }
+
+#ifdef WITH_TESTS
+
+/** Test wrapper for punch control status */
+struct json_object *fastd_status_test_dump_punch(void) {
+	return dump_punch();
+}
+
+#endif
 
 /** Dumps a peer's status as a JSON object */
 static json_object *dump_peer(const fastd_peer_t *peer) {

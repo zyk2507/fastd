@@ -132,7 +132,7 @@ build_realm_server() {
 	local src="$WORK/hysteria-realm-server"
 	local built="$src/hysteria-realm-server"
 
-	if ! git clone --depth 1 https://github.com/apernet/hysteria-realm-server.git "$src" > "$WORK/clone.log" 2>&1; then
+	if ! git clone --depth 1 git@github.com:apernet/hysteria-realm-server.git "$src" > "$WORK/clone.log" 2>&1; then
 		fail 'failed to clone hysteria-realm-server'
 	fi
 

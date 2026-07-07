@@ -42,7 +42,7 @@ fail() {
 	exit 1
 }
 
-for cmd in ip nft ping python3 mktemp; do
+for cmd in ip nft ping python3 mktemp timeout; do
 	command -v "$cmd" >/dev/null 2>&1 || skip "$cmd not available"
 done
 
@@ -85,7 +85,9 @@ IPERF_DURATION=${FASTD_IPERF_DURATION:-9}
 IPERF_ACTIVE_CUT_DURATION=${FASTD_IPERF_ACTIVE_CUT_DURATION:-9}
 IPERF_RECOVERY_DURATION=${FASTD_IPERF_RECOVERY_DURATION:-9}
 IPERF_PARALLEL=${FASTD_IPERF_PARALLEL:-8}
-IPERF_CONNECT_TIMEOUT=${FASTD_IPERF_CONNECT_TIMEOUT:-20000}
+IPERF_CONNECT_TIMEOUT=${FASTD_IPERF_CONNECT_TIMEOUT:-4000}
+IPERF_CLIENT_GRACE=${FASTD_IPERF_CLIENT_GRACE:-8}
+IPERF_SERVER_IDLE_TIMEOUT=${FASTD_IPERF_SERVER_IDLE_TIMEOUT:-30}
 IPERF_MIN_BYTES_FLOOR=100000000
 IPERF_MIN_BYTES=${FASTD_IPERF_MIN_BYTES:-$IPERF_MIN_BYTES_FLOOR}
 IPERF_CASE_GROUP=${FASTD_IPERF_CASE_GROUP:-basic}
@@ -169,10 +171,10 @@ start_iperf_server() {
 	local server_ns=$1 bind_addr=$2 port=$3 log_file=$4
 
 	: > "$log_file"
-	ip netns exec "$server_ns" iperf3 -s -1 -B "$bind_addr" -p "$port" --idle-timeout 5 > "$log_file" 2>&1 &
+	ip netns exec "$server_ns" iperf3 -s -1 -B "$bind_addr" -p "$port" --idle-timeout "$IPERF_SERVER_IDLE_TIMEOUT" > "$log_file" 2>&1 &
 	IPERF_PID=$!
 
-	for _ in $(seq 1 20); do
+	for _ in $(seq 1 40); do
 		grep -q 'Server listening' "$log_file" && return 0
 
 		if ! kill -0 "$IPERF_PID" >/dev/null 2>&1; then
@@ -200,7 +202,8 @@ run_iperf_stream() {
 		fail "iperf3 server failed before start: $label"
 	fi
 
-	if ! ip netns exec "$client_ns" iperf3 \
+	local client_timeout=$((duration + IPERF_CLIENT_GRACE))
+	if ! timeout --kill-after=2 "$client_timeout" ip netns exec "$client_ns" iperf3 \
 		-c "$server_addr" -B "$client_addr" -p "$port" -t "$duration" -P "$IPERF_PARALLEL" \
 		--bidir --json --connect-timeout "$IPERF_CONNECT_TIMEOUT" --get-server-output > "$client_log" 2>&1; then
 		stop_iperf
@@ -404,6 +407,40 @@ sys.exit(0 if backup_ready(a, "b") and backup_ready(b, "a") else 1)
 PY
 }
 
+direct_backups_payload_ready() {
+	python3 - "$WORK/a.json" "$WORK/b.json" <<'PY'
+import json
+import sys
+
+try:
+    a = json.load(open(sys.argv[1]))
+    b = json.load(open(sys.argv[2]))
+except Exception:
+    sys.exit(1)
+
+def find_peer(doc, name):
+    for peer in doc.get("peers", {}).values():
+        if peer.get("name") == name:
+            return peer
+    return {}
+
+def backup_payload_ready(doc, name):
+    peer = find_peer(doc, name)
+    hole_punch = peer.get("hole_punch") or {}
+    return (
+        hole_punch.get("established")
+        and hole_punch.get("backup_established")
+        and hole_punch.get("backup_verified")
+        and hole_punch.get("backup_payload_proven")
+        and hole_punch.get("transport") == "udp"
+        and hole_punch.get("backup_transport") == "udp"
+        and hole_punch.get("remote_port") != hole_punch.get("backup_remote_port")
+    )
+
+sys.exit(0 if backup_payload_ready(a, "b") and backup_payload_ready(b, "a") else 1)
+PY
+}
+
 hole_punch_field() {
 	local node=$1 peer=$2 field=$3
 
@@ -428,16 +465,24 @@ PY
 }
 
 block_active_direct_path() {
-	local a_active=$1 b_active=$2
+	local a_remote=$1 b_remote=$2
+	local a_local=${3:-} b_local=${4:-}
 
 	clear_blocked_direct_path
 
 	run ip netns exec "$NS_RA" nft add table ip failover
 	run ip netns exec "$NS_RA" nft 'add chain ip failover prerouting { type filter hook prerouting priority -200; policy accept; }'
-	run ip netns exec "$NS_RA" nft add rule ip failover prerouting iifname pub ip saddr 10.52.0.3 ip daddr 10.52.0.2 udp sport "$a_active" udp dport "$b_active" drop
+	run ip netns exec "$NS_RA" nft add rule ip failover prerouting iifname pub ip saddr 10.52.0.3 ip daddr 10.52.0.2 udp sport "$a_remote" udp dport "$b_remote" drop
 	run ip netns exec "$NS_RB" nft add table ip failover
 	run ip netns exec "$NS_RB" nft 'add chain ip failover prerouting { type filter hook prerouting priority -200; policy accept; }'
-	run ip netns exec "$NS_RB" nft add rule ip failover prerouting iifname pub ip saddr 10.52.0.2 ip daddr 10.52.0.3 udp sport "$b_active" udp dport "$a_active" drop
+	run ip netns exec "$NS_RB" nft add rule ip failover prerouting iifname pub ip saddr 10.52.0.2 ip daddr 10.52.0.3 udp sport "$b_remote" udp dport "$a_remote" drop
+
+	if [[ -n "$a_local" && -n "$b_local" ]]; then
+		run ip netns exec "$NS_RA" nft 'add chain ip failover forward { type filter hook forward priority 0; policy accept; }'
+		run ip netns exec "$NS_RA" nft add rule ip failover forward iifname pub oifname priv ip saddr 10.52.0.3 ip daddr 10.52.1.2 udp sport "$a_remote" udp dport "$a_local" drop
+		run ip netns exec "$NS_RB" nft 'add chain ip failover forward { type filter hook forward priority 0; policy accept; }'
+		run ip netns exec "$NS_RB" nft add rule ip failover forward iifname pub oifname priv ip saddr 10.52.0.2 ip daddr 10.52.2.2 udp sport "$b_remote" udp dport "$b_local" drop
+	fi
 }
 
 clear_blocked_direct_path() {
@@ -446,17 +491,19 @@ clear_blocked_direct_path() {
 }
 
 direct_active_ports_changed() {
-	local a_active=$1 b_active=$2
+	local a_local=$1 a_remote=$2 b_local=$3 b_remote=$4
 
-	python3 - "$WORK/a.json" "$WORK/b.json" "$a_active" "$b_active" <<'PY'
+	python3 - "$WORK/a.json" "$WORK/b.json" "$a_local" "$a_remote" "$b_local" "$b_remote" <<'PY'
 import json
 import sys
 
 try:
     a = json.load(open(sys.argv[1]))
     b = json.load(open(sys.argv[2]))
-    old_a = int(sys.argv[3])
-    old_b = int(sys.argv[4])
+    old_a_local = int(sys.argv[3])
+    old_a_remote = int(sys.argv[4])
+    old_b_local = int(sys.argv[5])
+    old_b_remote = int(sys.argv[6])
 except Exception:
     sys.exit(1)
 
@@ -466,20 +513,22 @@ def find_peer(doc, name):
             return peer
     return {}
 
-def active_changed(doc, name, old_remote_port):
+def active_changed(doc, name, old_local_port, old_remote_port):
     peer = find_peer(doc, name)
     connection = peer.get("connection") or {}
     hole_punch = peer.get("hole_punch") or {}
+    local_port = hole_punch.get("local_port")
     remote_port = hole_punch.get("remote_port")
     return (
         "established" in connection
         and hole_punch.get("established")
         and hole_punch.get("transport") == "udp"
+        and isinstance(local_port, int)
         and isinstance(remote_port, int)
-        and remote_port != old_remote_port
+        and (local_port != old_local_port or remote_port != old_remote_port)
     )
 
-sys.exit(0 if active_changed(a, "b", old_a) and active_changed(b, "a", old_b) else 1)
+sys.exit(0 if active_changed(a, "b", old_a_local, old_a_remote) and active_changed(b, "a", old_b_local, old_b_remote) else 1)
 PY
 }
 
@@ -1082,15 +1131,17 @@ wait_for_direct_ping() {
 
 run_direct_iperf_after_active_cut() {
 	local label=$1 port=$2
-	local a_active b_active
+	local a_local a_remote b_local b_remote
 
 	dump_statuses
-	a_active=$(hole_punch_field a b remote_port) || fail "missing A active punch remote port before $label iperf3 cut"
-	b_active=$(hole_punch_field b a remote_port) || fail "missing B active punch remote port before $label iperf3 cut"
-	block_active_direct_path "$a_active" "$b_active"
+	a_local=$(hole_punch_field a b local_port) || fail "missing A active punch local port before $label iperf3 cut"
+	a_remote=$(hole_punch_field a b remote_port) || fail "missing A active punch remote port before $label iperf3 cut"
+	b_local=$(hole_punch_field b a local_port) || fail "missing B active punch local port before $label iperf3 cut"
+	b_remote=$(hole_punch_field b a remote_port) || fail "missing B active punch remote port before $label iperf3 cut"
+	block_active_direct_path "$a_remote" "$b_remote" "$a_local" "$b_local"
 	run_direct_iperf "$label" "$port" "$IPERF_ACTIVE_CUT_DURATION"
 
-	if ! direct_active_ports_changed "$a_active" "$b_active"; then
+	if ! direct_active_ports_changed "$a_local" "$a_remote" "$b_local" "$b_remote"; then
 		fail "$label did not recover onto a different direct path during iperf3"
 	fi
 }
@@ -1414,10 +1465,28 @@ if [[ "$ok" != true ]]; then
 	fail 'easy-symmetric to easy-symmetric direct data path failed'
 fi
 
+ok=false
+for _ in $(seq 1 "$PING_WAIT_ATTEMPTS"); do
+	ping_direct >/dev/null 2>&1 || true
+	dump_statuses
+	if direct_backups_payload_ready; then
+		ok=true
+		break
+	fi
+	sleep "$PING_WAIT_SLEEP"
+done
+
+if [[ "$ok" != true ]]; then
+	dump_statuses
+	fail 'easy-symmetric payload-proven backup path was not established before failover'
+fi
+
 dump_statuses
-a_active=$(hole_punch_field a b remote_port) || fail 'missing A active punch remote port before failover'
-b_active=$(hole_punch_field b a remote_port) || fail 'missing B active punch remote port before failover'
-block_active_direct_path "$a_active" "$b_active"
+a_local=$(hole_punch_field a b local_port) || fail 'missing A active punch local port before failover'
+a_remote=$(hole_punch_field a b remote_port) || fail 'missing A active punch remote port before failover'
+b_local=$(hole_punch_field b a local_port) || fail 'missing B active punch local port before failover'
+b_remote=$(hole_punch_field b a remote_port) || fail 'missing B active punch remote port before failover'
+block_active_direct_path "$a_remote" "$b_remote" "$a_local" "$b_local"
 
 ok=false
 for _ in $(seq 1 "$FAILOVER_WAIT_ATTEMPTS"); do
@@ -1425,7 +1494,7 @@ for _ in $(seq 1 "$FAILOVER_WAIT_ATTEMPTS"); do
 	check_fastds_alive
 	dump_statuses
 
-	if direct_active_ports_changed "$a_active" "$b_active"; then
+	if direct_active_ports_changed "$a_local" "$a_remote" "$b_local" "$b_remote"; then
 		ok=true
 		break
 	fi

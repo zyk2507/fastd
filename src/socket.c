@@ -12,6 +12,7 @@
 
 #include "fastd.h"
 #include "hole_punch.h"
+#include "nat_detect.h"
 #include "peer.h"
 #include "peer_group.h"
 #include "polling.h"
@@ -225,6 +226,92 @@ static void udp_punch_unlink(fastd_socket_t *sock) {
 	}
 }
 
+/** Returns true if a UDP punch socket is an active reusable public listener */
+static bool udp_punch_public_listener_available(const fastd_socket_t *sock) {
+	return sock && sock->type == SOCKET_TYPE_UDP && sock->hole_punch && sock->punch_public_listener &&
+	       sock->hole_punch_timeout != FASTD_TIMEOUT_INV && !fastd_timed_out(sock->hole_punch_timeout) &&
+	       (sock->punch_listener_public_addr.sa.sa_family == AF_INET ||
+		sock->punch_listener_public_addr.sa.sa_family == AF_INET6);
+}
+
+/** Counts reusable public punch listeners */
+static size_t udp_punch_public_listener_count(void) {
+	size_t count = 0;
+	size_t i;
+
+	for (i = 0; i < VECTOR_LEN(ctx.udp_punch_socks); i++) {
+		if (udp_punch_public_listener_available(VECTOR_INDEX(ctx.udp_punch_socks, i)))
+			count++;
+	}
+
+	return count;
+}
+
+/** Returns true if a public listener selection should try opening another listener */
+static bool udp_punch_should_create_public_listener(
+	size_t current_listener_count, bool has_reusable_listener, bool has_port_mapping_listener, bool force_new,
+	bool prefer_port_mapping) {
+	if (current_listener_count >= DEFAULT_PUNCH_PUBLIC_LISTENERS)
+		return false;
+	if (!current_listener_count)
+		return true;
+	if (force_new)
+		return true;
+	if (prefer_port_mapping && !has_port_mapping_listener)
+		return true;
+
+	return !has_reusable_listener;
+}
+
+/** Counts active per-peer UDP punch sockets, excluding reusable public listeners */
+static size_t udp_punch_active_socket_count(void) {
+	size_t count = 0;
+	size_t i;
+
+	for (i = 0; i < VECTOR_LEN(ctx.udp_punch_socks); i++) {
+		const fastd_socket_t *sock = VECTOR_INDEX(ctx.udp_punch_socks, i);
+		if (!sock || sock->punch_public_listener)
+			continue;
+		if (sock->type == SOCKET_TYPE_UDP && sock->hole_punch &&
+		    sock->hole_punch_timeout != FASTD_TIMEOUT_INV && !fastd_timed_out(sock->hole_punch_timeout))
+			count++;
+	}
+
+	return count;
+}
+
+/** Returns the next non-zero public punch listener ID */
+static uint32_t next_udp_punch_public_listener_id(void) {
+	ctx.next_punch_listener_id++;
+	if (!ctx.next_punch_listener_id)
+		ctx.next_punch_listener_id++;
+
+	return ctx.next_punch_listener_id;
+}
+
+/** Updates a public punch listener's endpoint when a dynamic port mapping has become available */
+static void refresh_udp_punch_public_listener_mapping(fastd_socket_t *sock) {
+	if (!sock || sock->type != SOCKET_TYPE_UDP || !sock->punch_public_listener || !sock->bound_addr)
+		return;
+
+	if (!sock->punch_listener_mapping_registered)
+		fastd_port_mapping_register_socket(sock);
+
+	if (!sock->punch_listener_mapping_registered || sock->punch_listener_port_mapped)
+		return;
+
+	fastd_peer_address_t mapped = {};
+	if (!fastd_port_mapping_get_external_address(sock, &mapped))
+		return;
+
+	if (mapped.sa.sa_family != AF_INET)
+		return;
+
+	sock->punch_listener_public_addr = mapped;
+	sock->punch_listener_port_mapped = true;
+	pr_debug("public UDP punch listener switched to port-mapped endpoint %I", &mapped);
+}
+
 /** Closes and frees an unclaimed UDP hole punching socket */
 static void close_udp_punch_socket(fastd_socket_t *sock) {
 	if (sock->type != SOCKET_TYPE_UDP || !sock->hole_punch)
@@ -245,6 +332,11 @@ void fastd_hole_punch_claim_socket(fastd_socket_t *sock) {
 
 	sock->hole_punch_peer = NULL;
 	sock->hole_punch_timeout = FASTD_TIMEOUT_INV;
+	sock->punch_public_listener = false;
+	sock->punch_listener_port_mapped = false;
+	sock->punch_listener_id = 0;
+	sock->punch_listener_selected = 0;
+	sock->punch_listener_public_addr.sa.sa_family = AF_UNSPEC;
 }
 
 /** Closes all unclaimed hole punching sockets for a peer */
@@ -785,6 +877,11 @@ fastd_socket_open_tcp(fastd_peer_t *peer, const fastd_socket_t *base_sock, const
 	if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)))
 		pr_warn_errno("setsockopt: unable to set SO_REUSEADDR");
 
+#ifdef SO_REUSEPORT
+	if (setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one)))
+		pr_warn_errno("setsockopt: unable to set SO_REUSEPORT");
+#endif
+
 	set_tcp_options(fd);
 
 #ifdef USE_PACKET_MARK
@@ -894,6 +991,9 @@ void fastd_socket_close(fastd_socket_t *sock) {
 
 		sock->peer = NULL;
 	}
+
+	if (sock->punch_listener_mapping_registered)
+		fastd_port_mapping_release_socket(sock);
 
 	if (sock->fd.fd >= 0) {
 		if (!fastd_poll_fd_close(&sock->fd))
@@ -1060,7 +1160,8 @@ tcp_hole_punch_queue(fastd_peer_t *peer, const fastd_peer_address_t *remote_addr
 	if (!fastd_peer_transport_allows(fastd_peer_get_transport(peer), TRANSPORT_TCP))
 		return;
 
-	if (fastd_peer_is_punch_candidate(peer, remote_addr))
+	if (fastd_peer_is_punch_control_candidate(peer, remote_addr, NULL, NULL) &&
+	    !fastd_peer_is_punch_control_candidate_transport(peer, remote_addr, TRANSPORT_TCP, NULL, NULL))
 		return;
 
 	if (fastd_peer_is_established(peer)) {
@@ -1103,6 +1204,11 @@ static fastd_socket_t *find_udp_hole_punch_socket(fastd_peer_t *peer, const fast
 	return NULL;
 }
 
+/** Returns an existing UDP punch socket for a peer and remote candidate */
+fastd_socket_t *fastd_udp_punch_find_socket(fastd_peer_t *peer, const fastd_peer_address_t *remote_addr) {
+	return find_udp_hole_punch_socket(peer, remote_addr);
+}
+
 /** Counts existing UDP punch sockets for a peer and remote candidate */
 static size_t count_udp_hole_punch_sockets(fastd_peer_t *peer, const fastd_peer_address_t *remote_addr) {
 	size_t count = 0;
@@ -1120,11 +1226,16 @@ static size_t count_udp_hole_punch_sockets(fastd_peer_t *peer, const fastd_peer_
 /** Sends a UDP punch handshake from one socket */
 static bool udp_punch_send_from_socket(
 	fastd_socket_t *sock, const fastd_peer_address_t *remote_addr, const fastd_buffer_t *buffer) {
+	fastd_punch_probe_send(sock, remote_addr);
+
 	ssize_t ret = sendto(sock->fd.fd, buffer->data, buffer->len, 0, &remote_addr->sa, address_len(remote_addr));
 	if (ret < 0) {
 		pr_debug2_errno("UDP punch sendto");
 		return false;
 	}
+
+	if (sock->hole_punch)
+		sock->hole_punch_timeout = ctx.now + FASTD_HOLE_PUNCH_TIMEOUT;
 
 	ctx.punch_udp_exact_tx++;
 	return true;
@@ -1134,7 +1245,7 @@ static bool udp_punch_send_from_socket(
 static fastd_socket_t *
 open_udp_hole_punch_socket_local(fastd_peer_t *peer, const fastd_peer_address_t *remote_addr, uint16_t local_port) {
 	unsigned limit = conf.punch_max_sockets ? conf.punch_max_sockets : 1;
-	if (VECTOR_LEN(ctx.udp_punch_socks) >= limit) {
+	if (udp_punch_active_socket_count() >= limit) {
 		pr_debug("not opening UDP punch socket for %P because the punch socket limit has been reached", peer);
 		return NULL;
 	}
@@ -1160,6 +1271,7 @@ open_udp_hole_punch_socket_local(fastd_peer_t *peer, const fastd_peer_address_t 
 	sock->hole_punch = true;
 	sock->peer_addr = *remote_addr;
 	sock->hole_punch_timeout = ctx.now + FASTD_HOLE_PUNCH_TIMEOUT;
+	fastd_punch_probe_init_socket(sock);
 
 	VECTOR_ADD(ctx.udp_punch_socks, sock);
 	fastd_poll_fd_register(&sock->fd);
@@ -1171,6 +1283,132 @@ open_udp_hole_punch_socket_local(fastd_peer_t *peer, const fastd_peer_address_t 
 /** Opens a UDP socket using the deterministic target port as local source port */
 static fastd_socket_t *open_udp_hole_punch_socket(fastd_peer_t *peer, const fastd_peer_address_t *remote_addr) {
 	return open_udp_hole_punch_socket_local(peer, remote_addr, ntohs(fastd_peer_address_get_port(remote_addr)));
+}
+
+/** Returns the configured dynamic bind address for a public punch listener family */
+static const fastd_bind_address_t *
+udp_punch_public_listener_bind_address(sa_family_t family, fastd_bind_address_t *fallback) {
+	*fallback = (fastd_bind_address_t){ .addr.sa.sa_family = family };
+
+	if (family == AF_INET && conf.bind_addr_default_v4)
+		return conf.bind_addr_default_v4;
+	if (family == AF_INET6 && conf.bind_addr_default_v6)
+		return conf.bind_addr_default_v6;
+	if (!conf.bind_addr_default_v4 && !conf.bind_addr_default_v6)
+		return fallback;
+
+	return NULL;
+}
+
+/** Finds a reusable public punch listener for one address family */
+static fastd_socket_t *find_udp_punch_public_listener(sa_family_t family, bool require_port_mapping) {
+	fastd_socket_t *best = NULL;
+	size_t i;
+
+	for (i = 0; i < VECTOR_LEN(ctx.udp_punch_socks); i++) {
+		fastd_socket_t *sock = VECTOR_INDEX(ctx.udp_punch_socks, i);
+		refresh_udp_punch_public_listener_mapping(sock);
+		if (!udp_punch_public_listener_available(sock) ||
+		    sock->punch_listener_public_addr.sa.sa_family != family)
+			continue;
+		if (require_port_mapping && !sock->punch_listener_port_mapped)
+			continue;
+
+		if (!best || sock->punch_listener_selected > best->punch_listener_selected)
+			best = sock;
+	}
+
+	return best;
+}
+
+/** Computes reusable public listener availability for one address family */
+static void udp_punch_public_listener_stats(
+	sa_family_t family, size_t *listener_count, bool *has_reusable_listener, bool *has_port_mapping_listener) {
+	*listener_count = udp_punch_public_listener_count();
+	*has_reusable_listener = find_udp_punch_public_listener(family, false) != NULL;
+	*has_port_mapping_listener = find_udp_punch_public_listener(family, true) != NULL;
+}
+
+/** Opens and STUN-probes one reusable public punch listener */
+static fastd_socket_t *open_udp_punch_public_listener(sa_family_t family) {
+	if (udp_punch_public_listener_count() >= DEFAULT_PUNCH_PUBLIC_LISTENERS) {
+		pr_debug("not opening public UDP punch listener because the listener limit has been reached");
+		return NULL;
+	}
+
+	fastd_bind_address_t fallback;
+	const fastd_bind_address_t *bind_address = udp_punch_public_listener_bind_address(family, &fallback);
+	if (!bind_address) {
+		pr_debug("not opening public UDP punch listener for unsupported address family");
+		return NULL;
+	}
+
+	fastd_socket_t *sock = open_dynamic_socket(bind_address, false, true);
+	if (!sock)
+		return NULL;
+
+	sock->hole_punch = true;
+	sock->punch_public_listener = true;
+	sock->punch_listener_id = next_udp_punch_public_listener_id();
+	sock->hole_punch_timeout = ctx.now + PEER_STALE_TIME;
+	sock->punch_listener_selected = ctx.now;
+	fastd_punch_probe_init_socket(sock);
+
+	fastd_peer_address_t public_addr = {};
+	if (family == AF_INET && fastd_port_mapping_register_socket(sock) &&
+	    fastd_port_mapping_get_external_address(sock, &public_addr)) {
+		sock->punch_listener_port_mapped = true;
+	} else if (!fastd_nat_probe_socket_public_address(sock->fd.fd, family, &public_addr)) {
+		fastd_socket_close(sock);
+		free(sock);
+		return NULL;
+	}
+
+	sock->punch_listener_public_addr = public_addr;
+
+	VECTOR_ADD(ctx.udp_punch_socks, sock);
+	fastd_poll_fd_register(&sock->fd);
+
+	pr_debug("opening public UDP punch listener on %B with mapped endpoint %I", sock->bound_addr, &public_addr);
+	return sock;
+}
+
+/** Selects a reusable public UDP punch listener and returns its public endpoint */
+bool fastd_udp_punch_select_listener(
+	sa_family_t family, bool force_new, bool prefer_port_mapping, fastd_peer_address_t *public_addr,
+	bool *port_mapped, uint32_t *listener_id) {
+	if (!public_addr || (family != AF_INET && family != AF_INET6))
+		return false;
+
+	size_t listener_count = 0;
+	bool has_reusable_listener = false, has_port_mapping_listener = false;
+	udp_punch_public_listener_stats(
+		family, &listener_count, &has_reusable_listener, &has_port_mapping_listener);
+
+	bool should_create = udp_punch_should_create_public_listener(
+		listener_count, has_reusable_listener, has_port_mapping_listener, force_new, prefer_port_mapping);
+	fastd_socket_t *created = should_create ? open_udp_punch_public_listener(family) : NULL;
+
+	fastd_socket_t *sock = NULL;
+	if (prefer_port_mapping)
+		sock = find_udp_punch_public_listener(family, true);
+	if (!sock && created && udp_punch_public_listener_available(created) &&
+	    created->punch_listener_public_addr.sa.sa_family == family)
+		sock = created;
+	if (!sock)
+		sock = find_udp_punch_public_listener(family, false);
+	if (!sock)
+		return false;
+
+	sock->hole_punch_timeout = ctx.now + PEER_STALE_TIME;
+	sock->punch_listener_selected = ctx.now;
+	*public_addr = sock->punch_listener_public_addr;
+	if (port_mapped)
+		*port_mapped = sock->punch_listener_port_mapped;
+	if (listener_id)
+		*listener_id = sock->punch_listener_id;
+
+	return true;
 }
 
 /** Sends one handshake from an ephemeral UDP punch socket to the exact remote endpoint */
@@ -1215,6 +1453,16 @@ static bool udp_punch_send_socket_array(
 	return sent;
 }
 
+/** Returns true if exact UDP punch sockets support an address family */
+static bool udp_punch_exact_family_supported(sa_family_t family) {
+	return family == AF_INET || family == AF_INET6;
+}
+
+/** Returns true if deterministic UDP punch port buckets support an address family */
+static bool udp_punch_deterministic_family_supported(sa_family_t family) {
+	return family == AF_INET;
+}
+
 /** Sends an initial handshake on deterministic UDP hole punching candidates */
 bool fastd_udp_punch_send(
 	fastd_peer_t *peer, UNUSED const fastd_socket_t *base_sock, const fastd_peer_address_t *remote_addr,
@@ -1225,16 +1473,20 @@ bool fastd_udp_punch_send(
 	if (!fastd_peer_transport_allows(fastd_peer_get_transport(peer), TRANSPORT_UDP))
 		return false;
 
-	if (remote_addr->sa.sa_family != AF_INET)
+	if (!udp_punch_exact_family_supported(remote_addr->sa.sa_family))
 		return false;
 
 	bool exact_udp_punch = false;
 	unsigned udp_punch_sockets = 0;
-	if (fastd_peer_is_current_punch_control_candidate(peer, remote_addr, &exact_udp_punch, &udp_punch_sockets))
+	if (fastd_peer_is_current_punch_control_candidate_transport(
+		    peer, remote_addr, TRANSPORT_UDP, &exact_udp_punch, &udp_punch_sockets))
 		return exact_udp_punch ? udp_punch_send_socket_array(peer, remote_addr, buffer, udp_punch_sockets)
 				       : false;
 
 	if (fastd_peer_is_established(peer))
+		return false;
+
+	if (!udp_punch_deterministic_family_supported(remote_addr->sa.sa_family))
 		return false;
 
 	uint16_t ports[FASTD_HOLE_PUNCH_NUM_PORTS * FASTD_HOLE_PUNCH_BUCKETS];
@@ -1264,11 +1516,60 @@ bool fastd_udp_punch_send(
 	return sent;
 }
 
+#ifdef WITH_TESTS
+
+/** Test wrapper for exact UDP punch family policy */
+bool fastd_socket_test_udp_punch_exact_family_supported(sa_family_t family) {
+	return udp_punch_exact_family_supported(family);
+}
+
+/** Test wrapper for deterministic UDP punch family policy */
+bool fastd_socket_test_udp_punch_deterministic_family_supported(sa_family_t family) {
+	return udp_punch_deterministic_family_supported(family);
+}
+
+/** Test wrapper for public UDP punch listener availability */
+bool fastd_socket_test_udp_punch_public_listener_available(const fastd_socket_t *sock) {
+	return udp_punch_public_listener_available(sock);
+}
+
+/** Test wrapper for public UDP punch listener count */
+size_t fastd_socket_test_udp_punch_public_listener_count(void) {
+	return udp_punch_public_listener_count();
+}
+
+/** Test wrapper for active per-peer UDP punch socket count */
+size_t fastd_socket_test_udp_punch_active_socket_count(void) {
+	return udp_punch_active_socket_count();
+}
+
+/** Test wrapper for public listener creation policy */
+bool fastd_socket_test_udp_punch_should_create_public_listener(
+	size_t current_listener_count, bool has_reusable_listener, bool has_port_mapping_listener, bool force_new,
+	bool prefer_port_mapping) {
+	return udp_punch_should_create_public_listener(
+		current_listener_count, has_reusable_listener, has_port_mapping_listener, force_new, prefer_port_mapping);
+}
+
+/** Test wrapper for public listener selection policy */
+uint32_t fastd_socket_test_udp_punch_select_public_listener_id(sa_family_t family, bool prefer_port_mapping) {
+	fastd_socket_t *sock = NULL;
+	if (prefer_port_mapping)
+		sock = find_udp_punch_public_listener(family, true);
+	if (!sock)
+		sock = find_udp_punch_public_listener(family, false);
+
+	return sock ? sock->punch_listener_id : 0;
+}
+
+#endif
+
 /** Sends a packet over TCP if the peer is configured for TCP transport */
 bool fastd_tcp_send(
 	fastd_peer_t *peer, fastd_socket_t *sock, UNUSED const fastd_peer_address_t *local_addr,
 	const fastd_peer_address_t *remote_addr, const fastd_buffer_t *buffer, size_t stat_size) {
-	if (!stat_size && peer && fastd_peer_is_punch_candidate(peer, remote_addr))
+	if (!stat_size && peer && fastd_peer_is_punch_control_candidate(peer, remote_addr, NULL, NULL) &&
+	    !fastd_peer_is_punch_control_candidate_transport(peer, remote_addr, TRANSPORT_TCP, NULL, NULL))
 		return false;
 
 	if (sock && sock->type == SOCKET_TYPE_TCP_CONNECTION) {
@@ -1554,7 +1855,12 @@ void fastd_udp_punch_maintenance(void) {
 		fastd_socket_t *sock = VECTOR_INDEX(ctx.udp_punch_socks, i);
 
 		if (sock->hole_punch_timeout != FASTD_TIMEOUT_INV && fastd_timed_out(sock->hole_punch_timeout)) {
-			pr_debug("UDP hole punching socket with %I timed out", &sock->peer_addr);
+			if (sock->punch_public_listener)
+				pr_debug(
+					"public UDP punch listener with mapped endpoint %I timed out",
+					&sock->punch_listener_public_addr);
+			else
+				pr_debug("UDP hole punching socket with %I timed out", &sock->peer_addr);
 			close_udp_punch_socket(sock);
 			continue;
 		}

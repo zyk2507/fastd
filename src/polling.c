@@ -150,10 +150,18 @@ void fastd_poll_fd_set_write(fastd_poll_fd_t *fd, bool write) {
 }
 
 bool fastd_poll_fd_close(fastd_poll_fd_t *fd) {
-	if (epoll_ctl(ctx.epoll_fd, EPOLL_CTL_DEL, fd->fd, NULL) < 0)
-		exit_errno("epoll_ctl");
+	if (fd->fd < 0)
+		return true;
 
-	return (close(fd->fd) == 0);
+	if (epoll_ctl(ctx.epoll_fd, EPOLL_CTL_DEL, fd->fd, NULL) < 0) {
+		if (errno != EBADF && errno != ENOENT)
+			exit_errno("epoll_ctl");
+	}
+
+	if (close(fd->fd) == 0)
+		return true;
+
+	return errno == EBADF;
 }
 
 

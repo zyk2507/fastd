@@ -36,6 +36,32 @@
 #define KEY_PRINT(k) (const uint8_t *)(k), (size_t)PUBLICKEYBYTES
 
 
+/** Returns the concrete transport protocol used by a socket */
+static inline fastd_peer_transport_t get_socket_transport(const fastd_socket_t *sock) {
+	return fastd_socket_is_tcp(sock) ? TRANSPORT_TCP : TRANSPORT_UDP;
+}
+
+/** Checks if two peer addresses have the same IP address, ignoring the port */
+static bool peer_address_ip_equal(const fastd_peer_address_t *addr1, const fastd_peer_address_t *addr2) {
+	if (addr1->sa.sa_family != addr2->sa.sa_family)
+		return false;
+
+	switch (addr1->sa.sa_family) {
+	case AF_INET:
+		return addr1->in.sin_addr.s_addr == addr2->in.sin_addr.s_addr;
+
+	case AF_INET6:
+		if (!IN6_ARE_ADDR_EQUAL(&addr1->in6.sin6_addr, &addr2->in6.sin6_addr))
+			return false;
+
+		return !IN6_IS_ADDR_LINKLOCAL(&addr1->in6.sin6_addr) ||
+		       addr1->in6.sin6_scope_id == addr2->in6.sin6_scope_id;
+
+	default:
+		return false;
+	}
+}
+
 /** Derives a key of arbitraty length from the shared key material after a handshake using the HKDF algorithm */
 static void derive_key(
 	fastd_sha256_t *out, size_t blocks, const uint32_t *salt, const char *method_name, const aligned_int256_t *A,
@@ -128,6 +154,22 @@ static inline bool new_backup_session(
 		session_flags, A, B, X, Y, sigma, salt, serial, compression);
 }
 
+/** Checks whether a peer's announced NAT type needs payload-proven alternate paths */
+static bool peer_has_endpoint_dependent_nat(const fastd_peer_t *peer) {
+	if (fastd_timed_out(peer->punch_timeout))
+		return false;
+
+	switch (peer->punch_nat_type) {
+	case FASTD_NAT_SYMMETRIC:
+	case FASTD_NAT_SYMMETRIC_EASY_INC:
+	case FASTD_NAT_SYMMETRIC_EASY_DEC:
+		return true;
+
+	default:
+		return false;
+	}
+}
+
 /** Establishes a backup path with a peer after a successful handshake */
 static bool establish_backup(
 	fastd_peer_t *peer, const fastd_method_info_t *method, fastd_socket_t *sock,
@@ -148,8 +190,6 @@ static bool establish_backup(
 		return false;
 	}
 
-	fastd_peer_backup_seen(peer);
-
 	pr_verbose(
 		"new backup session with %P established using method `%s'%s%s%s%s.", peer, method->name,
 		(session_flags & FASTD_SESSION_COMPAT) ? " (compat mode)" : "",
@@ -157,8 +197,24 @@ static bool establish_backup(
 		compression == COMPRESSION_NONE ? "" : fastd_compression_get_name(compression),
 		compression == COMPRESSION_NONE ? "" : "'");
 
-	if (fastd_peer_is_payload_candidate(peer, remote_addr)) {
-		pr_debug("promoting payload-proven backup path with %P[%I]", peer, remote_addr);
+	bool payload_candidate = fastd_peer_is_payload_candidate(peer, remote_addr);
+	bool probe_candidate = fastd_peer_is_probe_candidate(peer, remote_addr);
+	bool active_failed = !fastd_peer_is_established(peer) || fastd_timed_out(peer->reset_timeout);
+	bool active_verified =
+		peer->active_path_timeout != FASTD_TIMEOUT_INV && !fastd_timed_out(peer->active_path_timeout);
+	bool probe_promotable = probe_candidate && !fastd_peer_active_path_proven(peer) &&
+				peer->backup_probe_proven && !peer_has_endpoint_dependent_nat(peer);
+
+	if (payload_candidate && active_verified && !active_failed) {
+		pr_debug("keeping payload-proven backup path with %P[%I] while active path is healthy", peer, remote_addr);
+		fastd_protocol_ec25519_fhmqvc_send_backup_keepalive(peer);
+		return true;
+	}
+
+	if (payload_candidate || probe_promotable) {
+		pr_debug(
+			"promoting %s-proven backup path with %P[%I]",
+			payload_candidate ? "payload" : "probe", peer, remote_addr);
 
 		if (!fastd_protocol_ec25519_fhmqvc_promote_backup_path(peer))
 			return false;
@@ -187,45 +243,36 @@ static bool accept_simultaneous_responder_session(const fastd_peer_t *peer) {
 	return memcmp(conf.protocol_config->key.public.u8, peer->key->key.u8, PUBLICKEYBYTES) > 0;
 }
 
-/** Returns true if an unverified initial easy-symmetric path should be replaced by a paired candidate */
-static bool
-replace_unverified_active_with_paired_candidate(const fastd_peer_t *peer, const fastd_peer_address_t *remote_addr) {
-	if (!fastd_peer_is_established(peer) || peer->active_path_timeout != FASTD_TIMEOUT_INV)
-		return false;
-
-	if ((peer->punch_nat_type != FASTD_NAT_SYMMETRIC_EASY_INC &&
-	     peer->punch_nat_type != FASTD_NAT_SYMMETRIC_EASY_DEC) ||
-	    fastd_timed_out(peer->punch_timeout))
-		return false;
-
-	if (peer->address.sa.sa_family != AF_INET || remote_addr->sa.sa_family != AF_INET ||
-	    peer->address.in.sin_addr.s_addr != remote_addr->in.sin_addr.s_addr)
-		return false;
-
-	if (fastd_peer_address_equal(&peer->address, remote_addr))
-		return false;
-
-	return fastd_peer_direct_candidate_preferred(peer, remote_addr, &peer->address);
-}
-
 /** Establishes a connection with a peer after a successful handshake */
 static bool establish(
 	fastd_peer_t *peer, const fastd_method_info_t *method, fastd_socket_t *sock,
 	const fastd_peer_address_t *local_addr, const fastd_peer_address_t *remote_addr, unsigned session_flags,
-	const aligned_int256_t *A, const aligned_int256_t *B, const aligned_int256_t *X, const aligned_int256_t *Y,
-	const aligned_int256_t *sigma, const uint32_t *salt, uint64_t serial,
-	fastd_compression_algorithm_t compression) {
-	bool alternate_direct_path = fastd_peer_is_established(peer) &&
-				     !fastd_peer_address_equal(&peer->address, remote_addr) &&
-				     fastd_peer_get_direct_candidate_source(peer, remote_addr, NULL);
-	bool replace_unverified_active =
-		alternate_direct_path && replace_unverified_active_with_paired_candidate(peer, remote_addr);
+		const aligned_int256_t *A, const aligned_int256_t *B, const aligned_int256_t *X, const aligned_int256_t *Y,
+		const aligned_int256_t *sigma, const uint32_t *salt, uint64_t serial,
+		fastd_compression_algorithm_t compression) {
+	fastd_peer_transport_t actual_transport = get_socket_transport(sock);
+	bool replaces_backup_path = fastd_peer_has_backup_path(peer) &&
+				    fastd_peer_address_equal(&peer->backup_address, remote_addr);
+	bool established = fastd_peer_is_established(peer);
 	bool same_active_path =
-		fastd_peer_is_established(peer) && fastd_peer_address_equal(&peer->address, remote_addr);
-	bool simultaneous_responder = serial == peer->protocol_state->last_serial && same_active_path &&
-				      !(session_flags & FASTD_SESSION_INITIATOR) &&
-				      peer->active_path_timeout == FASTD_TIMEOUT_INV &&
-				      accept_simultaneous_responder_session(peer);
+		established && fastd_peer_address_equal(&peer->address, remote_addr);
+	bool responder_reuses_current_serial =
+		serial == peer->protocol_state->last_serial && !(session_flags & FASTD_SESSION_INITIATOR);
+	bool active_path_payload_proven = fastd_peer_active_path_proven(peer);
+	bool simultaneous_responder = responder_reuses_current_serial && same_active_path &&
+				      !active_path_payload_proven && accept_simultaneous_responder_session(peer);
+	bool same_ip_unproven_direct_path =
+		established && !same_active_path && !active_path_payload_proven && peer->direct_established &&
+		peer_address_ip_equal(&peer->address, remote_addr);
+	bool endpoint_dependent_responder_path =
+		responder_reuses_current_serial && established && !same_active_path && !active_path_payload_proven &&
+		peer_has_endpoint_dependent_nat(peer) && peer_address_ip_equal(&peer->address, remote_addr) &&
+		accept_simultaneous_responder_session(peer);
+	bool alternate_direct_path =
+		established && !fastd_peer_address_equal(&peer->address, remote_addr) &&
+		(fastd_peer_get_direct_candidate_source_transport(peer, remote_addr, actual_transport, NULL) ||
+		 fastd_peer_get_endpoint_dependent_candidate_source_transport(peer, remote_addr, actual_transport, NULL) ||
+		 endpoint_dependent_responder_path || same_ip_unproven_direct_path);
 
 	if (serial < peer->protocol_state->last_serial ||
 	    (serial == peer->protocol_state->last_serial && !alternate_direct_path && !simultaneous_responder)) {
@@ -240,7 +287,26 @@ static bool establish(
 	}
 
 	if (fastd_peer_is_established(peer) && !fastd_peer_address_equal(&peer->address, remote_addr) &&
-	    !replace_unverified_active) {
+	    alternate_direct_path) {
+		bool payload_candidate = fastd_peer_is_payload_candidate(peer, remote_addr);
+		bool probe_candidate = fastd_peer_is_probe_candidate(peer, remote_addr);
+
+		if (fastd_peer_has_verified_backup_path(peer) &&
+		    !fastd_peer_address_equal(&peer->backup_address, remote_addr) &&
+		    peer_has_endpoint_dependent_nat(peer) && !payload_candidate) {
+			pr_debug("keeping verified endpoint-dependent backup path for %P instead of replacing it with %I", peer, remote_addr);
+			fastd_protocol_ec25519_fhmqvc_send_backup_keepalive(peer);
+			return true;
+		}
+
+		if (fastd_peer_has_verified_backup_path(peer) &&
+		    !fastd_peer_address_equal(&peer->backup_address, remote_addr) &&
+		    !payload_candidate && !probe_candidate) {
+			pr_debug("keeping verified backup path for %P instead of replacing it with %I", peer, remote_addr);
+			fastd_protocol_ec25519_fhmqvc_send_backup_keepalive(peer);
+			return true;
+		}
+
 		if (serial == peer->protocol_state->last_serial &&
 		    fastd_peer_is_backup_path(peer, sock, local_addr, remote_addr) &&
 		    is_session_valid(&peer->protocol_state->backup_session)) {
@@ -273,6 +339,9 @@ static bool establish(
 		fastd_peer_reset(peer);
 		return false;
 	}
+
+	if (replaces_backup_path)
+		fastd_protocol_ec25519_fhmqvc_drop_backup_path(peer);
 
 	peer->establish_handshake_timeout = ctx.now + MIN_HANDSHAKE_INTERVAL;
 

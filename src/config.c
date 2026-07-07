@@ -74,8 +74,8 @@ static void default_config(void) {
 	conf.punch_maintenance_interval = MAINTENANCE_INTERVAL;
 	conf.punch_announce_interval = DEFAULT_PUNCH_ANNOUNCE_INTERVAL;
 	conf.punch_relay_interval = DEFAULT_PUNCH_RELAY_INTERVAL;
-	conf.punch_max_sockets = 25;
-	conf.punch_max_packets = 256;
+	conf.punch_max_sockets = DEFAULT_PUNCH_HARD_SYM_SOCKETS;
+	conf.punch_max_packets = DEFAULT_PUNCH_HARD_SYM_PACKETS;
 	conf.punch_max_attempts = 1;
 	conf.punch_max_backups = 25;
 }
