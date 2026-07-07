@@ -566,6 +566,7 @@ struct fastd_context {
 	uint64_t punch_probe_handshakes;  /**< Number of handshakes sent after probe confirmation */
 	uint64_t punch_result_tx;         /**< Number of punch result packets sent */
 	uint64_t punch_result_rx;         /**< Number of punch result packets received */
+	uint64_t punch_result_duplicates; /**< Number of duplicate punch result packets suppressed */
 	uint64_t punch_result_accepted;   /**< Number of accepted punch result packets received */
 	uint64_t punch_result_handshake;  /**< Number of handshake-sent punch result packets received */
 	uint64_t punch_result_suppressed; /**< Number of suppressed punch result packets received */

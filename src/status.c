@@ -492,7 +492,7 @@ static void print_punch_table(json_object *punch) {
 			"direct_failures",   "direct_suppressed", "udp_exact_tx",      "probe_tx",
 			"probe_rx",          "probe_response_tx", "probe_matched",     "probe_handshakes",
 			"result_tx",         "result_rx",         "result_accepted",   "result_handshake",
-			"result_suppressed", "result_no_peer",    "result_busy",
+			"result_duplicates", "result_suppressed", "result_no_peer",    "result_busy",
 		};
 
 		size_t i;
@@ -1774,6 +1774,7 @@ static json_object *dump_punch(void) {
 	json_object_object_add(counters, "probe_handshakes", json_object_new_int64(ctx.punch_probe_handshakes));
 	json_object_object_add(counters, "result_tx", json_object_new_int64(ctx.punch_result_tx));
 	json_object_object_add(counters, "result_rx", json_object_new_int64(ctx.punch_result_rx));
+	json_object_object_add(counters, "result_duplicates", json_object_new_int64(ctx.punch_result_duplicates));
 	json_object_object_add(counters, "result_accepted", json_object_new_int64(ctx.punch_result_accepted));
 	json_object_object_add(counters, "result_handshake", json_object_new_int64(ctx.punch_result_handshake));
 	json_object_object_add(counters, "result_suppressed", json_object_new_int64(ctx.punch_result_suppressed));

@@ -1259,8 +1259,10 @@ static bool punch_result_duplicate(
 		if (seen->sender_id == sender_id && seen->subject_id == subject_id &&
 		    seen->subject_key_hash == subject_key_hash &&
 		    seen->result == (uint8_t)result && seen->packet_count == packet_count && command_matches &&
-		    fastd_peer_address_equal(&seen->endpoint, endpoint))
+		    fastd_peer_address_equal(&seen->endpoint, endpoint)) {
+			ctx.punch_result_duplicates++;
 			return true;
+		}
 	}
 
 	size_t pos = ctx.punch_result_seen_pos % array_size(ctx.punch_result_seen);

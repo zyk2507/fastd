@@ -1869,6 +1869,7 @@ static void test_punch_remote_result_ext_drives_state_and_legacy_is_deduped(void
 	size_t old_pair_task_count = ctx.punch_pair_task_count;
 	size_t old_seen_pos = ctx.punch_result_seen_pos;
 	uint64_t old_result_rx = ctx.punch_result_rx;
+	uint64_t old_result_duplicates = ctx.punch_result_duplicates;
 	uint64_t old_result_handshake = ctx.punch_task_manager_outcome_handshake;
 	int64_t old_now = ctx.now;
 
@@ -1880,6 +1881,7 @@ static void test_punch_remote_result_ext_drives_state_and_legacy_is_deduped(void
 	ctx.punch_pair_task_count = 0;
 	ctx.punch_result_seen_pos = 0;
 	ctx.punch_result_rx = 0;
+	ctx.punch_result_duplicates = 0;
 	ctx.punch_task_manager_outcome_handshake = 0;
 	ctx.now = 1000;
 
@@ -1908,6 +1910,7 @@ static void test_punch_remote_result_ext_drives_state_and_legacy_is_deduped(void
 	assert_false(fastd_punch_test_handle_remote_result(
 		&sender, &subject, TEST_PUNCH_RESULT_HANDSHAKE, 0, &endpoint));
 	assert_int_equal(ctx.punch_result_rx, 1);
+	assert_int_equal(ctx.punch_result_duplicates, 1);
 	assert_int_equal(ctx.punch_task_manager_outcome_handshake, 1);
 	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).result_count, 1);
 	assert_int_equal(ctx.punch_pair_task_count, 1);
@@ -1916,6 +1919,7 @@ static void test_punch_remote_result_ext_drives_state_and_legacy_is_deduped(void
 	assert_true(fastd_punch_test_handle_remote_result(
 		&sender, &subject, TEST_PUNCH_RESULT_HANDSHAKE, 0, &endpoint));
 	assert_int_equal(ctx.punch_result_rx, 2);
+	assert_int_equal(ctx.punch_result_duplicates, 1);
 	assert_int_equal(ctx.punch_task_manager_outcome_handshake, 2);
 	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).result_count, 2);
 	assert_int_equal(ctx.punch_pair_task_count, 2);
@@ -1929,6 +1933,7 @@ static void test_punch_remote_result_ext_drives_state_and_legacy_is_deduped(void
 	ctx.punch_pair_task_count = old_pair_task_count;
 	ctx.punch_result_seen_pos = old_seen_pos;
 	ctx.punch_result_rx = old_result_rx;
+	ctx.punch_result_duplicates = old_result_duplicates;
 	ctx.punch_task_manager_outcome_handshake = old_result_handshake;
 	ctx.now = old_now;
 }
@@ -2210,6 +2215,7 @@ static void test_status_punch_exposes_udp_socket_pool(void **state UNUSED) {
 	uint64_t old_task_manager_outcome_suppressed = ctx.punch_task_manager_outcome_suppressed;
 	uint64_t old_task_manager_outcome_no_peer = ctx.punch_task_manager_outcome_no_peer;
 	uint64_t old_task_manager_outcome_busy = ctx.punch_task_manager_outcome_busy;
+	uint64_t old_result_duplicates = ctx.punch_result_duplicates;
 	fastd_punch_pair_task_t old_pair_tasks[FASTD_PUNCH_PAIR_TASK_HISTORY];
 	memcpy(old_pair_tasks, ctx.punch_pair_tasks, sizeof(old_pair_tasks));
 	uint64_t old_next_pair_task_id = ctx.next_punch_pair_task_id;
@@ -2287,6 +2293,7 @@ static void test_status_punch_exposes_udp_socket_pool(void **state UNUSED) {
 	ctx.punch_task_manager_outcome_suppressed = 12;
 	ctx.punch_task_manager_outcome_no_peer = 13;
 	ctx.punch_task_manager_outcome_busy = 14;
+	ctx.punch_result_duplicates = 15;
 	peer.last_punch_task = (fastd_peer_punch_task_t){
 		.id = 101,
 		.updated = ctx.now - 20,
@@ -2433,6 +2440,9 @@ static void test_status_punch_exposes_udp_socket_pool(void **state UNUSED) {
 	assert_int_equal(json_get_int_required(older_task, "backoff_skipped"), 1);
 	assert_false(json_get_bool_required(older_task, "budget_exhausted"));
 
+	struct json_object *counters = json_get_object_required(punch, "counters");
+	assert_int_equal(json_get_int_required(counters, "result_duplicates"), 15);
+
 	struct json_object *sockets = json_get_array_required(pool, "sockets");
 	assert_int_equal(json_object_array_length(sockets), 2);
 	struct json_object *socket = json_object_array_get_idx(sockets, 0);
@@ -2486,6 +2496,7 @@ static void test_status_punch_exposes_udp_socket_pool(void **state UNUSED) {
 	ctx.punch_task_manager_outcome_suppressed = old_task_manager_outcome_suppressed;
 	ctx.punch_task_manager_outcome_no_peer = old_task_manager_outcome_no_peer;
 	ctx.punch_task_manager_outcome_busy = old_task_manager_outcome_busy;
+	ctx.punch_result_duplicates = old_result_duplicates;
 	memcpy(ctx.punch_pair_tasks, old_pair_tasks, sizeof(old_pair_tasks));
 	ctx.next_punch_pair_task_id = old_next_pair_task_id;
 	ctx.punch_pair_task_pos = old_pair_task_pos;
