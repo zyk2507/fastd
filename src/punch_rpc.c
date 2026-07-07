@@ -792,6 +792,11 @@ void fastd_punch_note_peer_pair_demand(const fastd_peer_t *a, const fastd_peer_t
 
 	fastd_punch_pair_runtime_t *runtime = get_pair_runtime(a, b);
 	runtime->recent_demand_until = ctx.now + FASTD_PUNCH_PAIR_DEMAND_TIME;
+	runtime->demand_seq++;
+	if (!runtime->demand_seq) {
+		runtime->demand_seq++;
+		runtime->served_demand_seq = 0;
+	}
 	runtime->updated = ctx.now;
 }
 
@@ -799,6 +804,7 @@ void fastd_punch_note_peer_pair_demand(const fastd_peer_t *a, const fastd_peer_t
 static void pair_runtime_mark_launched(const fastd_peer_t *a, const fastd_peer_t *b) {
 	fastd_punch_pair_runtime_t *runtime = get_pair_runtime(a, b);
 	runtime->in_flight_until = ctx.now + FASTD_HOLE_PUNCH_TIMEOUT;
+	runtime->served_demand_seq = runtime->demand_seq;
 	runtime->updated = ctx.now;
 	if (runtime->launch_count < UINT16_MAX)
 		runtime->launch_count++;
@@ -844,6 +850,7 @@ typedef struct fastd_punch_pair_state {
 	bool in_flight;
 	bool backoff;
 	bool recent_demand;
+	bool pending_demand;
 	bool missing_metadata;
 	fastd_timeout_t next_retry;
 } fastd_punch_pair_state_t;
@@ -861,6 +868,7 @@ static fastd_punch_pair_state_t punch_pair_state(const fastd_peer_t *a, const fa
 		state.in_flight = task_timeout_active(runtime->in_flight_until);
 		state.backoff = task_timeout_active(runtime->backoff_until);
 		state.recent_demand = task_timeout_active(runtime->recent_demand_until);
+		state.pending_demand = state.recent_demand && runtime->demand_seq != runtime->served_demand_seq;
 	}
 
 	state.has_metadata_a = peer_has_fresh_punch_task_metadata(a);
@@ -885,7 +893,8 @@ static fastd_punch_pair_state_t punch_pair_state(const fastd_peer_t *a, const fa
 		return state;
 	}
 
-	state.collected = (state.has_metadata_a && state.due_a) || (state.has_metadata_b && state.due_b);
+	state.collected = state.pending_demand ||
+			  (state.has_metadata_a && state.due_a) || (state.has_metadata_b && state.due_b);
 	state.waiting = !state.collected;
 	if (state.waiting) {
 		state.next_retry = FASTD_TIMEOUT_INV;
@@ -2284,29 +2293,30 @@ fastd_punch_test_pair_state_t fastd_punch_test_pair_state(const fastd_peer_t *a,
 		.has_metadata_a = state.has_metadata_a,
 		.has_metadata_b = state.has_metadata_b,
 		.due_a = state.due_a,
-			.due_b = state.due_b,
-			.collected = state.collected,
-			.waiting = state.waiting,
-			.in_flight = state.in_flight,
-			.backoff = state.backoff,
-			.recent_demand = state.recent_demand,
-			.missing_metadata = state.missing_metadata,
-			.next_retry = state.next_retry,
-		};
-	}
+		.due_b = state.due_b,
+		.collected = state.collected,
+		.waiting = state.waiting,
+		.in_flight = state.in_flight,
+		.backoff = state.backoff,
+		.recent_demand = state.recent_demand,
+		.pending_demand = state.pending_demand,
+		.missing_metadata = state.missing_metadata,
+		.next_retry = state.next_retry,
+	};
+}
 
-	/** Test wrapper for marking a pair-level punch task as in-flight */
-	void fastd_punch_test_pair_runtime_mark_launched(const fastd_peer_t *a, const fastd_peer_t *b) {
-		pair_runtime_mark_launched(a, b);
-	}
+/** Test wrapper for marking a pair-level punch task as in-flight */
+void fastd_punch_test_pair_runtime_mark_launched(const fastd_peer_t *a, const fastd_peer_t *b) {
+	pair_runtime_mark_launched(a, b);
+}
 
-	/** Test wrapper for compacting pair-level runtime state */
-	void fastd_punch_test_task_manager_compact_pair_states(void) {
-		task_manager_compact_pair_states();
-	}
+/** Test wrapper for compacting pair-level runtime state */
+void fastd_punch_test_task_manager_compact_pair_states(void) {
+	task_manager_compact_pair_states();
+}
 
-	/** Test wrapper for task-manager launch lifecycle accounting */
-	void fastd_punch_test_task_manager_record_launch_result(
+/** Test wrapper for task-manager launch lifecycle accounting */
+void fastd_punch_test_task_manager_record_launch_result(
 	size_t before_pair, size_t sent, size_t backoff_skipped, fastd_timeout_t backoff_next_retry) {
 	task_manager_record_launch_result(before_pair, sent, backoff_skipped, backoff_next_retry);
 }
@@ -2747,46 +2757,46 @@ static void relay_peer_endpoints(void) {
 			size_t before_pair = sent;
 			size_t backoff_skipped = 0;
 			fastd_timeout_t backoff_next_retry = FASTD_TIMEOUT_INV;
-				if (state.has_metadata_a && state.due_a) {
-					size_t before_direction = sent;
-					size_t before_direction_backoff = backoff_skipped;
-					sent += relay_endpoint_to_peer(
-						b, a, conf.punch_max_packets - sent, &backoff_skipped, &backoff_next_retry);
-					if (sent < conf.punch_max_packets)
-						sent += relay_tcp_endpoint_to_peer(
-							b, a, conf.punch_max_packets - sent, &backoff_skipped,
-							&backoff_next_retry);
+			if (state.has_metadata_a && (state.due_a || state.pending_demand)) {
+				size_t before_direction = sent;
+				size_t before_direction_backoff = backoff_skipped;
+				sent += relay_endpoint_to_peer(
+					b, a, conf.punch_max_packets - sent, &backoff_skipped, &backoff_next_retry);
+				if (sent < conf.punch_max_packets)
+					sent += relay_tcp_endpoint_to_peer(
+						b, a, conf.punch_max_packets - sent, &backoff_skipped,
+						&backoff_next_retry);
 
-					if (sent > before_direction) {
-						task_manager_record_pair_task(
-							a, b, a, b, PUNCH_PAIR_TASK_STAGE_LAUNCHED, sent - before_direction,
-							backoff_skipped - before_direction_backoff, FASTD_TIMEOUT_INV,
-							sent >= conf.punch_max_packets && conf.punch_max_packets);
-						pair_runtime_mark_launched(a, b);
-					}
-					a->next_punch_relay = ctx.now + conf.punch_relay_interval;
-					task_manager_note_next_retry(a->next_punch_relay);
+				if (sent > before_direction) {
+					task_manager_record_pair_task(
+						a, b, a, b, PUNCH_PAIR_TASK_STAGE_LAUNCHED, sent - before_direction,
+						backoff_skipped - before_direction_backoff, FASTD_TIMEOUT_INV,
+						sent >= conf.punch_max_packets && conf.punch_max_packets);
+					pair_runtime_mark_launched(a, b);
 				}
-				if (sent < conf.punch_max_packets && state.has_metadata_b && state.due_b) {
-					size_t before_direction = sent;
-					size_t before_direction_backoff = backoff_skipped;
-					sent += relay_endpoint_to_peer(
-						a, b, conf.punch_max_packets - sent, &backoff_skipped, &backoff_next_retry);
-					if (sent < conf.punch_max_packets)
-						sent += relay_tcp_endpoint_to_peer(
-							a, b, conf.punch_max_packets - sent, &backoff_skipped,
-							&backoff_next_retry);
+				a->next_punch_relay = ctx.now + conf.punch_relay_interval;
+				task_manager_note_next_retry(a->next_punch_relay);
+			}
+			if (sent < conf.punch_max_packets && state.has_metadata_b && (state.due_b || state.pending_demand)) {
+				size_t before_direction = sent;
+				size_t before_direction_backoff = backoff_skipped;
+				sent += relay_endpoint_to_peer(
+					a, b, conf.punch_max_packets - sent, &backoff_skipped, &backoff_next_retry);
+				if (sent < conf.punch_max_packets)
+					sent += relay_tcp_endpoint_to_peer(
+						a, b, conf.punch_max_packets - sent, &backoff_skipped,
+						&backoff_next_retry);
 
-					if (sent > before_direction) {
-						task_manager_record_pair_task(
-							a, b, b, a, PUNCH_PAIR_TASK_STAGE_LAUNCHED, sent - before_direction,
-							backoff_skipped - before_direction_backoff, FASTD_TIMEOUT_INV,
-							sent >= conf.punch_max_packets && conf.punch_max_packets);
-						pair_runtime_mark_launched(a, b);
-					}
-					b->next_punch_relay = ctx.now + conf.punch_relay_interval;
-					task_manager_note_next_retry(b->next_punch_relay);
+				if (sent > before_direction) {
+					task_manager_record_pair_task(
+						a, b, b, a, PUNCH_PAIR_TASK_STAGE_LAUNCHED, sent - before_direction,
+						backoff_skipped - before_direction_backoff, FASTD_TIMEOUT_INV,
+						sent >= conf.punch_max_packets && conf.punch_max_packets);
+					pair_runtime_mark_launched(a, b);
 				}
+				b->next_punch_relay = ctx.now + conf.punch_relay_interval;
+				task_manager_note_next_retry(b->next_punch_relay);
+			}
 
 			if (sent == before_pair) {
 				task_manager_record_pair_task(

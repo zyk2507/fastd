@@ -1572,38 +1572,60 @@ static void test_punch_pair_runtime_tracks_inflight_backoff_and_demand(void **st
 		.state = STATE_ESTABLISHED,
 		.punch_endpoint = addr4(0xcb007105, 41000),
 		.punch_timeout = ctx.now + 10000,
-		.next_punch_relay = ctx.now,
+		.next_punch_relay = ctx.now + 10000,
 	};
 	fastd_peer_t b = {
 		.id = 20,
 		.state = STATE_ESTABLISHED,
 		.punch_endpoint = addr4(0xcb007106, 42000),
 		.punch_timeout = ctx.now + 10000,
-		.next_punch_relay = ctx.now,
+		.next_punch_relay = ctx.now + 10000,
 	};
 
 	fastd_punch_test_pair_state_t pair_state = fastd_punch_test_pair_state(&a, &b);
-	assert_true(pair_state.collected);
+	assert_false(pair_state.collected);
+	assert_true(pair_state.waiting);
 	assert_false(pair_state.in_flight);
 	assert_false(pair_state.backoff);
 	assert_false(pair_state.recent_demand);
+	assert_int_equal(pair_state.next_retry, ctx.now + 10000);
 
 	fastd_punch_note_peer_pair_demand(&a, &b);
 	pair_state = fastd_punch_test_pair_state(&a, &b);
 	assert_true(pair_state.collected);
 	assert_true(pair_state.recent_demand);
+	assert_true(pair_state.pending_demand);
 	assert_int_equal(VECTOR_LEN(ctx.punch_pair_states), 1);
 	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).peer_a_id, 20);
 	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).peer_b_id, 30);
+	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).demand_seq, 1);
+	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).served_demand_seq, 0);
 
 	fastd_punch_test_pair_runtime_mark_launched(&a, &b);
 	pair_state = fastd_punch_test_pair_state(&a, &b);
 	assert_true(pair_state.waiting);
 	assert_true(pair_state.in_flight);
 	assert_false(pair_state.collected);
+	assert_false(pair_state.pending_demand);
 	assert_int_equal(pair_state.next_retry, ctx.now + 5000);
+	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).served_demand_seq, 1);
 
 	fastd_peer_address_t endpoint = addr4(0xcb007105, 41001);
+	fastd_punch_test_task_manager_record_pair_result(&a, &b, TEST_PUNCH_RESULT_ACCEPTED, &endpoint);
+	pair_state = fastd_punch_test_pair_state(&a, &b);
+	assert_true(pair_state.recent_demand);
+	assert_false(pair_state.pending_demand);
+	assert_false(pair_state.collected);
+	assert_true(pair_state.waiting);
+
+	fastd_punch_note_peer_pair_demand(&a, &b);
+	pair_state = fastd_punch_test_pair_state(&a, &b);
+	assert_true(pair_state.recent_demand);
+	assert_true(pair_state.pending_demand);
+	assert_true(pair_state.collected);
+	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).demand_seq, 2);
+	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).served_demand_seq, 1);
+
 	fastd_peer_add_punch_relay_backoff(&a, &endpoint);
 	fastd_punch_test_task_manager_record_pair_result(&a, &b, TEST_PUNCH_RESULT_BUSY, &endpoint);
 	pair_state = fastd_punch_test_pair_state(&a, &b);
@@ -1612,7 +1634,7 @@ static void test_punch_pair_runtime_tracks_inflight_backoff_and_demand(void **st
 	assert_true(pair_state.backoff);
 	assert_false(pair_state.in_flight);
 	assert_int_equal(pair_state.next_retry, ctx.now + FASTD_PUNCH_SUPPRESSION_TIME);
-	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).result_count, 1);
+	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).result_count, 2);
 	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).busy_count, 1);
 
 	ctx.now += FASTD_PUNCH_SUPPRESSION_TIME + 1;
@@ -1628,7 +1650,7 @@ static void test_punch_pair_runtime_tracks_inflight_backoff_and_demand(void **st
 	ctx.now += 5001;
 	fastd_punch_test_task_manager_compact_pair_states();
 	assert_int_equal(ctx.punch_task_manager_aborted, 1);
-	assert_int_equal(ctx.punch_pair_task_count, 2);
+	assert_int_equal(ctx.punch_pair_task_count, 3);
 	size_t latest_pos =
 		(ctx.punch_pair_task_pos + FASTD_PUNCH_PAIR_TASK_HISTORY - 1) % FASTD_PUNCH_PAIR_TASK_HISTORY;
 	assert_int_equal(ctx.punch_pair_tasks[latest_pos].stage, PUNCH_PAIR_TASK_STAGE_ABORTED);

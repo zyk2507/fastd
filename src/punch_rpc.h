@@ -29,6 +29,7 @@ typedef struct fastd_punch_test_pair_state {
 	bool in_flight;
 	bool backoff;
 	bool recent_demand;
+	bool pending_demand;
 	bool missing_metadata;
 	fastd_timeout_t next_retry;
 } fastd_punch_test_pair_state_t;

@@ -489,6 +489,8 @@ typedef struct fastd_punch_pair_runtime {
 	fastd_timeout_t in_flight_until;       /**< Outcome window for a launched task */
 	fastd_timeout_t backoff_until;         /**< Pair-level retry suppression timeout */
 	fastd_timeout_t recent_demand_until;   /**< Recent forwarded data demand window */
+	uint64_t demand_seq;                   /**< Monotonic relayed data demand generation */
+	uint64_t served_demand_seq;            /**< Latest demand generation covered by a launched task */
 	uint16_t launch_count;                 /**< Number of task launches tracked for this pair */
 	uint16_t abort_count;                  /**< Number of in-flight windows that expired */
 	uint16_t result_count;                 /**< Number of remote command results observed */
