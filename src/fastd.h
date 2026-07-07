@@ -581,6 +581,7 @@ struct fastd_context {
 	uint64_t punch_task_manager_in_flight; /**< Last task-manager run: pairs waiting for an in-flight task */
 	uint64_t punch_task_manager_missing_metadata; /**< Last task-manager run: pairs missing useful NAT metadata */
 	uint64_t punch_task_manager_metadata_requests; /**< Last task-manager run: missing-metadata refresh requests */
+	uint64_t punch_task_manager_metadata_relays; /**< Last task-manager run: peer metadata relayed to another peer */
 	uint64_t punch_task_manager_blacklisted; /**< Last task-manager run: pairs held by relay backoff */
 	uint64_t punch_task_manager_suppressed; /**< Last task-manager run: collected pairs that emitted no commands */
 	uint64_t punch_task_manager_aborted; /**< Last task-manager run: in-flight tasks aborted during cleanup */

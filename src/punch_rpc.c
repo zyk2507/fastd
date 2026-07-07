@@ -110,6 +110,7 @@ enum {
 };
 
 enum {
+	FASTD_PUNCH_NAT_INFO_RELAYED = 1u << 0,
 	FASTD_PUNCH_SELECT_FORCE_NEW = 1u << 0,
 	FASTD_PUNCH_SELECT_PREFER_PORT_MAPPING = 1u << 1,
 	FASTD_PUNCH_LISTENER_PORT_MAPPED = 1u << 0,
@@ -551,6 +552,25 @@ static bool peer_has_fresh_punch_task_metadata(const fastd_peer_t *peer) {
 	return peer_has_fresh_punch_nat_info(peer) || peer_has_fresh_tcp_punch_nat_info(peer);
 }
 
+static bool tcp_nat_type_punchable(fastd_nat_type_t nat_type);
+
+/** Returns true if a peer's UDP punch metadata needs the destination NAT metadata to choose a command */
+static bool peer_udp_metadata_needs_dest_nat_info(const fastd_peer_t *peer) {
+	if (!fastd_peer_get_punch_symmetric(peer) || !peer_has_fresh_punch_nat_info(peer))
+		return false;
+
+	if (nat_type_needs_dest_nat_info(peer->punch_nat_type))
+		return true;
+
+	size_t i;
+	for (i = 0; i < peer->n_punch_endpoints; i++) {
+		if (nat_type_needs_dest_nat_info(peer->punch_endpoints[i].nat_type))
+			return true;
+	}
+
+	return false;
+}
+
 /** Returns true if relay-generated punch commands may be sent for a peer now */
 static bool peer_punch_relay_due(const fastd_peer_t *peer) {
 	return fastd_peer_is_established(peer) && fastd_timed_out(peer->next_punch_relay);
@@ -867,29 +887,75 @@ typedef struct fastd_punch_pair_state {
 } fastd_punch_pair_state_t;
 
 static bool request_peer_punch_metadata(fastd_peer_t *peer);
+static size_t relay_nat_metadata_to_peer(fastd_peer_t *dest, const fastd_peer_t *subject, size_t limit);
 
-/** Requests missing pair metadata after recent traffic demand exposed a useful direct path opportunity */
+/** Returns true if a wanted relay direction is blocked by missing destination-side metadata */
+static bool peer_direction_needs_missing_metadata(
+	const fastd_peer_t *subject, const fastd_peer_t *dest, bool wanted) {
+	if (!wanted)
+		return false;
+
+	if (peer_udp_metadata_needs_dest_nat_info(subject) && !peer_has_fresh_punch_nat_info(dest))
+		return true;
+
+	return false;
+}
+
+/** Returns true if missing metadata should be refreshed in this collection tick */
+static bool pair_missing_metadata_request_due(
+	const fastd_peer_t *a, const fastd_peer_t *b, const fastd_punch_pair_state_t *state) {
+	if (!state->missing_metadata)
+		return false;
+
+	if (state->recent_demand)
+		return true;
+
+	return peer_direction_needs_missing_metadata(a, b, state->has_metadata_a && state->due_a) ||
+	       peer_direction_needs_missing_metadata(b, a, state->has_metadata_b && state->due_b);
+}
+
+/** Requests missing pair metadata after traffic demand or a due punch direction exposed a useful direct path opportunity */
 static size_t request_missing_pair_metadata(
 	fastd_peer_t *a, fastd_peer_t *b, const fastd_punch_pair_state_t *state, size_t limit,
-	fastd_timeout_t *next_retry) {
-	if (!limit || !state->recent_demand)
+	fastd_timeout_t *next_retry, size_t *metadata_requests, size_t *metadata_relays) {
+	if (!limit || !pair_missing_metadata_request_due(a, b, state))
 		return 0;
 
+	bool want_a = state->has_metadata_a && (state->due_a || state->pending_demand);
+	bool want_b = state->has_metadata_b && (state->due_b || state->pending_demand);
+	bool request_a = !state->has_metadata_a || peer_direction_needs_missing_metadata(b, a, want_b);
+	bool request_b = !state->has_metadata_b || peer_direction_needs_missing_metadata(a, b, want_a);
 	size_t sent = 0;
 
-	if (!state->has_metadata_a && sent < limit && request_peer_punch_metadata(a)) {
+	if (request_a && sent < limit && request_peer_punch_metadata(a)) {
 		sent++;
+		if (metadata_requests)
+			(*metadata_requests)++;
 		*next_retry = task_manager_earlier_next_retry(*next_retry, a->next_punch_metadata_request);
+		if (state->has_metadata_b && sent < limit) {
+			size_t relayed = relay_nat_metadata_to_peer(a, b, limit - sent);
+			sent += relayed;
+			if (metadata_relays)
+				*metadata_relays += relayed;
+		}
 	}
-	if (!state->has_metadata_b && sent < limit && request_peer_punch_metadata(b)) {
+	if (request_b && sent < limit && request_peer_punch_metadata(b)) {
 		sent++;
+		if (metadata_requests)
+			(*metadata_requests)++;
 		*next_retry = task_manager_earlier_next_retry(*next_retry, b->next_punch_metadata_request);
+		if (state->has_metadata_a && sent < limit) {
+			size_t relayed = relay_nat_metadata_to_peer(b, a, limit - sent);
+			sent += relayed;
+			if (metadata_relays)
+				*metadata_relays += relayed;
+		}
 	}
 
 	if (!sent) {
-		if (!state->has_metadata_a)
+		if (request_a)
 			*next_retry = task_manager_earlier_next_retry(*next_retry, a->next_punch_metadata_request);
-		if (!state->has_metadata_b)
+		if (request_b)
 			*next_retry = task_manager_earlier_next_retry(*next_retry, b->next_punch_metadata_request);
 	}
 
@@ -933,6 +999,12 @@ static fastd_punch_pair_state_t punch_pair_state(const fastd_peer_t *a, const fa
 		state.missing_metadata = true;
 		return state;
 	}
+
+	bool want_a = state.has_metadata_a && (state.due_a || state.pending_demand);
+	bool want_b = state.has_metadata_b && (state.due_b || state.pending_demand);
+	state.missing_metadata =
+		peer_direction_needs_missing_metadata(a, b, want_a) ||
+		peer_direction_needs_missing_metadata(b, a, want_b);
 
 	state.collected = state.pending_demand ||
 			  (state.has_metadata_a && state.due_a) || (state.has_metadata_b && state.due_b);
@@ -1600,6 +1672,65 @@ static void send_nat_info_extra_endpoints(
 			dest, type, conf.protocol->get_own_key(), conf.protocol->key_length(), endpoint, nat_type,
 			min_port, max_port, port_delta, 0, 0);
 	}
+}
+
+/** Relays one peer's current UDP/TCP NAT metadata to another established peer */
+static size_t relay_nat_metadata_to_peer(fastd_peer_t *dest, const fastd_peer_t *subject, size_t limit) {
+	if (!limit || !fastd_peer_is_established(dest) || dest == subject)
+		return 0;
+	if (!fastd_peer_get_nat_traversal(dest) || !fastd_peer_get_nat_traversal(subject))
+		return 0;
+
+	const void *subject_key = conf.protocol->get_peer_key(subject);
+	size_t key_len = conf.protocol->key_length();
+	size_t sent = 0;
+
+	if (peer_has_fresh_punch_nat_info(subject)) {
+		if (send_endpoint_message(
+			    dest, FASTD_PUNCH_NAT_INFO, subject_key, key_len, &subject->punch_endpoint,
+			    subject->punch_nat_type, subject->punch_min_port, subject->punch_max_port,
+			    subject->punch_port_delta, FASTD_PUNCH_NAT_INFO_RELAYED, 0))
+			sent++;
+
+		size_t i;
+		for (i = 0; sent < limit && i < subject->n_punch_endpoints; i++) {
+			const fastd_peer_punch_endpoint_t *endpoint = &subject->punch_endpoints[i];
+			if (fastd_peer_address_equal(&endpoint->address, &subject->punch_endpoint))
+				continue;
+
+			if (send_endpoint_message(
+				    dest, FASTD_PUNCH_NAT_INFO_EXTRA, subject_key, key_len, &endpoint->address,
+				    endpoint->nat_type, endpoint->min_port, endpoint->max_port,
+				    endpoint->port_delta, FASTD_PUNCH_NAT_INFO_RELAYED, 0))
+				sent++;
+		}
+	}
+
+	if (sent >= limit)
+		return sent;
+
+	if (peer_has_fresh_tcp_punch_nat_info(subject) && tcp_nat_type_punchable(subject->tcp_punch_nat_type)) {
+		if (send_endpoint_message(
+			    dest, FASTD_PUNCH_TCP_NAT_INFO, subject_key, key_len, &subject->tcp_punch_endpoint,
+			    subject->tcp_punch_nat_type, subject->tcp_punch_min_port, subject->tcp_punch_max_port,
+			    0, FASTD_PUNCH_NAT_INFO_RELAYED, 0))
+			sent++;
+
+		size_t i;
+		for (i = 0; sent < limit && i < subject->n_tcp_punch_endpoints; i++) {
+			const fastd_peer_address_t *endpoint = &subject->tcp_punch_endpoints[i];
+			if (fastd_peer_address_equal(endpoint, &subject->tcp_punch_endpoint))
+				continue;
+
+			if (send_endpoint_message(
+				    dest, FASTD_PUNCH_TCP_NAT_INFO_EXTRA, subject_key, key_len, endpoint,
+				    subject->tcp_punch_nat_type, subject->tcp_punch_min_port,
+				    subject->tcp_punch_max_port, 0, FASTD_PUNCH_NAT_INFO_RELAYED, 0))
+				sent++;
+		}
+	}
+
+	return sent;
 }
 
 /** Requests an EasyTier-style public punch listener selection from a peer */
@@ -2868,6 +2999,7 @@ static void relay_peer_endpoints(void) {
 	ctx.punch_task_manager_in_flight = 0;
 	ctx.punch_task_manager_missing_metadata = 0;
 	ctx.punch_task_manager_metadata_requests = 0;
+	ctx.punch_task_manager_metadata_relays = 0;
 	ctx.punch_task_manager_blacklisted = 0;
 	ctx.punch_task_manager_suppressed = 0;
 	ctx.punch_task_manager_aborted = 0;
@@ -2896,16 +3028,20 @@ static void relay_peer_endpoints(void) {
 			if (state.missing_metadata) {
 				ctx.punch_task_manager_missing_metadata++;
 				fastd_timeout_t next_retry = FASTD_TIMEOUT_INV;
-				size_t metadata_requests = request_missing_pair_metadata(
-					a, b, &state, conf.punch_max_packets - sent, &next_retry);
-				sent += metadata_requests;
+				size_t metadata_requests = 0;
+				size_t metadata_relays = 0;
+				size_t metadata_packets = request_missing_pair_metadata(
+					a, b, &state, conf.punch_max_packets - sent, &next_retry, &metadata_requests,
+					&metadata_relays);
+				sent += metadata_packets;
 				ctx.punch_task_manager_metadata_requests += metadata_requests;
+				ctx.punch_task_manager_metadata_relays += metadata_relays;
 				task_manager_note_next_retry(next_retry);
 				task_manager_record_pair_task(
 					a, b, NULL, NULL,
-					metadata_requests ? PUNCH_PAIR_TASK_STAGE_METADATA_REQUESTED :
-							    PUNCH_PAIR_TASK_STAGE_MISSING_METADATA,
-					metadata_requests, 0, next_retry,
+					metadata_packets ? PUNCH_PAIR_TASK_STAGE_METADATA_REQUESTED :
+							   PUNCH_PAIR_TASK_STAGE_MISSING_METADATA,
+					metadata_packets, 0, next_retry,
 					sent >= conf.punch_max_packets && conf.punch_max_packets);
 				continue;
 			}
@@ -2994,6 +3130,18 @@ static void relay_peer_endpoints(void) {
 	ctx.punch_task_manager_budget_exhausted = sent >= conf.punch_max_packets && conf.punch_max_packets ? 1 : 0;
 }
 
+/** Returns true if a NAT_INFO sender may update metadata for the announced subject key */
+static bool nat_info_sender_allowed(const fastd_peer_t *sender, const fastd_peer_t *subject, bool relayed) {
+	if (!sender || !subject)
+		return false;
+
+	if (sender == subject)
+		return true;
+
+	return relayed && fastd_peer_is_established(sender) && fastd_peer_get_nat_traversal(sender) &&
+	       fastd_peer_get_nat_traversal(subject);
+}
+
 /** Stores NAT metadata announced by a peer */
 static void handle_nat_info(fastd_peer_t *sender, const fastd_punch_endpoint_t *payload, bool additional) {
 	size_t key_len = conf.protocol->key_length();
@@ -3002,7 +3150,7 @@ static void handle_nat_info(fastd_peer_t *sender, const fastd_punch_endpoint_t *
 
 	const uint8_t *key = (const uint8_t *)(payload + 1);
 	fastd_peer_t *subject = find_peer_by_key(key, key_len);
-	if (!subject || subject != sender)
+	if (!nat_info_sender_allowed(sender, subject, (payload->reserved & FASTD_PUNCH_NAT_INFO_RELAYED) != 0))
 		return;
 
 	fastd_peer_address_t endpoint;
@@ -3031,7 +3179,7 @@ static void handle_tcp_nat_info(fastd_peer_t *sender, const fastd_punch_endpoint
 
 	const uint8_t *key = (const uint8_t *)(payload + 1);
 	fastd_peer_t *subject = find_peer_by_key(key, key_len);
-	if (!subject || subject != sender)
+	if (!nat_info_sender_allowed(sender, subject, (payload->reserved & FASTD_PUNCH_NAT_INFO_RELAYED) != 0))
 		return;
 
 	fastd_peer_address_t endpoint;
