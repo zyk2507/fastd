@@ -2742,6 +2742,108 @@ static void test_punch_accepts_relayed_nat_metadata(void **state UNUSED) {
 	fastd_cleanup_buffers();
 }
 
+static void test_punch_metadata_updates_wake_task_manager(void **state UNUSED) {
+	const fastd_protocol_t *old_protocol = conf.protocol;
+	fastd_peer_group_t *old_peer_group = conf.peer_group;
+	fastd_peer_t *old_lookup_peer = test_lookup_peer;
+	bool old_control_relay = conf.punch_control_relay;
+	fastd_task_t old_next_maintenance = ctx.next_maintenance;
+	fastd_pqueue_t *old_task_queue = ctx.task_queue;
+	size_t old_encrypt_headroom = conf.encrypt_headroom;
+	size_t old_max_buffer = ctx.max_buffer;
+	uint64_t old_rx = ctx.punch_control_rx;
+	int64_t old_now = ctx.now;
+
+	ctx.next_maintenance = (fastd_task_t){};
+	ctx.task_queue = NULL;
+	ctx.now = 1000;
+	conf.protocol = &test_protocol;
+	conf.punch_control_relay = true;
+	conf.encrypt_headroom = 0;
+	ctx.max_buffer = 2048;
+	fastd_init_buffers();
+
+	fastd_peer_group_t group = {
+		.transport = TRANSPORT_AUTO,
+		.hole_punch = HOLE_PUNCH_AUTO,
+		.nat_traversal = FASTD_TRISTATE_TRUE,
+	};
+	conf.peer_group = &group;
+
+	fastd_peer_t peer = {
+		.id = 20,
+		.group = &group,
+		.config_state = CONFIG_STATIC,
+		.name = "peer-b",
+		.state = STATE_ESTABLISHED,
+	};
+	test_lookup_peer = &peer;
+
+	fastd_peer_address_t udp_endpoint = addr4(0xc6336408, 52000);
+	fastd_task_schedule(&ctx.next_maintenance, TASK_TYPE_MAINTENANCE, ctx.now + 10000);
+	assert_true(fastd_punch_handle_control(
+		&peer,
+		make_punch_control_buffer(
+			TEST_PUNCH_NAT_INFO, &udp_endpoint, FASTD_NAT_FULL_CONE, test_key_b, sizeof(test_key_b))));
+	assert_int_equal(fastd_task_timeout(&ctx.next_maintenance), ctx.now);
+
+	fastd_task_unschedule(&ctx.next_maintenance);
+	fastd_task_schedule(&ctx.next_maintenance, TASK_TYPE_MAINTENANCE, ctx.now + 10000);
+	assert_true(fastd_punch_handle_control(
+		&peer,
+		make_punch_control_buffer(
+			TEST_PUNCH_NAT_INFO, &udp_endpoint, FASTD_NAT_FULL_CONE, test_key_b, sizeof(test_key_b))));
+	assert_int_equal(fastd_task_timeout(&ctx.next_maintenance), ctx.now + 10000);
+
+	peer.punch_endpoint = addr4(0xc6336408, 52010);
+	peer.punch_nat_type = FASTD_NAT_SYMMETRIC_EASY_INC;
+	peer.punch_min_port = 52010;
+	peer.punch_max_port = 52010;
+	peer.punch_port_delta = 1;
+	peer.punch_timeout = ctx.now + 10000;
+	peer.n_punch_endpoints = 1;
+	peer.punch_endpoints[0] = (fastd_peer_punch_endpoint_t){
+		.address = peer.punch_endpoint,
+		.nat_type = FASTD_NAT_SYMMETRIC_EASY_INC,
+		.min_port = 52010,
+		.max_port = 52010,
+		.port_delta = 1,
+	};
+	fastd_task_unschedule(&ctx.next_maintenance);
+	fastd_task_schedule(&ctx.next_maintenance, TASK_TYPE_MAINTENANCE, ctx.now + 10000);
+	fastd_peer_address_t udp_endpoint_changed = addr4(0xc6336408, 52011);
+	fastd_buffer_t *easy_buf = make_punch_control_buffer(
+		TEST_PUNCH_NAT_INFO, &udp_endpoint_changed, FASTD_NAT_SYMMETRIC_EASY_INC, test_key_b,
+		sizeof(test_key_b));
+	test_punch_endpoint_t *easy_payload = (test_punch_endpoint_t *)((test_punch_header_t *)easy_buf->data + 1);
+	easy_payload->port_delta = htobe16(1);
+	assert_true(fastd_punch_handle_control(&peer, easy_buf));
+	assert_int_equal(fastd_task_timeout(&ctx.next_maintenance), ctx.now + 10000);
+
+	fastd_task_unschedule(&ctx.next_maintenance);
+	fastd_peer_address_t tcp_endpoint = addr4(0xc6336408, 53000);
+	fastd_task_schedule(&ctx.next_maintenance, TASK_TYPE_MAINTENANCE, ctx.now + 10000);
+	assert_true(fastd_punch_handle_control(
+		&peer,
+		make_punch_control_buffer(
+			TEST_PUNCH_TCP_NAT_INFO, &tcp_endpoint, FASTD_NAT_FULL_CONE, test_key_b,
+			sizeof(test_key_b))));
+	assert_int_equal(fastd_task_timeout(&ctx.next_maintenance), ctx.now);
+
+	fastd_task_unschedule(&ctx.next_maintenance);
+	test_lookup_peer = old_lookup_peer;
+	ctx.next_maintenance = old_next_maintenance;
+	ctx.task_queue = old_task_queue;
+	conf.protocol = old_protocol;
+	conf.peer_group = old_peer_group;
+	conf.punch_control_relay = old_control_relay;
+	conf.encrypt_headroom = old_encrypt_headroom;
+	ctx.max_buffer = old_max_buffer;
+	ctx.punch_control_rx = old_rx;
+	ctx.now = old_now;
+	fastd_cleanup_buffers();
+}
+
 static void test_punch_task_manager_outcome_accounting(void **state UNUSED) {
 	uint64_t old_direct_success = ctx.punch_direct_success;
 	uint64_t old_direct_failures = ctx.punch_direct_failures;
@@ -4171,6 +4273,7 @@ int main(void) {
 		cmocka_unit_test(test_punch_task_manager_relays_multiple_tcp_endpoints_with_budget),
 		cmocka_unit_test(test_punch_send_tcp_preserves_multiple_received_endpoints),
 		cmocka_unit_test(test_punch_accepts_relayed_nat_metadata),
+		cmocka_unit_test(test_punch_metadata_updates_wake_task_manager),
 		cmocka_unit_test(test_punch_task_manager_outcome_accounting),
 		cmocka_unit_test(test_punch_pair_task_history_is_bounded_and_ordered),
 		cmocka_unit_test(test_punch_pair_task_history_records_remote_results),

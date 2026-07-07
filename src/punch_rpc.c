@@ -537,6 +537,14 @@ static bool nat_type_needs_dest_nat_info(fastd_nat_type_t nat_type) {
 	return nat_type_is_endpoint_dependent(nat_type);
 }
 
+/** Returns true if a UDP NAT metadata update should immediately wake route-style punch collection */
+static bool udp_metadata_update_should_wake(bool was_fresh, fastd_nat_type_t old_nat_type, fastd_nat_type_t new_nat_type) {
+	if (!was_fresh)
+		return true;
+
+	return !nat_type_is_endpoint_dependent(old_nat_type) || !nat_type_is_endpoint_dependent(new_nat_type);
+}
+
 /** Returns true if a peer has fresh punch NAT metadata */
 static bool peer_has_fresh_punch_nat_info(const fastd_peer_t *peer) {
 	return peer->punch_endpoint.sa.sa_family != AF_UNSPEC && !fastd_timed_out(peer->punch_timeout);
@@ -806,6 +814,26 @@ static fastd_punch_pair_runtime_t *get_pair_runtime(const fastd_peer_t *a, const
 	return &VECTOR_INDEX(ctx.punch_pair_states, VECTOR_LEN(ctx.punch_pair_states) - 1);
 }
 
+/** Wakes the punch-control task manager without delaying an already due maintenance task */
+static void wake_punch_task_manager_now(void) {
+	fastd_timeout_t maintenance_timeout = fastd_task_timeout(&ctx.next_maintenance);
+	if (!conf.punch_control_relay || !punch_control_supported() ||
+	    (maintenance_timeout != FASTD_TIMEOUT_INV && maintenance_timeout <= ctx.now))
+		return;
+
+	if (fastd_task_scheduled(&ctx.next_maintenance))
+		fastd_task_unschedule(&ctx.next_maintenance);
+	fastd_task_schedule(&ctx.next_maintenance, TASK_TYPE_MAINTENANCE, ctx.now);
+}
+
+/** Wakes relay collection after fresh peer NAT metadata arrives */
+static void wake_punch_task_manager_for_peer_metadata(const fastd_peer_t *peer) {
+	if (!peer || !fastd_peer_is_established(peer) || !fastd_peer_get_nat_traversal(peer))
+		return;
+
+	wake_punch_task_manager_now();
+}
+
 /** Records forwarded data demand between two peers for punch scheduling and diagnostics */
 void fastd_punch_note_peer_pair_demand(const fastd_peer_t *a, const fastd_peer_t *b) {
 	if (!a || !b || a == b)
@@ -820,13 +848,7 @@ void fastd_punch_note_peer_pair_demand(const fastd_peer_t *a, const fastd_peer_t
 	}
 	runtime->updated = ctx.now;
 
-	fastd_timeout_t maintenance_timeout = fastd_task_timeout(&ctx.next_maintenance);
-	if (conf.punch_control_relay && punch_control_supported() &&
-	    (maintenance_timeout == FASTD_TIMEOUT_INV || maintenance_timeout > ctx.now)) {
-		if (fastd_task_scheduled(&ctx.next_maintenance))
-			fastd_task_unschedule(&ctx.next_maintenance);
-		fastd_task_schedule(&ctx.next_maintenance, TASK_TYPE_MAINTENANCE, ctx.now);
-	}
+	wake_punch_task_manager_now();
 }
 
 /** Marks a pair-level punch task as launched */
@@ -2895,6 +2917,43 @@ static size_t relay_tcp_endpoint_to_peer(
 	return sent;
 }
 
+/** Returns true if two stored UDP punch endpoint metadata entries are equivalent for task scheduling */
+static bool punch_endpoint_metadata_equal(
+	const fastd_peer_punch_endpoint_t *a, const fastd_peer_punch_endpoint_t *b) {
+	return fastd_peer_address_equal(&a->address, &b->address) && a->nat_type == b->nat_type &&
+	       a->min_port == b->min_port && a->max_port == b->max_port && a->port_delta == b->port_delta;
+}
+
+/** Returns true if two bounded UDP punch endpoint metadata lists are equivalent */
+static bool punch_endpoint_metadata_list_equal(
+	const fastd_peer_punch_endpoint_t *a, size_t n_a, const fastd_peer_punch_endpoint_t *b, size_t n_b) {
+	if (n_a != n_b)
+		return false;
+
+	size_t i;
+	for (i = 0; i < n_a; i++) {
+		if (!punch_endpoint_metadata_equal(&a[i], &b[i]))
+			return false;
+	}
+
+	return true;
+}
+
+/** Returns true if two bounded TCP punch endpoint lists are equivalent */
+static bool punch_tcp_endpoint_list_equal(
+	const fastd_peer_address_t *a, size_t n_a, const fastd_peer_address_t *b, size_t n_b) {
+	if (n_a != n_b)
+		return false;
+
+	size_t i;
+	for (i = 0; i < n_a; i++) {
+		if (!fastd_peer_address_equal(&a[i], &b[i]))
+			return false;
+	}
+
+	return true;
+}
+
 /** Stores punch NAT metadata and resets hard-symmetric scan state when the public mapping changes */
 static void update_punch_metadata(
 	fastd_peer_t *peer, const fastd_peer_address_t *endpoint, fastd_nat_type_t nat_type, uint16_t min_port,
@@ -3190,6 +3249,17 @@ static void handle_nat_info(fastd_peer_t *sender, const fastd_punch_endpoint_t *
 	if (!decode_address(&endpoint, payload))
 		return;
 
+	bool was_fresh = peer_has_fresh_punch_nat_info(subject);
+	fastd_peer_address_t old_endpoint = subject->punch_endpoint;
+	fastd_nat_type_t old_nat_type = subject->punch_nat_type;
+	uint16_t old_min_port = subject->punch_min_port;
+	uint16_t old_max_port = subject->punch_max_port;
+	int old_port_delta = subject->punch_port_delta;
+	uint32_t old_listener_id = subject->punch_listener_id;
+	size_t old_n_endpoints = subject->n_punch_endpoints;
+	fastd_peer_punch_endpoint_t old_endpoints[array_size(subject->punch_endpoints)];
+	memcpy(old_endpoints, subject->punch_endpoints, sizeof(old_endpoints));
+
 	if (additional)
 		add_punch_metadata_endpoint(
 			subject, &endpoint, payload->nat_type, be16toh(payload->min_port), be16toh(payload->max_port),
@@ -3198,6 +3268,15 @@ static void handle_nat_info(fastd_peer_t *sender, const fastd_punch_endpoint_t *
 		update_punch_metadata(
 			subject, &endpoint, payload->nat_type, be16toh(payload->min_port), be16toh(payload->max_port),
 			(int16_t)be16toh(payload->port_delta), 0, false);
+
+	bool changed = !was_fresh || !fastd_peer_address_equal(&old_endpoint, &subject->punch_endpoint) ||
+		       old_nat_type != subject->punch_nat_type || old_min_port != subject->punch_min_port ||
+		       old_max_port != subject->punch_max_port || old_port_delta != subject->punch_port_delta ||
+		       old_listener_id != subject->punch_listener_id ||
+		       !punch_endpoint_metadata_list_equal(
+			       old_endpoints, old_n_endpoints, subject->punch_endpoints, subject->n_punch_endpoints);
+	if (changed && udp_metadata_update_should_wake(was_fresh, old_nat_type, subject->punch_nat_type))
+		wake_punch_task_manager_for_peer_metadata(subject);
 
 	pr_debug(
 		"received punch NAT info from %P: %s %I", subject, fastd_nat_type_name(subject->punch_nat_type),
@@ -3223,12 +3302,30 @@ static void handle_tcp_nat_info(fastd_peer_t *sender, const fastd_punch_endpoint
 	if (!tcp_nat_type_punchable(nat_type))
 		return;
 
+	bool was_fresh = peer_has_fresh_tcp_punch_nat_info(subject);
+	fastd_peer_address_t old_endpoint = subject->tcp_punch_endpoint;
+	fastd_nat_type_t old_nat_type = subject->tcp_punch_nat_type;
+	uint16_t old_min_port = subject->tcp_punch_min_port;
+	uint16_t old_max_port = subject->tcp_punch_max_port;
+	size_t old_n_endpoints = subject->n_tcp_punch_endpoints;
+	fastd_peer_address_t old_endpoints[array_size(subject->tcp_punch_endpoints)];
+	memcpy(old_endpoints, subject->tcp_punch_endpoints, sizeof(old_endpoints));
+
 	if (additional)
 		add_tcp_punch_metadata_endpoint(
 			subject, &endpoint, nat_type, be16toh(payload->min_port), be16toh(payload->max_port));
 	else
 		update_tcp_punch_metadata(
 			subject, &endpoint, nat_type, be16toh(payload->min_port), be16toh(payload->max_port));
+
+	bool changed = !was_fresh || !fastd_peer_address_equal(&old_endpoint, &subject->tcp_punch_endpoint) ||
+		       old_nat_type != subject->tcp_punch_nat_type || old_min_port != subject->tcp_punch_min_port ||
+		       old_max_port != subject->tcp_punch_max_port ||
+		       !punch_tcp_endpoint_list_equal(
+			       old_endpoints, old_n_endpoints, subject->tcp_punch_endpoints,
+			       subject->n_tcp_punch_endpoints);
+	if (changed)
+		wake_punch_task_manager_for_peer_metadata(subject);
 
 	pr_debug(
 		"received TCP punch NAT info from %P: %s %I", subject, fastd_nat_type_name(subject->tcp_punch_nat_type),
@@ -3302,9 +3399,29 @@ static void handle_listener_info(fastd_peer_t *sender, const fastd_punch_endpoin
 	bool port_mapped = (payload->reserved & FASTD_PUNCH_LISTENER_PORT_MAPPED) != 0;
 	fastd_nat_type_t nat_type = port_mapped ? FASTD_NAT_FULL_CONE : payload->nat_type;
 
+	bool was_fresh = peer_has_fresh_punch_nat_info(sender);
+	fastd_peer_address_t old_endpoint = sender->punch_endpoint;
+	fastd_nat_type_t old_nat_type = sender->punch_nat_type;
+	uint16_t old_min_port = sender->punch_min_port;
+	uint16_t old_max_port = sender->punch_max_port;
+	int old_port_delta = sender->punch_port_delta;
+	uint32_t old_listener_id = sender->punch_listener_id;
+	size_t old_n_endpoints = sender->n_punch_endpoints;
+	fastd_peer_punch_endpoint_t old_endpoints[array_size(sender->punch_endpoints)];
+	memcpy(old_endpoints, sender->punch_endpoints, sizeof(old_endpoints));
+
 	update_punch_metadata(
 		sender, &endpoint, nat_type, be16toh(payload->min_port), be16toh(payload->max_port),
 		(int16_t)be16toh(payload->port_delta), listener_id, true);
+	bool changed = !was_fresh || !fastd_peer_address_equal(&old_endpoint, &sender->punch_endpoint) ||
+		       old_nat_type != sender->punch_nat_type || old_min_port != sender->punch_min_port ||
+		       old_max_port != sender->punch_max_port || old_port_delta != sender->punch_port_delta ||
+		       old_listener_id != sender->punch_listener_id ||
+		       !punch_endpoint_metadata_list_equal(
+			       old_endpoints, old_n_endpoints, sender->punch_endpoints, sender->n_punch_endpoints);
+	if (changed && udp_metadata_update_should_wake(was_fresh, old_nat_type, sender->punch_nat_type))
+		wake_punch_task_manager_for_peer_metadata(sender);
+
 	pr_debug("received punch listener info from %P: listener %u %I", sender, (unsigned)listener_id, &endpoint);
 }
 
