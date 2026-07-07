@@ -144,12 +144,17 @@ enum {
 
 static fastd_peer_t *test_send_peer;
 static size_t test_send_count;
+static size_t test_handshake_count;
+static fastd_peer_t *test_handshake_peer;
+static fastd_peer_transport_t test_handshake_transport;
+static fastd_peer_address_t test_handshake_remote;
 static fastd_peer_t *test_control_send_peer;
 static size_t test_control_send_count;
 static uint8_t test_control_last_type;
 static fastd_peer_t *test_control_send_peers[TEST_CONTROL_HISTORY];
 static uint8_t test_control_send_types[TEST_CONTROL_HISTORY];
 static uint16_t test_control_send_ports[TEST_CONTROL_HISTORY];
+static fastd_peer_t *test_lookup_peer;
 static const uint8_t test_key_a[32] = { 1 };
 static const uint8_t test_key_b[32] = { 2 };
 static const fastd_method_info_t test_control_method = {
@@ -171,6 +176,15 @@ static void test_protocol_send(fastd_peer_t *peer, fastd_buffer_t *buffer) {
 	test_send_peer = peer;
 	test_send_count++;
 	fastd_buffer_free(buffer);
+}
+
+static void test_protocol_handshake_init(
+	fastd_socket_t *sock, const fastd_peer_address_t *local_addr UNUSED,
+	const fastd_peer_address_t *remote_addr, fastd_peer_t *peer, unsigned flags UNUSED) {
+	test_handshake_count++;
+	test_handshake_peer = peer;
+	test_handshake_transport = fastd_socket_is_tcp(sock) ? TRANSPORT_TCP : TRANSPORT_UDP;
+	test_handshake_remote = *remote_addr;
 }
 
 static void test_protocol_send_control(fastd_peer_t *peer, fastd_buffer_t *buffer) {
@@ -207,7 +221,10 @@ static const void *test_protocol_get_peer_key(const fastd_peer_t *peer) {
 	return peer && peer->id == 20 ? test_key_b : test_key_a;
 }
 
-static fastd_peer_t *test_protocol_find_peer_by_key_data(const void *key UNUSED, size_t len UNUSED) {
+static fastd_peer_t *test_protocol_find_peer_by_key_data(const void *key, size_t len) {
+	if (test_lookup_peer && len == sizeof(test_key_b) && !memcmp(key, test_key_b, len))
+		return test_lookup_peer;
+
 	return NULL;
 }
 
@@ -217,6 +234,7 @@ static const fastd_method_info_t *test_protocol_get_current_method(const fastd_p
 
 static const fastd_protocol_t test_protocol = {
 	.name = "test",
+	.handshake_init = test_protocol_handshake_init,
 	.send = test_protocol_send,
 	.send_control = test_protocol_send_control,
 	.key_length = test_protocol_key_length,
@@ -329,6 +347,39 @@ static test_punch_message_t make_punch_message(void) {
 	memcpy(msg.key, "\x01\x02\x03\x04", sizeof(msg.key));
 
 	return msg;
+}
+
+static fastd_buffer_t *make_punch_control_buffer(
+	uint8_t type, const fastd_peer_address_t *endpoint, fastd_nat_type_t nat_type, const uint8_t *key,
+	size_t key_len) {
+	size_t len = sizeof(test_punch_header_t) + sizeof(test_punch_endpoint_t) + key_len;
+	fastd_buffer_t *buffer = fastd_buffer_alloc(len, 0);
+
+	test_punch_header_t *header = buffer->data;
+	memset(header, 0, len);
+	memcpy(header->magic, "fpch", 4);
+	header->version = 1;
+	header->type = type;
+	header->length = htobe16(len);
+
+	test_punch_endpoint_t *payload = (test_punch_endpoint_t *)(header + 1);
+	payload->key_len = key_len;
+	payload->nat_type = nat_type;
+	payload->address_family = endpoint->sa.sa_family == AF_INET6 ? 6 : 4;
+	if (endpoint->sa.sa_family == AF_INET6) {
+		payload->port = endpoint->in6.sin6_port;
+		memcpy(payload->address, &endpoint->in6.sin6_addr, sizeof(endpoint->in6.sin6_addr));
+		payload->min_port = endpoint->in6.sin6_port;
+		payload->max_port = endpoint->in6.sin6_port;
+	} else {
+		payload->port = endpoint->in.sin_port;
+		memcpy(payload->address, &endpoint->in.sin_addr, sizeof(endpoint->in.sin_addr));
+		payload->min_port = endpoint->in.sin_port;
+		payload->max_port = endpoint->in.sin_port;
+	}
+
+	memcpy(payload + 1, key, key_len);
+	return buffer;
 }
 
 static test_punch_result_ext_message_t make_punch_result_ext_message(void) {
@@ -2034,6 +2085,107 @@ static void test_punch_task_manager_relays_multiple_tcp_endpoints_with_budget(vo
 	fastd_cleanup_buffers();
 }
 
+static void test_punch_send_tcp_preserves_multiple_received_endpoints(void **state UNUSED) {
+	const fastd_protocol_t *old_protocol = conf.protocol;
+	fastd_peer_group_t *old_peer_group = conf.peer_group;
+	size_t old_encrypt_headroom = conf.encrypt_headroom;
+	size_t old_max_buffer = ctx.max_buffer;
+	__typeof__(ctx.tcp_socks) old_tcp_socks = ctx.tcp_socks;
+	int old_epoll_fd = ctx.epoll_fd;
+	uint64_t old_rx = ctx.punch_control_rx;
+	uint64_t old_tx = ctx.punch_result_tx;
+	int64_t old_now = ctx.now;
+	fastd_peer_t *old_lookup_peer = test_lookup_peer;
+
+	ctx.now = 1000;
+	ctx.tcp_socks = (__typeof__(ctx.tcp_socks)){};
+	conf.protocol = &test_protocol;
+	conf.encrypt_headroom = 0;
+	ctx.max_buffer = 2048;
+	test_reset_control_sends();
+	fastd_init_buffers();
+	fastd_poll_init();
+
+	fastd_peer_group_t group = {
+		.transport = TRANSPORT_AUTO,
+		.hole_punch = HOLE_PUNCH_AUTO,
+		.nat_traversal = FASTD_TRISTATE_TRUE,
+	};
+	conf.peer_group = &group;
+
+	fastd_peer_t sender = {
+		.id = 30,
+		.group = &group,
+		.config_state = CONFIG_STATIC,
+		.name = "relay",
+		.state = STATE_ESTABLISHED,
+	};
+	fastd_peer_t peer = {
+		.id = 20,
+		.group = &group,
+		.config_state = CONFIG_STATIC,
+		.name = "peer-b",
+		.state = STATE_ESTABLISHED,
+	};
+	test_lookup_peer = &peer;
+	test_handshake_count = 0;
+	test_handshake_peer = NULL;
+	test_handshake_transport = TRANSPORT_UNSET;
+	test_handshake_remote = (fastd_peer_address_t){};
+
+	fastd_peer_address_t endpoint0 = addr4(0xc6336408, 52000);
+	fastd_peer_address_t endpoint1 = addr4(0xc6336408, 52001);
+	assert_true(fastd_punch_handle_control(
+		&sender,
+		make_punch_control_buffer(
+			TEST_PUNCH_SEND_TCP, &endpoint0, FASTD_NAT_FULL_CONE, test_key_b, sizeof(test_key_b))));
+	assert_true(fastd_punch_handle_control(
+		&sender,
+		make_punch_control_buffer(
+			TEST_PUNCH_SEND_TCP, &endpoint1, FASTD_NAT_FULL_CONE, test_key_b, sizeof(test_key_b))));
+
+	assert_int_equal(peer.n_tcp_punch_endpoints, 2);
+	assert_int_equal(port4(&peer.tcp_punch_endpoint), 52000);
+	assert_int_equal(port4(&peer.tcp_punch_endpoints[0]), 52000);
+	assert_int_equal(port4(&peer.tcp_punch_endpoints[1]), 52001);
+	assert_int_equal(peer.tcp_punch_min_port, 52000);
+	assert_int_equal(peer.tcp_punch_max_port, 52001);
+	assert_true(fastd_peer_is_punch_control_candidate_transport(&peer, &endpoint0, TRANSPORT_TCP, NULL, NULL));
+	assert_true(fastd_peer_is_punch_control_candidate_transport(&peer, &endpoint1, TRANSPORT_TCP, NULL, NULL));
+	assert_int_equal(fastd_peer_direct_candidate_count_by_source(&peer, DIRECT_CANDIDATE_PUNCH_CONTROL), 2);
+	assert_int_equal(test_handshake_count, 1);
+	assert_ptr_equal(test_handshake_peer, &peer);
+	assert_int_equal(test_handshake_transport, TRANSPORT_TCP);
+	assert_true(fastd_peer_address_equal(&test_handshake_remote, &endpoint0));
+	assert_int_equal(test_control_send_count, 4);
+	assert_int_equal(test_control_send_types[0], TEST_PUNCH_RESULT);
+	assert_int_equal(test_control_send_types[1], TEST_PUNCH_RESULT_EXT);
+	assert_int_equal(test_control_send_types[2], TEST_PUNCH_RESULT);
+	assert_int_equal(test_control_send_types[3], TEST_PUNCH_RESULT_EXT);
+
+	fastd_tcp_cleanup();
+	fastd_poll_free();
+	VECTOR_FREE(peer.direct_candidates);
+	VECTOR_FREE(peer.punch_suppressions);
+	fastd_task_unschedule(&peer.task);
+	test_lookup_peer = old_lookup_peer;
+	ctx.tcp_socks = old_tcp_socks;
+	ctx.epoll_fd = old_epoll_fd;
+	conf.protocol = old_protocol;
+	conf.peer_group = old_peer_group;
+	conf.encrypt_headroom = old_encrypt_headroom;
+	ctx.max_buffer = old_max_buffer;
+	ctx.punch_control_rx = old_rx;
+	ctx.punch_result_tx = old_tx;
+	ctx.now = old_now;
+	test_reset_control_sends();
+	test_handshake_count = 0;
+	test_handshake_peer = NULL;
+	test_handshake_transport = TRANSPORT_UNSET;
+	test_handshake_remote = (fastd_peer_address_t){};
+	fastd_cleanup_buffers();
+}
+
 static void test_punch_task_manager_outcome_accounting(void **state UNUSED) {
 	uint64_t old_direct_success = ctx.punch_direct_success;
 	uint64_t old_direct_failures = ctx.punch_direct_failures;
@@ -3453,6 +3605,7 @@ int main(void) {
 				cmocka_unit_test(test_punch_pair_runtime_tracks_inflight_backoff_and_demand),
 				cmocka_unit_test(test_punch_task_manager_requests_missing_metadata_on_demand),
 				cmocka_unit_test(test_punch_task_manager_relays_multiple_tcp_endpoints_with_budget),
+				cmocka_unit_test(test_punch_send_tcp_preserves_multiple_received_endpoints),
 				cmocka_unit_test(test_punch_task_manager_outcome_accounting),
 		cmocka_unit_test(test_punch_pair_task_history_is_bounded_and_ordered),
 		cmocka_unit_test(test_punch_pair_task_history_records_remote_results),

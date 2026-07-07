@@ -3266,8 +3266,12 @@ static void handle_send_tcp_endpoint_command(fastd_peer_t *sender, const fastd_p
 	}
 
 	fastd_nat_type_t nat_type = payload->nat_type;
-	update_tcp_punch_metadata(
-		peer, &endpoint, nat_type, be16toh(payload->min_port), be16toh(payload->max_port));
+	if (peer_has_fresh_tcp_punch_nat_info(peer))
+		add_tcp_punch_metadata_endpoint(
+			peer, &endpoint, nat_type, be16toh(payload->min_port), be16toh(payload->max_port));
+	else
+		update_tcp_punch_metadata(
+			peer, &endpoint, nat_type, be16toh(payload->min_port), be16toh(payload->max_port));
 
 	if (!tcp_nat_type_punchable(nat_type) || !fastd_peer_hole_punch_allows(peer, TRANSPORT_TCP) ||
 	    !fastd_peer_transport_allows(fastd_peer_get_transport(peer), TRANSPORT_TCP)) {
