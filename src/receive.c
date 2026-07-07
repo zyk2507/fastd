@@ -443,7 +443,8 @@ void fastd_handle_receive(fastd_peer_t *peer, fastd_buffer_t *buffer, bool reord
 		return;
 	}
 
-	if (conf.mode == MODE_TAP) {
+	bool ethernet_mode = conf.mode == MODE_TAP || conf.mode == MODE_MULTITAP;
+	if (ethernet_mode) {
 		if (buffer->len < sizeof(fastd_eth_header_t)) {
 			pr_debug("received truncated packet");
 			fastd_buffer_free(buffer);
@@ -465,7 +466,7 @@ void fastd_handle_receive(fastd_peer_t *peer, fastd_buffer_t *buffer, bool reord
 
 	fastd_iface_write(peer->iface, buffer);
 
-	if (conf.mode == MODE_TAP && conf.forward) {
+	if (ethernet_mode && ((conf.mode == MODE_TAP && conf.forward) || fastd_peer_get_punch_data_relay())) {
 		/*
 		  Misaligned buffers come from the null method, as it uses a 1-byte header
 		  rather than (16*n+8)-byte like all other methods. When such a buffer enters
@@ -474,8 +475,13 @@ void fastd_handle_receive(fastd_peer_t *peer, fastd_buffer_t *buffer, bool reord
 		*/
 		buffer = fastd_buffer_align(buffer, conf.encrypt_headroom);
 
-		fastd_send_data(buffer, peer, NULL);
-		return;
+		if (conf.mode == MODE_TAP && conf.forward) {
+			fastd_send_data(buffer, peer, NULL);
+			return;
+		}
+
+		if (fastd_send_data_relay(buffer, peer))
+			return;
 	}
 
 	fastd_buffer_free(buffer);

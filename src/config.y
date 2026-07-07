@@ -58,6 +58,7 @@
 %token TOK_COMPRESSION
 %token TOK_CONNECT
 %token TOK_CONTROL
+%token TOK_DATA
 %token TOK_DEBUG
 %token TOK_DEBUG2
 %token TOK_DEFAULT
@@ -241,6 +242,9 @@ statement:	peer_group_statement
 	|	TOK_STUN TOK_SERVER stun_server ';'
 	|	TOK_PUNCH TOK_CONTROL TOK_RELAY boolean ';' {
 			conf.punch_control_relay = $4;
+		}
+	|	TOK_PUNCH TOK_DATA TOK_RELAY autobool ';' {
+			conf.punch_data_relay = $4;
 		}
 	|	TOK_PUNCH TOK_SYMMETRIC boolean ';' {
 			conf.punch_symmetric = $3;
@@ -1049,6 +1053,7 @@ static void fastd_config_set_nat_traversal(
 
 	if (group == conf.peer_group) {
 		conf.punch_control_relay = enabled;
+		conf.punch_data_relay = enabled ? FASTD_TRISTATE_UNDEF : FASTD_TRISTATE_FALSE;
 		conf.punch_symmetric = enabled;
 		if (enabled)
 			conf.punch_keepalive = true;

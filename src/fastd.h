@@ -357,7 +357,8 @@ struct fastd_config {
 #endif
 	bool forward;                      /**< Specifies if packet forwarding is enable */
 	bool peer_discovery;               /**< Enables relay-assisted endpoint discovery for direct peer connections */
-	bool punch_control_relay;          /**< Relays punch control messages without forwarding data-plane packets */
+	bool punch_control_relay;          /**< Relays punch control messages without generic data-plane forwarding */
+	fastd_tristate_t punch_data_relay; /**< Relays learned unicast TAP payloads for NAT traversal fallback */
 	bool punch_symmetric;              /**< Enables symmetric NAT punch prediction and bounded scans */
 	bool punch_keepalive;              /**< Enables periodic keepalives for NAT traversal paths */
 	unsigned punch_keepalive_interval; /**< NAT traversal keepalive interval in milliseconds */
@@ -645,6 +646,7 @@ void fastd_send(
 	const fastd_socket_t *sock, const fastd_peer_address_t *local_addr, const fastd_peer_address_t *remote_addr,
 	fastd_peer_t *peer, const fastd_buffer_t *buffer, size_t stat_size);
 void fastd_send_data(fastd_buffer_t *buffer, fastd_peer_t *source, fastd_peer_t *dest);
+bool fastd_send_data_relay(fastd_buffer_t *buffer, fastd_peer_t *source);
 
 void fastd_receive_unknown_init(void);
 void fastd_receive_unknown_free(void);

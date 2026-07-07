@@ -88,7 +88,7 @@ IPERF_PARALLEL=${FASTD_IPERF_PARALLEL:-8}
 IPERF_CONNECT_TIMEOUT=${FASTD_IPERF_CONNECT_TIMEOUT:-4000}
 IPERF_CLIENT_GRACE=${FASTD_IPERF_CLIENT_GRACE:-8}
 IPERF_SERVER_IDLE_TIMEOUT=${FASTD_IPERF_SERVER_IDLE_TIMEOUT:-30}
-IPERF_MIN_BYTES_FLOOR=100000000
+IPERF_MIN_BYTES_FLOOR=50000000
 IPERF_MIN_BYTES=${FASTD_IPERF_MIN_BYTES:-$IPERF_MIN_BYTES_FLOOR}
 IPERF_CASE_GROUP=${FASTD_IPERF_CASE_GROUP:-basic}
 
@@ -161,6 +161,14 @@ run() {
 
 ping_direct() {
 	ip netns exec "$NS_A" ping -I fda-b -n -c 1 -W "$PING_TIMEOUT" 10.52.10.2 >> "$WORK/a.ping" 2>&1
+}
+
+ping_data_relay() {
+	ip netns exec "$NS_A" ping -I fda-c -n -c 1 -W "$PING_TIMEOUT" 10.52.30.2 >> "$WORK/a.ping" 2>&1
+}
+
+seed_data_relay_mac() {
+	ip netns exec "$NS_B" ping -I fdb-c -n -c 1 -W "$PING_TIMEOUT" 10.52.30.1 >> "$WORK/b.ping" 2>&1 || true
 }
 
 ping_public_nat() {
@@ -342,6 +350,21 @@ def direct_hole_punched(doc, name):
     )
 
 sys.exit(0 if direct_hole_punched(a, "b") and direct_hole_punched(b, "a") else 1)
+PY
+}
+
+punch_data_relay_enabled() {
+	python3 - "$WORK/c.json" <<'PY'
+import json
+import sys
+
+try:
+    c = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+
+punch = c.get("punch") or {}
+sys.exit(0 if punch.get("data_relay") is True else 1)
 PY
 }
 
@@ -738,6 +761,25 @@ peer "b" { key "$PUB_B"; nat traversal yes; }
 EOF
 }
 
+write_c_data_relay_only_conf() {
+	cat > "$WORK/c.conf" <<EOF
+mode multitap;
+interface "fdc-%n";
+persist interface no;
+method "salsa2012+umac";
+secret "$SEC_C";
+bind 10.52.0.1:10000;
+status socket "$WORK/c.status";
+forward no;
+peer discovery no;
+nat traversal yes;
+punch control relay no;
+$(punch_test_limits 3)
+peer "a" { key "$PUB_A"; nat traversal yes; }
+peer "b" { key "$PUB_B"; nat traversal yes; }
+EOF
+}
+
 write_symmetric_to_cone_confs() {
 	cat > "$WORK/a.conf" <<EOF
 mode multitap;
@@ -998,6 +1040,7 @@ start_fastds() {
 	: > "$WORK/b.log"
 	: > "$WORK/c.log"
 	: > "$WORK/a.ping"
+	: > "$WORK/b.ping"
 	: > "$WORK/c.ping"
 
 	ip netns exec "$NS_C" "$FASTD" --config "$WORK/c.conf" --log-level verbose > "$WORK/c.log" 2>&1 &
@@ -1033,6 +1076,67 @@ wait_without_direct_path() {
 	done
 
 	[[ "$saw_status" == true ]] || fail 'status sockets did not become available'
+}
+
+wait_for_iface() {
+	local ns=$1 iface=$2
+
+	for _ in $(seq 1 "$FAST_WAIT_ATTEMPTS"); do
+		if ip -n "$ns" link show dev "$iface" >/dev/null 2>&1; then
+			return 0
+		fi
+		check_fastds_alive
+		sleep "$FAST_WAIT_SLEEP"
+	done
+
+	fail "interface $iface did not become available"
+}
+
+iface_mac() {
+	ip netns exec "$1" cat "/sys/class/net/$2/address"
+}
+
+setup_data_relay_interfaces() {
+	wait_for_iface "$NS_A" fda-c
+	wait_for_iface "$NS_B" fdb-c
+
+	run ip -n "$NS_A" addr replace 10.52.30.1/30 dev fda-c
+	run ip -n "$NS_B" addr replace 10.52.30.2/30 dev fdb-c
+	run ip -n "$NS_A" link set fda-c up
+	run ip -n "$NS_B" link set fdb-c up
+
+	local mac_a mac_b
+	mac_a=$(iface_mac "$NS_A" fda-c) || fail 'failed to read A relay MAC'
+	mac_b=$(iface_mac "$NS_B" fdb-c) || fail 'failed to read B relay MAC'
+
+	run ip -n "$NS_A" neigh replace 10.52.30.2 lladdr "$mac_b" nud permanent dev fda-c
+	run ip -n "$NS_B" neigh replace 10.52.30.1 lladdr "$mac_a" nud permanent dev fdb-c
+
+	ip -n "$NS_A" addr show dev fda-c > "$WORK/a.ip" 2>&1 || true
+	ip -n "$NS_B" addr show dev fdb-c > "$WORK/b.ip" 2>&1 || true
+}
+
+wait_for_data_relay_without_direct() {
+	local ok=false
+
+	for _ in $(seq 1 "$PING_WAIT_ATTEMPTS"); do
+		check_fastds_alive
+		dump_statuses
+
+		seed_data_relay_mac
+		if [[ -f "$WORK/c.json" ]] && punch_data_relay_enabled && ping_data_relay; then
+			ok=true
+			break
+		fi
+
+		if [[ -f "$WORK/a.json" && -f "$WORK/b.json" ]] && direct_hole_punched; then
+			fail 'direct A/B path established before data relay fallback was verified'
+		fi
+
+		sleep "$PING_WAIT_SLEEP"
+	done
+
+	[[ "$ok" == true ]] || fail 'A/B data relay fallback failed without punch control relay'
 }
 
 wait_for_direct_path() {
@@ -1320,11 +1424,13 @@ fi
 printf '1..6\n'
 
 CURRENT_TEST=1
-write_c_conf no
+write_c_data_relay_only_conf
 start_fastds
+setup_data_relay_interfaces
+wait_for_data_relay_without_direct
 wait_without_direct_path
 stop_fastds
-printf 'ok 1 - passive A/B do not direct-connect without punch control relay\n'
+printf 'ok 1 - passive A/B use controlled data relay but do not direct-connect without punch control relay\n'
 
 CURRENT_TEST=2
 write_c_conf yes

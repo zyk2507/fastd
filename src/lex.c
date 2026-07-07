@@ -56,6 +56,7 @@ static const keyword_t keywords[] = {
 	{ "compression", TOK_COMPRESSION },
 	{ "connect", TOK_CONNECT },
 	{ "control", TOK_CONTROL },
+	{ "data", TOK_DATA },
 	{ "debug", TOK_DEBUG },
 	{ "debug2", TOK_DEBUG2 },
 	{ "default", TOK_DEFAULT },

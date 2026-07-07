@@ -89,9 +89,10 @@ Example config:
   sections; peer settings override peer group settings, and peer group settings inherit from their parent group.
 
   ``nat traversal yes`` enables ``transport auto``, ``hole-punch auto``, symmetric NAT punching, punch-control
-  relay on the root configuration, and NAT keepalives. If TURN servers are configured, peers may also use TURN as a
-  fallback while direct punching is unavailable. The switch does not enable NAT-PMP or UPnP IGD by itself; configure
-  ``port-mapping auto`` explicitly when external router port mappings should be requested.
+  relay on the root configuration, controlled data relay fallback, and NAT keepalives. If TURN servers are configured,
+  peers may also use TURN as a fallback while direct punching is unavailable. The switch does not enable NAT-PMP or
+  UPnP IGD by itself; configure ``port-mapping auto`` explicitly when external router port mappings should be
+  requested.
 
   ``nat traversal no`` disables inherited NAT traversal behavior for that scope. On a peer, it disables automatic
   hole punching, symmetric punch strategies, automatic TURN fallback, inherited auto transport, and inherited port
@@ -148,10 +149,17 @@ Example config:
 | ``punch control relay yes|no;``
 
   Allows a trusted node with established peer sessions to relay punch control packets between those peers without
-  forwarding tunnel payload traffic. This is useful when two NATed peers both maintain a normal session to a public
+  enabling generic peer forwarding. This is useful when two NATed peers both maintain a normal session to a public
   coordinator and also have each other's public keys configured locally, but do not have normal ``remote`` addresses
   for each other. The relayed control packets carry endpoint and NAT metadata; authenticated fastd handshakes still
   decide which peer, if any, may establish a direct session.
+
+| ``punch data relay auto|yes|no;``
+
+  Controls NAT traversal data fallback on trusted TAP coordinators. The default is ``auto``: data relay becomes active
+  when ``nat traversal yes`` or ``punch control relay yes`` is enabled on the root configuration. Set it to ``no`` to
+  force it off. Unlike ``forward yes``, this fallback only relays learned unicast TAP payloads between established peers
+  that both have NAT traversal enabled; unknown destination MACs, broadcast and multicast frames are not flooded.
 
 | ``punch symmetric yes|no;``
 

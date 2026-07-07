@@ -139,6 +139,20 @@ enum {
 	TEST_PUNCH_RESULT_BUSY = 5,
 };
 
+static fastd_peer_t *test_send_peer;
+static size_t test_send_count;
+
+static void test_protocol_send(fastd_peer_t *peer, fastd_buffer_t *buffer) {
+	test_send_peer = peer;
+	test_send_count++;
+	fastd_buffer_free(buffer);
+}
+
+static const fastd_protocol_t test_protocol = {
+	.name = "test",
+	.send = test_protocol_send,
+};
+
 static fastd_peer_address_t addr4(uint32_t ip, uint16_t port) {
 	fastd_peer_address_t ret = {};
 
@@ -1257,6 +1271,120 @@ static void test_nat_traversal_inherits_and_overrides(void **state UNUSED) {
 	peer.turn_relay = FASTD_TRISTATE_FALSE;
 	assert_true(fastd_peer_get_nat_traversal(&peer));
 	assert_false(fastd_peer_get_turn_relay(&peer));
+}
+
+static void test_punch_data_relay_effective_setting(void **state UNUSED) {
+	fastd_tristate_t old_data_relay = conf.punch_data_relay;
+	bool old_control_relay = conf.punch_control_relay;
+	fastd_peer_group_t *old_peer_group = conf.peer_group;
+	fastd_peer_group_t root_group = {
+		.nat_traversal = FASTD_TRISTATE_FALSE,
+	};
+	conf.peer_group = &root_group;
+
+	conf.punch_data_relay = FASTD_TRISTATE_UNDEF;
+	conf.punch_control_relay = false;
+	assert_false(fastd_peer_get_punch_data_relay());
+
+	conf.punch_control_relay = true;
+	assert_true(fastd_peer_get_punch_data_relay());
+
+	conf.punch_data_relay = FASTD_TRISTATE_FALSE;
+	assert_false(fastd_peer_get_punch_data_relay());
+
+	conf.punch_data_relay = FASTD_TRISTATE_TRUE;
+	conf.punch_control_relay = false;
+	assert_true(fastd_peer_get_punch_data_relay());
+
+	conf.punch_data_relay = FASTD_TRISTATE_UNDEF;
+	root_group.nat_traversal = FASTD_TRISTATE_TRUE;
+	assert_true(fastd_peer_get_punch_data_relay());
+
+	conf.punch_data_relay = old_data_relay;
+	conf.punch_control_relay = old_control_relay;
+	conf.peer_group = old_peer_group;
+}
+
+static fastd_buffer_t *test_eth_frame(fastd_eth_addr_t dest, fastd_eth_addr_t source) {
+	fastd_buffer_t *buffer = fastd_buffer_alloc(sizeof(fastd_eth_header_t), conf.encrypt_headroom);
+	fastd_eth_header_t header = {
+		.dest = dest,
+		.source = source,
+	};
+	memcpy(buffer->data, &header, sizeof(header));
+	return buffer;
+}
+
+static void test_punch_data_relay_only_for_learned_nat_unicast(void **state UNUSED) {
+	__typeof__(ctx.eth_addrs) old_eth_addrs = ctx.eth_addrs;
+	__typeof__(ctx.punch_pair_states) old_pair_states = ctx.punch_pair_states;
+	const fastd_protocol_t *old_protocol = conf.protocol;
+	fastd_tristate_t old_data_relay = conf.punch_data_relay;
+	fastd_mode_t old_mode = conf.mode;
+	size_t old_encrypt_headroom = conf.encrypt_headroom;
+	size_t old_max_buffer = ctx.max_buffer;
+	fastd_timeout_t old_now = ctx.now;
+
+	ctx.eth_addrs = (__typeof__(ctx.eth_addrs)){};
+	ctx.punch_pair_states = (__typeof__(ctx.punch_pair_states)){};
+	conf.protocol = &test_protocol;
+	conf.punch_data_relay = FASTD_TRISTATE_TRUE;
+	conf.mode = MODE_MULTITAP;
+	conf.encrypt_headroom = 0;
+	ctx.max_buffer = 2048;
+	ctx.now = 1000;
+	fastd_init_buffers();
+
+	fastd_peer_group_t group = {
+		.nat_traversal = FASTD_TRISTATE_TRUE,
+	};
+	fastd_peer_t source = {
+		.id = 10,
+		.name = "source",
+		.group = &group,
+		.state = STATE_ESTABLISHED,
+	};
+	fastd_peer_t dest = {
+		.id = 20,
+		.name = "dest",
+		.group = &group,
+		.state = STATE_ESTABLISHED,
+	};
+
+	fastd_eth_addr_t source_mac = { .data = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 } };
+	fastd_eth_addr_t dest_mac = { .data = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x02 } };
+	fastd_eth_addr_t multicast_mac = { .data = { 0x01, 0x00, 0x00, 0x00, 0x00, 0x03 } };
+
+	fastd_peer_eth_addr_add(&dest, dest_mac);
+	test_send_peer = NULL;
+	test_send_count = 0;
+	assert_true(fastd_send_data_relay(test_eth_frame(dest_mac, source_mac), &source));
+	assert_ptr_equal(test_send_peer, &dest);
+	assert_int_equal(test_send_count, 1);
+	assert_int_equal(VECTOR_LEN(ctx.punch_pair_states), 1);
+
+	fastd_buffer_t *blocked = test_eth_frame(multicast_mac, source_mac);
+	assert_false(fastd_send_data_relay(blocked, &source));
+	fastd_buffer_free(blocked);
+	assert_int_equal(test_send_count, 1);
+
+	dest.nat_traversal = FASTD_TRISTATE_FALSE;
+	blocked = test_eth_frame(dest_mac, source_mac);
+	assert_false(fastd_send_data_relay(blocked, &source));
+	fastd_buffer_free(blocked);
+	assert_int_equal(test_send_count, 1);
+
+	fastd_cleanup_buffers();
+	VECTOR_FREE(ctx.eth_addrs);
+	VECTOR_FREE(ctx.punch_pair_states);
+	ctx.eth_addrs = old_eth_addrs;
+	ctx.punch_pair_states = old_pair_states;
+	conf.protocol = old_protocol;
+	conf.punch_data_relay = old_data_relay;
+	conf.mode = old_mode;
+	conf.encrypt_headroom = old_encrypt_headroom;
+	ctx.max_buffer = old_max_buffer;
+	ctx.now = old_now;
 }
 
 static void test_punch_nat_refresh_policy(void **state UNUSED) {
@@ -2747,10 +2875,12 @@ int main(void) {
 		cmocka_unit_test(test_punch_suppression_is_bounded),
 		cmocka_unit_test(test_punch_result_backoff_policy),
 		cmocka_unit_test(test_punch_relay_backoff_expires),
-		cmocka_unit_test(test_punch_relay_backoff_is_bounded),
-		cmocka_unit_test(test_peer_punch_symmetric_inherits_and_overrides),
-		cmocka_unit_test(test_nat_traversal_inherits_and_overrides),
-		cmocka_unit_test(test_punch_nat_refresh_policy),
+			cmocka_unit_test(test_punch_relay_backoff_is_bounded),
+			cmocka_unit_test(test_peer_punch_symmetric_inherits_and_overrides),
+			cmocka_unit_test(test_nat_traversal_inherits_and_overrides),
+			cmocka_unit_test(test_punch_data_relay_effective_setting),
+			cmocka_unit_test(test_punch_data_relay_only_for_learned_nat_unicast),
+			cmocka_unit_test(test_punch_nat_refresh_policy),
 			cmocka_unit_test(test_punch_observed_udp_metadata_fills_without_stun),
 			cmocka_unit_test(test_punch_task_pair_state_requires_established_metadata_and_due),
 			cmocka_unit_test(test_punch_task_manager_launch_lifecycle_accounting),

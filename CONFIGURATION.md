@@ -29,6 +29,7 @@
 | `turn relay` | `no` |
 | `peer discovery` | `no` |
 | `punch control relay` | `no` |
+| `punch data relay` | `auto` |
 | `punch symmetric` | `yes` |
 | `punch max sockets` | `84` |
 | `punch max packets` | `800` |
@@ -199,7 +200,8 @@ punch max packets <1-4096>;
 - `peer discovery yes`：启用基于可信 relay 的 endpoint discovery。TAP relay 在同时开启 `forward yes` 时，会把已连接 peer 的公网 endpoint 和已学习 MAC 通过认证控制包介绍给其他 peer；接收端把该 endpoint 作为额外直连握手目标，可配合 `hole-punch auto`。直连建立前或失败后，相关 MAC 的流量继续回退到 relay；直连建立后切换二层转发表，不重置隧道内已有 TCP 连接。协商出的 method 需要支持认证控制包；`null` / `null@l2tp` 不承载 discovery 消息。
 - `realm server`：配置外部 rendezvous server。fastd 使用它注册本机 realm、保持 SSE 事件流、周期性向 peer 的 realm 发起 `/connect`，并把返回或推送的 endpoint 作为临时直连握手目标。realm server 只处理控制面，不中转隧道流量。原版 Hysteria realm server 的 SSE punch 事件不包含来源 peer 身份，fastd 会把这类匿名 endpoint 试探性地用于已配置 `realm` 的 peer，并由 fastd 的认证握手过滤不匹配的 peer。配置 `stun server` 后，fastd 会从实际使用的 IPv4 UDP socket 发送 STUN binding request，并优先通告 STUN 得到的公网 UDP endpoint；未配置 STUN 时只能通告本地 bind 地址，通常只适合公网或已有端口映射的 socket。
 - 全局 `stun server`：配置用于 NAT 类型识别的 STUN server，可配置多条。fastd 会周期性探测本机公网 UDP endpoint、NAT 类型、端口范围和可预测 symmetric NAT 的端口步进，并在 `--status` 的 `NAT` 区块中展示；该功能需要编译时启用 `nat_detect` / libnice。配置了全局 STUN 后，已建立连接的 peer 之间还会通过 punch control 包交换 NAT 元数据。
-- `punch control relay yes`：允许一个已连接的可信节点在 peer 之间转发 punch control 包，只转发控制面 endpoint/NAT 信息，不转发隧道数据面。它可用于 A/B 都只与公网节点 C 建立普通连接、但 A/B 之间希望直接打洞的拓扑；A/B 仍需要互相配置 peer 公钥，通常配合全局 `stun server`、`transport udp|auto` 和 `hole-punch udp|auto`。
+- `punch control relay yes`：允许一个已连接的可信节点在 peer 之间转发 punch control 包，转发控制面 endpoint/NAT 信息。它可用于 A/B 都只与公网节点 C 建立普通连接、但 A/B 之间希望直接打洞的拓扑；A/B 仍需要互相配置 peer 公钥，通常配合全局 `stun server`、`transport udp|auto` 和 `hole-punch udp|auto`。
+- `punch data relay auto|yes|no`：控制 NAT traversal 数据 fallback。默认 `auto`，在启用 `nat traversal yes` 或 `punch control relay yes` 时生效；显式 `no` 可关闭。该 fallback 不等于 `forward yes`：它只在 TAP 模式下转发已学习目的 MAC 的单播包，且要求源 peer 和目的 peer 都已认证建立并启用 NAT traversal；未知 MAC、广播和组播不会被泛洪。
 - `punch symmetric yes|no`：控制是否启用 symmetric NAT 打洞策略。全局默认 `yes`，peer 可覆盖；开启后，easy-symmetric NAT 使用端口步进预测，普通 symmetric NAT 使用 `punch max sockets` 限制内的有界端口扫描。关闭后，fastd 只使用精确 endpoint / cone 风格打洞，不做 symmetric 端口预测或扫描。
 - `punch max sockets`：限制单次 punch 命令可使用的预测/探测 UDP socket 数，默认 `84`，最大 `256`。hard-symmetric NAT 使用该上限；easy-symmetric 预测仍使用 25 端口窗口。
 - `punch max packet` / `punch max packets`：限制每轮维护周期内 relay 节点转发的 punch control 包数量，默认 `800`，最大 `4096`；两个写法等价。
@@ -273,6 +275,7 @@ hole-punch off|tcp|udp|auto;
 stun server "<host>":<port>;
 stun server "<host>" port <port>;
 punch control relay yes|no;
+punch data relay auto|yes|no;
 punch symmetric yes|no;
 punch max sockets <1-256>;
 punch max packet <1-4096>;
@@ -291,9 +294,10 @@ turn server "<address>" port <port> user "<username>" password "<password>";
 - `port-mapping`：自动映射固定 IPv4 UDP bind 端口。
 - `nat-pmp yes|no`：兼容别名，等价于 `port-mapping nat-pmp|off`。
 - `hole-punch tcp|udp|auto`：启用确定性 IPv4 打洞；默认关闭。双方需要知道彼此公网 IPv4 endpoint；在 TAP relay 转发网络中，`peer discovery yes` 可以由可信 relay 提供这个 endpoint。
-- `stun server`、`punch control relay`、`punch max sockets`、`punch max packet(s)` 只能写在主配置中；`punch symmetric` 可写在主配置或 peer 配置中。
+- `stun server`、`punch control relay`、`punch data relay`、`punch max sockets`、`punch max packet(s)` 只能写在主配置中；`punch symmetric` 可写在主配置或 peer 配置中。
 - `stun server`：启用全局 NAT 类型识别，结果用于 status 输出和 punch control NAT 元数据交换。该指令不同于 `realm server ... stun server ...`；realm 内嵌 STUN 只用于向 realm server 通告当前 UDP endpoint。
 - `punch control relay yes`：启用控制面 endpoint/NAT 信息转发，可在 `forward no` 的可信公网节点上帮助两个已配置彼此公钥的 NAT 后 peer 发起直接 UDP 打洞。
+- `punch data relay auto|yes|no`：启用受控数据 fallback。开启后，可信公网节点即使保持 `forward no`，也能在 A/B 直连尚未建立或暂时不可用时中继已学习目的 MAC 的单播数据；它不会泛洪未知目的 MAC 或广播/组播。
 - `punch symmetric yes|no`：允许或禁止 symmetric NAT 策略；开启时会同时尝试 easy-symmetric 端口预测和普通 symmetric 有界端口扫描，哪个候选先完成握手就使用哪个。
 - `punch max sockets`：限制每次 symmetric punch 使用的 UDP socket 数。
 - `punch max packet(s)`：限制 relay 每轮转发 punch control 包的数量。
@@ -341,9 +345,10 @@ hole-punch auto;
 Punch-control relay 示例：
 
 ```conf
-# 公网协调节点 C：只转发 punch control，不转发隧道数据面
+# 公网协调节点 C：forward no，控制面打洞，并允许受控单播数据 fallback
 forward no;
 punch control relay yes;
+punch data relay auto;
 stun server "stun.example.net" port 3478;
 
 # NAT 后节点 A/B：各自与 C 建立普通 fastd 连接，同时配置对方 peer 公钥
@@ -354,6 +359,7 @@ punch symmetric yes;
 ```
 
 - C 必须与 A/B 都建立 fastd session，并且协商 method 要支持认证控制包。
+- `punch data relay auto` 只在 C 已经通过 TAP MAC 学习知道目的 peer 时转发单播数据，不会替代普通二层转发或泛洪未知流量。
 - A/B 必须互相配置 peer 公钥；即使没有为对方配置 `remote`，收到 C 转发的 punch control endpoint 后也会主动试探 UDP handshake。
 - 全局 `stun server` 让节点发布 NAT 类型和公网 endpoint；`punch symmetric yes` 会同时覆盖 easy-symmetric 端口步进预测和普通 symmetric 有界扫描。
 - 该机制仍是机会式 NAT traversal，不保证穿透所有 CGNAT、symmetric NAT 或严格防火墙；失败时需要保留 relay/TURN 等 fallback。

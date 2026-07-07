@@ -436,6 +436,7 @@ static void print_punch_table(json_object *punch) {
 
 	char value[32];
 	add_key_value_row(table, "Control relay", onoff(get_bool_member(punch, "control_relay")));
+	add_key_value_row(table, "Data relay", onoff(get_bool_member(punch, "data_relay")));
 	add_key_value_row(table, "Symmetric punch", onoff(get_bool_member(punch, "symmetric")));
 	format_counter(value, get_int_member(punch, "maintenance_interval"));
 	add_key_value_row(table, "Maintenance interval", value);
@@ -1603,6 +1604,8 @@ static json_object *dump_punch(void) {
 	struct json_object *ret = json_object_new_object();
 	json_object_object_add(ret, "nat_traversal", json_object_new_boolean(fastd_peer_get_nat_traversal(NULL)));
 	json_object_object_add(ret, "control_relay", json_object_new_boolean(conf.punch_control_relay));
+	json_object_object_add(ret, "data_relay", json_object_new_boolean(fastd_peer_get_punch_data_relay()));
+	json_object_object_add(ret, "data_relay_explicit", json_object_new_boolean(conf.punch_data_relay.set));
 	json_object_object_add(ret, "symmetric", json_object_new_boolean(conf.punch_symmetric));
 	json_object_object_add(ret, "keepalive", json_object_new_boolean(conf.punch_keepalive));
 	json_object_object_add(ret, "keepalive_interval", json_object_new_int64(conf.punch_keepalive_interval / 1000));
@@ -1719,7 +1722,7 @@ static json_object *dump_peer(const fastd_peer_t *peer) {
 
 		json_object_object_add(connection, "statistics", dump_stats(&peer->stats));
 
-		if (conf.mode == MODE_TAP) {
+		if (conf.mode == MODE_TAP || conf.mode == MODE_MULTITAP) {
 			struct json_object *mac_addresses = json_object_new_array();
 			json_object_object_add(connection, "mac_addresses", mac_addresses);
 

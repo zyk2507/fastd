@@ -582,6 +582,14 @@ static inline bool fastd_peer_get_nat_traversal(const fastd_peer_t *peer) {
 	return fastd_peer_group_get_nat_traversal(peer ? peer->group : conf.peer_group);
 }
 
+/** Returns the effective punch data relay setting */
+static inline bool fastd_peer_get_punch_data_relay(void) {
+	if (conf.punch_data_relay.set)
+		return conf.punch_data_relay.state;
+
+	return conf.punch_control_relay || fastd_peer_get_nat_traversal(NULL);
+}
+
 /** Returns whether a peer may use deterministic hole punching for a transport */
 static inline bool fastd_peer_hole_punch_allows(const fastd_peer_t *peer, fastd_peer_transport_t transport) {
 	fastd_hole_punch_mode_t mode = fastd_peer_get_hole_punch(peer);

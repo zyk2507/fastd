@@ -69,6 +69,7 @@ secret "$SEC";
 bind 127.0.0.1:0;
 status socket "$WORK/status.sock";
 punch max attempts 3;
+punch data relay yes;
 peer "dummy" { key "$PUB"; hole-punch udp; }
 EOF
 
@@ -109,6 +110,8 @@ if "dummy" not in text or "1 total, 0 established" not in text:
 
 if "Max attempts" not in text:
     raise SystemExit("punch attempt limit not rendered")
+if "Data relay" not in text:
+    raise SystemExit("punch data relay state not rendered")
 PY
 
 printf 'ok 1 - human status uses libfort tables\n'
@@ -124,6 +127,10 @@ import sys
 doc = json.load(open(sys.argv[1], encoding="utf-8"))
 if (doc.get("punch") or {}).get("max_attempts") != 3:
     raise SystemExit("unexpected max_attempts")
+if (doc.get("punch") or {}).get("data_relay") is not True:
+    raise SystemExit("unexpected data_relay")
+if (doc.get("punch") or {}).get("data_relay_explicit") is not True:
+    raise SystemExit("unexpected data_relay_explicit")
 PY
 
 printf 'ok 2 - JSON status output remains parseable\n'

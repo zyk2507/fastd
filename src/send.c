@@ -203,6 +203,11 @@ static inline void send_all(fastd_buffer_t *buffer, fastd_peer_t *source) {
 	fastd_buffer_free(buffer);
 }
 
+/** Returns whether the configured mode carries Ethernet frames */
+static inline bool ethernet_mode(void) {
+	return conf.mode == MODE_TAP || conf.mode == MODE_MULTITAP;
+}
+
 /** Handles sending of a payload packet to a single peer in TAP mode */
 static inline bool send_data_tap_single(fastd_buffer_t *buffer, fastd_peer_t *source) {
 	if (conf.mode != MODE_TAP)
@@ -241,6 +246,26 @@ static inline bool send_data_tap_single(fastd_buffer_t *buffer, fastd_peer_t *so
 	else if (source && dest)
 		fastd_punch_note_peer_pair_demand(source, dest);
 
+	conf.protocol->send(dest, buffer);
+	return true;
+}
+
+/** Handles controlled NAT traversal data relay of a learned unicast TAP packet */
+bool fastd_send_data_relay(fastd_buffer_t *buffer, fastd_peer_t *source) {
+	if (!fastd_peer_get_punch_data_relay() || !ethernet_mode() || !source ||
+	    !fastd_peer_get_nat_traversal(source) || buffer->len < sizeof(fastd_eth_header_t))
+		return false;
+
+	fastd_eth_addr_t dest_addr = fastd_buffer_dest_address(buffer);
+	if (!fastd_eth_addr_is_unicast(dest_addr))
+		return false;
+
+	fastd_peer_t *dest;
+	if (!fastd_peer_find_by_eth_addr(dest_addr, &dest) || !dest || dest == source ||
+	    !fastd_peer_get_nat_traversal(dest) || !fastd_peer_is_established(dest))
+		return false;
+
+	fastd_punch_note_peer_pair_demand(source, dest);
 	conf.protocol->send(dest, buffer);
 	return true;
 }
