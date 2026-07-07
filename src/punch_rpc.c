@@ -866,6 +866,36 @@ typedef struct fastd_punch_pair_state {
 	fastd_timeout_t next_retry;
 } fastd_punch_pair_state_t;
 
+static bool request_peer_punch_metadata(fastd_peer_t *peer);
+
+/** Requests missing pair metadata after recent traffic demand exposed a useful direct path opportunity */
+static size_t request_missing_pair_metadata(
+	fastd_peer_t *a, fastd_peer_t *b, const fastd_punch_pair_state_t *state, size_t limit,
+	fastd_timeout_t *next_retry) {
+	if (!limit || !state->recent_demand)
+		return 0;
+
+	size_t sent = 0;
+
+	if (!state->has_metadata_a && sent < limit && request_peer_punch_metadata(a)) {
+		sent++;
+		*next_retry = task_manager_earlier_next_retry(*next_retry, a->next_punch_metadata_request);
+	}
+	if (!state->has_metadata_b && sent < limit && request_peer_punch_metadata(b)) {
+		sent++;
+		*next_retry = task_manager_earlier_next_retry(*next_retry, b->next_punch_metadata_request);
+	}
+
+	if (!sent) {
+		if (!state->has_metadata_a)
+			*next_retry = task_manager_earlier_next_retry(*next_retry, a->next_punch_metadata_request);
+		if (!state->has_metadata_b)
+			*next_retry = task_manager_earlier_next_retry(*next_retry, b->next_punch_metadata_request);
+	}
+
+	return sent;
+}
+
 /** Evaluates whether an established peer pair should produce punch-control tasks in this maintenance tick */
 static fastd_punch_pair_state_t punch_pair_state(const fastd_peer_t *a, const fastd_peer_t *b) {
 	fastd_punch_pair_state_t state = {};
@@ -1586,6 +1616,39 @@ static bool send_select_listener_request(
 		request_endpoint, FASTD_NAT_UNKNOWN, 0, 0, 0, flags, 0);
 }
 
+/** Returns the request endpoint to use when asking a peer for fresh listener metadata */
+static bool peer_metadata_request_endpoint(const fastd_peer_t *peer, fastd_peer_address_t *endpoint) {
+	if (!fastd_peer_is_established(peer))
+		return false;
+	if (peer->address.sa.sa_family != AF_INET && peer->address.sa.sa_family != AF_INET6)
+		return false;
+	if (!fastd_peer_address_get_port(&peer->address))
+		return false;
+
+	*endpoint = peer->address;
+	return true;
+}
+
+/** Requests fresh punch metadata from one established peer, rate-limited per peer */
+static bool request_peer_punch_metadata(fastd_peer_t *peer) {
+	if (!fastd_peer_get_nat_traversal(peer) || !fastd_timed_out(peer->next_punch_metadata_request))
+		return false;
+	if (!fastd_peer_hole_punch_allows(peer, TRANSPORT_UDP) ||
+	    !fastd_peer_transport_allows(fastd_peer_get_transport(peer), TRANSPORT_UDP))
+		return false;
+
+	fastd_peer_address_t endpoint;
+	if (!peer_metadata_request_endpoint(peer, &endpoint))
+		return false;
+
+	fastd_timeout_t next_request = ctx.now + conf.punch_announce_interval;
+	if (!send_select_listener_request(peer, &endpoint, true, true))
+		return false;
+
+	peer->next_punch_metadata_request = next_request;
+	return true;
+}
+
 /** Sends the selected local public punch listener endpoint to a peer */
 static bool send_listener_info(
 	fastd_peer_t *dest, const fastd_peer_address_t *endpoint, fastd_nat_type_t nat_type, uint16_t min_port,
@@ -2053,6 +2116,7 @@ static size_t build_punch_endpoint_candidates(
 }
 
 static void refresh_observed_peer_punch_metadata(fastd_peer_t *peer);
+static void relay_peer_endpoints(void);
 
 #ifdef WITH_TESTS
 
@@ -2386,6 +2450,11 @@ void fastd_punch_test_task_manager_compact_pair_states(void) {
 void fastd_punch_test_task_manager_record_launch_result(
 	size_t before_pair, size_t sent, size_t backoff_skipped, fastd_timeout_t backoff_next_retry) {
 	task_manager_record_launch_result(before_pair, sent, backoff_skipped, backoff_next_retry);
+}
+
+/** Test wrapper for one relay task-manager run */
+void fastd_punch_test_relay_peer_endpoints(void) {
+	relay_peer_endpoints();
 }
 
 /** Test wrapper for remote punch-result lifecycle accounting */
@@ -2778,6 +2847,7 @@ static void relay_peer_endpoints(void) {
 	ctx.punch_task_manager_waiting = 0;
 	ctx.punch_task_manager_in_flight = 0;
 	ctx.punch_task_manager_missing_metadata = 0;
+	ctx.punch_task_manager_metadata_requests = 0;
 	ctx.punch_task_manager_blacklisted = 0;
 	ctx.punch_task_manager_suppressed = 0;
 	ctx.punch_task_manager_aborted = 0;
@@ -2805,9 +2875,18 @@ static void relay_peer_endpoints(void) {
 
 			if (state.missing_metadata) {
 				ctx.punch_task_manager_missing_metadata++;
+				fastd_timeout_t next_retry = FASTD_TIMEOUT_INV;
+				size_t metadata_requests = request_missing_pair_metadata(
+					a, b, &state, conf.punch_max_packets - sent, &next_retry);
+				sent += metadata_requests;
+				ctx.punch_task_manager_metadata_requests += metadata_requests;
+				task_manager_note_next_retry(next_retry);
 				task_manager_record_pair_task(
-					a, b, NULL, NULL, PUNCH_PAIR_TASK_STAGE_MISSING_METADATA, 0, 0,
-					FASTD_TIMEOUT_INV, false);
+					a, b, NULL, NULL,
+					metadata_requests ? PUNCH_PAIR_TASK_STAGE_METADATA_REQUESTED :
+							    PUNCH_PAIR_TASK_STAGE_MISSING_METADATA,
+					metadata_requests, 0, next_retry,
+					sent >= conf.punch_max_packets && conf.punch_max_packets);
 				continue;
 			}
 			if (state.in_flight) {

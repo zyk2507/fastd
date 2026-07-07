@@ -247,6 +247,7 @@ struct fastd_peer {
 	uint16_t tcp_punch_max_port;             /**< Highest public TCP port announced through punch control */
 	fastd_timeout_t tcp_punch_timeout;       /**< Timeout for TCP punch control metadata */
 	fastd_timeout_t next_punch_announce; /**< Rate limit for local punch metadata announcements */
+	fastd_timeout_t next_punch_metadata_request; /**< Rate limit for peer metadata refresh requests */
 	fastd_timeout_t next_punch_relay;    /**< Rate limit for relay-generated punch commands */
 	uint32_t punch_hard_sym_port_index;  /**< Next hard-symmetric full-port-space scan index */
 	uint32_t punch_hard_sym_round;       /**< Number of completed hard-symmetric full-port-space scan rounds */

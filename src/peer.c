@@ -605,6 +605,7 @@ static void setup_peer(fastd_peer_t *peer) {
 	peer->tcp_punch_max_port = 0;
 	peer->tcp_punch_timeout = FASTD_TIMEOUT_INV;
 	peer->next_punch_announce = ctx.now;
+	peer->next_punch_metadata_request = ctx.now;
 	peer->next_punch_relay = ctx.now;
 	peer->punch_hard_sym_port_index = 0;
 	peer->punch_hard_sym_round = 0;

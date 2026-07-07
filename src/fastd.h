@@ -461,6 +461,7 @@ typedef enum fastd_punch_pair_task_stage {
 	PUNCH_PAIR_TASK_STAGE_BLACKLISTED,   /**< Pair was held by relay backoff */
 	PUNCH_PAIR_TASK_STAGE_SUPPRESSED,    /**< Pair was collected, but no command was emitted */
 	PUNCH_PAIR_TASK_STAGE_MISSING_METADATA, /**< Pair lacks usable NAT metadata */
+	PUNCH_PAIR_TASK_STAGE_METADATA_REQUESTED, /**< Pair lacks NAT metadata and peers were asked to refresh it */
 	PUNCH_PAIR_TASK_STAGE_ABORTED,       /**< In-flight task expired before a usable outcome was observed */
 	PUNCH_PAIR_TASK_STAGE_RESULT_ACCEPTED,  /**< Remote peer accepted a punch command */
 	PUNCH_PAIR_TASK_STAGE_RESULT_HANDSHAKE, /**< Remote peer sent a handshake for a punch command */
@@ -579,6 +580,7 @@ struct fastd_context {
 	uint64_t punch_task_manager_waiting; /**< Last task-manager run: pairs waiting for relay interval */
 	uint64_t punch_task_manager_in_flight; /**< Last task-manager run: pairs waiting for an in-flight task */
 	uint64_t punch_task_manager_missing_metadata; /**< Last task-manager run: pairs missing useful NAT metadata */
+	uint64_t punch_task_manager_metadata_requests; /**< Last task-manager run: missing-metadata refresh requests */
 	uint64_t punch_task_manager_blacklisted; /**< Last task-manager run: pairs held by relay backoff */
 	uint64_t punch_task_manager_suppressed; /**< Last task-manager run: collected pairs that emitted no commands */
 	uint64_t punch_task_manager_aborted; /**< Last task-manager run: in-flight tasks aborted during cleanup */
