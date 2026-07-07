@@ -30,8 +30,8 @@
 | `peer discovery` | `no` |
 | `punch control relay` | `no` |
 | `punch symmetric` | `yes` |
-| `punch max sockets` | `25` |
-| `punch max packets` | `256` |
+| `punch max sockets` | `84` |
+| `punch max packets` | `800` |
 | `peer limit` | unlimited |
 | `method` | 未配置时回退到 `null` 并打印警告 |
 
@@ -201,8 +201,8 @@ punch max packets <1-4096>;
 - 全局 `stun server`：配置用于 NAT 类型识别的 STUN server，可配置多条。fastd 会周期性探测本机公网 UDP endpoint、NAT 类型、端口范围和可预测 symmetric NAT 的端口步进，并在 `--status` 的 `NAT` 区块中展示；该功能需要编译时启用 `nat_detect` / libnice。配置了全局 STUN 后，已建立连接的 peer 之间还会通过 punch control 包交换 NAT 元数据。
 - `punch control relay yes`：允许一个已连接的可信节点在 peer 之间转发 punch control 包，只转发控制面 endpoint/NAT 信息，不转发隧道数据面。它可用于 A/B 都只与公网节点 C 建立普通连接、但 A/B 之间希望直接打洞的拓扑；A/B 仍需要互相配置 peer 公钥，通常配合全局 `stun server`、`transport udp|auto` 和 `hole-punch udp|auto`。
 - `punch symmetric yes|no`：控制是否启用 symmetric NAT 打洞策略。全局默认 `yes`，peer 可覆盖；开启后，easy-symmetric NAT 使用端口步进预测，普通 symmetric NAT 使用 `punch max sockets` 限制内的有界端口扫描。关闭后，fastd 只使用精确 endpoint / cone 风格打洞，不做 symmetric 端口预测或扫描。
-- `punch max sockets`：限制单次 punch 命令可使用的预测/探测 UDP socket 数，默认 `25`，最大 `256`。
-- `punch max packet` / `punch max packets`：限制每轮维护周期内 relay 节点转发的 punch control 包数量，默认 `256`，最大 `4096`；两个写法等价。
+- `punch max sockets`：限制单次 punch 命令可使用的预测/探测 UDP socket 数，默认 `84`，最大 `256`。hard-symmetric NAT 使用该上限；easy-symmetric 预测仍使用 25 端口窗口。
+- `punch max packet` / `punch max packets`：限制每轮维护周期内 relay 节点转发的 punch control 包数量，默认 `800`，最大 `4096`；两个写法等价。
 
 ### 状态 socket
 

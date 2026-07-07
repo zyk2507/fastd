@@ -215,9 +215,11 @@ static fastd_buffer_t *new_handshake(
 			      RECORD_LEN(method_list_len) + /* supported method name list */
 			      (compression_name ? RECORD_LEN(compression_len) : 0) + tail_space;
 
-	/* TODO: Make this a soft error */
-	if (buffer_space > MAX_HANDSHAKE_SIZE)
-		exit_bug("oversized handshake packet");
+	if (buffer_space > MAX_HANDSHAKE_SIZE) {
+		pr_error("oversized handshake packet");
+		free(method_list);
+		return NULL;
+	}
 
 	fastd_buffer_t *buffer = fastd_buffer_alloc(buffer_space, 0);
 
@@ -263,6 +265,9 @@ fastd_buffer_t *fastd_handshake_new_reply(
 	uint8_t type, uint16_t mtu, const fastd_method_info_t *method, const fastd_string_stack_t *methods,
 	size_t tail_space) {
 	fastd_buffer_t *buffer = new_handshake(type, mtu, method, methods, tail_space);
+	if (!buffer)
+		return NULL;
+
 	fastd_handshake_add_uint8(buffer, RECORD_REPLY_CODE, 0);
 	return buffer;
 }

@@ -26,7 +26,11 @@ typedef struct fastd_punch_test_pair_state {
 	bool due_b;
 	bool collected;
 	bool waiting;
+	bool in_flight;
+	bool backoff;
+	bool recent_demand;
 	bool missing_metadata;
+	fastd_timeout_t next_retry;
 } fastd_punch_test_pair_state_t;
 
 size_t fastd_punch_test_build_endpoint_candidates(
@@ -87,6 +91,8 @@ fastd_punch_test_endpoint_command_type(fastd_peer_t *dest, fastd_peer_t *subject
 bool fastd_punch_test_is_endpoint_command_type(uint8_t type);
 bool fastd_punch_test_nat_status_needs_refresh(const fastd_nat_status_t *status);
 fastd_punch_test_pair_state_t fastd_punch_test_pair_state(const fastd_peer_t *a, const fastd_peer_t *b);
+void fastd_punch_test_pair_runtime_mark_launched(const fastd_peer_t *a, const fastd_peer_t *b);
+void fastd_punch_test_task_manager_compact_pair_states(void);
 void fastd_punch_test_task_manager_record_launch_result(
 	size_t before_pair, size_t sent, size_t backoff_skipped, fastd_timeout_t backoff_next_retry);
 void fastd_punch_test_task_manager_record_remote_result(uint8_t result);

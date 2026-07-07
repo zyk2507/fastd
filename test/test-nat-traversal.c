@@ -1351,12 +1351,15 @@ static void test_punch_task_pair_state_requires_established_metadata_and_due(voi
 	assert_true(pair_state.due_b);
 	assert_true(pair_state.collected);
 	assert_false(pair_state.waiting);
+	assert_false(pair_state.in_flight);
+	assert_false(pair_state.backoff);
 	assert_false(pair_state.missing_metadata);
 
 	a.next_punch_relay = ctx.now + 1000;
 	pair_state = fastd_punch_test_pair_state(&a, &b);
 	assert_true(pair_state.waiting);
 	assert_false(pair_state.collected);
+	assert_int_equal(pair_state.next_retry, ctx.now + 1000);
 
 	a.punch_endpoint = (fastd_peer_address_t){};
 	pair_state = fastd_punch_test_pair_state(&a, &b);
@@ -1416,6 +1419,102 @@ static void test_punch_task_manager_launch_lifecycle_accounting(void **state UNU
 	ctx.punch_task_manager_blacklisted = old_blacklisted;
 	ctx.punch_task_manager_suppressed = old_suppressed;
 	ctx.punch_task_manager_next_retry = old_next_retry;
+}
+
+static void test_punch_pair_runtime_tracks_inflight_backoff_and_demand(void **state UNUSED) {
+	__typeof__(ctx.punch_pair_states) old_pair_states = ctx.punch_pair_states;
+	fastd_punch_pair_task_t old_pair_tasks[FASTD_PUNCH_PAIR_TASK_HISTORY];
+	memcpy(old_pair_tasks, ctx.punch_pair_tasks, sizeof(old_pair_tasks));
+	uint64_t old_next_pair_task_id = ctx.next_punch_pair_task_id;
+	size_t old_pair_task_pos = ctx.punch_pair_task_pos;
+	size_t old_pair_task_count = ctx.punch_pair_task_count;
+	uint64_t old_aborted = ctx.punch_task_manager_aborted;
+	int64_t old_now = ctx.now;
+
+	ctx.punch_pair_states = (__typeof__(ctx.punch_pair_states)){};
+	memset(ctx.punch_pair_tasks, 0, sizeof(ctx.punch_pair_tasks));
+	ctx.next_punch_pair_task_id = 0;
+	ctx.punch_pair_task_pos = 0;
+	ctx.punch_pair_task_count = 0;
+	ctx.punch_task_manager_aborted = 0;
+	ctx.now = 1000;
+
+	fastd_peer_t a = {
+		.id = 30,
+		.state = STATE_ESTABLISHED,
+		.punch_endpoint = addr4(0xcb007105, 41000),
+		.punch_timeout = ctx.now + 10000,
+		.next_punch_relay = ctx.now,
+	};
+	fastd_peer_t b = {
+		.id = 20,
+		.state = STATE_ESTABLISHED,
+		.punch_endpoint = addr4(0xcb007106, 42000),
+		.punch_timeout = ctx.now + 10000,
+		.next_punch_relay = ctx.now,
+	};
+
+	fastd_punch_test_pair_state_t pair_state = fastd_punch_test_pair_state(&a, &b);
+	assert_true(pair_state.collected);
+	assert_false(pair_state.in_flight);
+	assert_false(pair_state.backoff);
+	assert_false(pair_state.recent_demand);
+
+	fastd_punch_note_peer_pair_demand(&a, &b);
+	pair_state = fastd_punch_test_pair_state(&a, &b);
+	assert_true(pair_state.collected);
+	assert_true(pair_state.recent_demand);
+	assert_int_equal(VECTOR_LEN(ctx.punch_pair_states), 1);
+	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).peer_a_id, 20);
+	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).peer_b_id, 30);
+
+	fastd_punch_test_pair_runtime_mark_launched(&a, &b);
+	pair_state = fastd_punch_test_pair_state(&a, &b);
+	assert_true(pair_state.waiting);
+	assert_true(pair_state.in_flight);
+	assert_false(pair_state.collected);
+	assert_int_equal(pair_state.next_retry, ctx.now + 5000);
+
+	fastd_peer_address_t endpoint = addr4(0xcb007105, 41001);
+	fastd_peer_add_punch_relay_backoff(&a, &endpoint);
+	fastd_punch_test_task_manager_record_pair_result(&a, &b, TEST_PUNCH_RESULT_BUSY, &endpoint);
+	pair_state = fastd_punch_test_pair_state(&a, &b);
+	assert_true(pair_state.collected);
+	assert_true(pair_state.backoff);
+	assert_false(pair_state.in_flight);
+	assert_int_equal(pair_state.next_retry, ctx.now + FASTD_PUNCH_SUPPRESSION_TIME);
+	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).result_count, 1);
+	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).busy_count, 1);
+
+	ctx.now += FASTD_PUNCH_SUPPRESSION_TIME + 1;
+	a.next_punch_relay = ctx.now;
+	b.next_punch_relay = ctx.now;
+	a.punch_timeout = ctx.now + 10000;
+	b.punch_timeout = ctx.now + 10000;
+	pair_state = fastd_punch_test_pair_state(&a, &b);
+	assert_true(pair_state.collected);
+	assert_false(pair_state.backoff);
+
+	fastd_punch_test_pair_runtime_mark_launched(&a, &b);
+	ctx.now += 5001;
+	fastd_punch_test_task_manager_compact_pair_states();
+	assert_int_equal(ctx.punch_task_manager_aborted, 1);
+	assert_int_equal(ctx.punch_pair_task_count, 2);
+	size_t latest_pos =
+		(ctx.punch_pair_task_pos + FASTD_PUNCH_PAIR_TASK_HISTORY - 1) % FASTD_PUNCH_PAIR_TASK_HISTORY;
+	assert_int_equal(ctx.punch_pair_tasks[latest_pos].stage, PUNCH_PAIR_TASK_STAGE_ABORTED);
+	assert_int_equal(ctx.punch_pair_tasks[latest_pos].peer_a_id, 20);
+	assert_int_equal(ctx.punch_pair_tasks[latest_pos].peer_b_id, 30);
+
+	VECTOR_FREE(a.punch_relay_backoffs);
+	VECTOR_FREE(ctx.punch_pair_states);
+	ctx.punch_pair_states = old_pair_states;
+	memcpy(ctx.punch_pair_tasks, old_pair_tasks, sizeof(ctx.punch_pair_tasks));
+	ctx.next_punch_pair_task_id = old_next_pair_task_id;
+	ctx.punch_pair_task_pos = old_pair_task_pos;
+	ctx.punch_pair_task_count = old_pair_task_count;
+	ctx.punch_task_manager_aborted = old_aborted;
+	ctx.now = old_now;
 }
 
 static void test_punch_task_manager_outcome_accounting(void **state UNUSED) {
@@ -1820,9 +1919,12 @@ static void test_status_punch_exposes_udp_socket_pool(void **state UNUSED) {
 	uint64_t old_task_manager_collected = ctx.punch_task_manager_collected;
 	uint64_t old_task_manager_launched = ctx.punch_task_manager_launched;
 	uint64_t old_task_manager_waiting = ctx.punch_task_manager_waiting;
+	uint64_t old_task_manager_in_flight = ctx.punch_task_manager_in_flight;
 	uint64_t old_task_manager_missing_metadata = ctx.punch_task_manager_missing_metadata;
 	uint64_t old_task_manager_blacklisted = ctx.punch_task_manager_blacklisted;
 	uint64_t old_task_manager_suppressed = ctx.punch_task_manager_suppressed;
+	uint64_t old_task_manager_aborted = ctx.punch_task_manager_aborted;
+	uint64_t old_task_manager_recent_demand = ctx.punch_task_manager_recent_demand;
 	uint64_t old_task_manager_budget_exhausted = ctx.punch_task_manager_budget_exhausted;
 	fastd_timeout_t old_task_manager_next_retry = ctx.punch_task_manager_next_retry;
 	uint64_t old_task_manager_outcome_success = ctx.punch_task_manager_outcome_success;
@@ -1837,8 +1939,10 @@ static void test_status_punch_exposes_udp_socket_pool(void **state UNUSED) {
 	uint64_t old_next_pair_task_id = ctx.next_punch_pair_task_id;
 	size_t old_pair_task_pos = ctx.punch_pair_task_pos;
 	size_t old_pair_task_count = ctx.punch_pair_task_count;
+	__typeof__(ctx.punch_pair_states) old_pair_states = ctx.punch_pair_states;
 	ctx.udp_punch_socks = (__typeof__(ctx.udp_punch_socks)){};
 	ctx.peers = (__typeof__(ctx.peers)){};
+	ctx.punch_pair_states = (__typeof__(ctx.punch_pair_states)){};
 	memset(ctx.punch_pair_tasks, 0, sizeof(ctx.punch_pair_tasks));
 	ctx.next_punch_pair_task_id = 200;
 	ctx.punch_pair_task_pos = 0;
@@ -1892,9 +1996,12 @@ static void test_status_punch_exposes_udp_socket_pool(void **state UNUSED) {
 	ctx.punch_task_manager_collected = 3;
 	ctx.punch_task_manager_launched = 2;
 	ctx.punch_task_manager_waiting = 1;
+	ctx.punch_task_manager_in_flight = 15;
 	ctx.punch_task_manager_missing_metadata = 5;
 	ctx.punch_task_manager_blacklisted = 6;
 	ctx.punch_task_manager_suppressed = 7;
+	ctx.punch_task_manager_aborted = 16;
+	ctx.punch_task_manager_recent_demand = 17;
 	ctx.punch_task_manager_budget_exhausted = 1;
 	ctx.punch_task_manager_next_retry = ctx.now + 12345;
 	ctx.punch_task_manager_outcome_success = 8;
@@ -1962,9 +2069,14 @@ static void test_status_punch_exposes_udp_socket_pool(void **state UNUSED) {
 	assert_int_equal(json_get_int_required(manager, "collected"), 3);
 	assert_int_equal(json_get_int_required(manager, "launched"), 2);
 	assert_int_equal(json_get_int_required(manager, "waiting"), 1);
+	assert_int_equal(json_get_int_required(manager, "in_flight"), 15);
 	assert_int_equal(json_get_int_required(manager, "missing_metadata"), 5);
 	assert_int_equal(json_get_int_required(manager, "blacklisted"), 6);
 	assert_int_equal(json_get_int_required(manager, "suppressed"), 7);
+	assert_int_equal(json_get_int_required(manager, "aborted"), 16);
+	assert_int_equal(json_get_int_required(manager, "recent_demand"), 17);
+	assert_int_equal(json_get_int_required(manager, "runtime_states"), 1);
+	assert_int_equal(json_get_int_required(manager, "runtime_limit"), FASTD_PUNCH_PAIR_STATE_LIMIT);
 	assert_int_equal(json_get_int_required(manager, "budget_exhausted"), 1);
 	assert_int_equal(json_get_int_required(manager, "next_retry_min_ms"), 12345);
 	assert_int_equal(json_get_int_required(manager, "outcome_success"), 8);
@@ -2035,18 +2147,23 @@ static void test_status_punch_exposes_udp_socket_pool(void **state UNUSED) {
 	json_object_put(punch);
 	VECTOR_FREE(ctx.udp_punch_socks);
 	VECTOR_FREE(ctx.peers);
+	VECTOR_FREE(ctx.punch_pair_states);
 	VECTOR_FREE(task_peer.punch_relay_backoffs);
 	ctx.udp_punch_socks = old_udp_punch_socks;
 	ctx.peers = old_peers;
+	ctx.punch_pair_states = old_pair_states;
 	conf.peer_group = old_peer_group;
 	ctx.punch_task_manager_runs = old_task_manager_runs;
 	ctx.punch_task_manager_pairs = old_task_manager_pairs;
 	ctx.punch_task_manager_collected = old_task_manager_collected;
 	ctx.punch_task_manager_launched = old_task_manager_launched;
 	ctx.punch_task_manager_waiting = old_task_manager_waiting;
+	ctx.punch_task_manager_in_flight = old_task_manager_in_flight;
 	ctx.punch_task_manager_missing_metadata = old_task_manager_missing_metadata;
 	ctx.punch_task_manager_blacklisted = old_task_manager_blacklisted;
 	ctx.punch_task_manager_suppressed = old_task_manager_suppressed;
+	ctx.punch_task_manager_aborted = old_task_manager_aborted;
+	ctx.punch_task_manager_recent_demand = old_task_manager_recent_demand;
 	ctx.punch_task_manager_budget_exhausted = old_task_manager_budget_exhausted;
 	ctx.punch_task_manager_next_retry = old_task_manager_next_retry;
 	ctx.punch_task_manager_outcome_success = old_task_manager_outcome_success;
@@ -2634,10 +2751,11 @@ int main(void) {
 		cmocka_unit_test(test_peer_punch_symmetric_inherits_and_overrides),
 		cmocka_unit_test(test_nat_traversal_inherits_and_overrides),
 		cmocka_unit_test(test_punch_nat_refresh_policy),
-		cmocka_unit_test(test_punch_observed_udp_metadata_fills_without_stun),
-		cmocka_unit_test(test_punch_task_pair_state_requires_established_metadata_and_due),
-		cmocka_unit_test(test_punch_task_manager_launch_lifecycle_accounting),
-		cmocka_unit_test(test_punch_task_manager_outcome_accounting),
+			cmocka_unit_test(test_punch_observed_udp_metadata_fills_without_stun),
+			cmocka_unit_test(test_punch_task_pair_state_requires_established_metadata_and_due),
+			cmocka_unit_test(test_punch_task_manager_launch_lifecycle_accounting),
+			cmocka_unit_test(test_punch_pair_runtime_tracks_inflight_backoff_and_demand),
+			cmocka_unit_test(test_punch_task_manager_outcome_accounting),
 		cmocka_unit_test(test_punch_pair_task_history_is_bounded_and_ordered),
 		cmocka_unit_test(test_punch_pair_task_history_records_remote_results),
 #ifdef WITH_STATUS_SOCKET

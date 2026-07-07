@@ -444,15 +444,20 @@ struct fastd_config {
 /** Maximum number of recent peer-pair punch tasks kept for status/debugging */
 #define FASTD_PUNCH_PAIR_TASK_HISTORY 64
 
+/** Maximum number of peer-pair punch runtime states kept by the task manager */
+#define FASTD_PUNCH_PAIR_STATE_LIMIT 1024
+
 /** Lifecycle stage for one collected peer-pair punch task */
 typedef enum fastd_punch_pair_task_stage {
 	PUNCH_PAIR_TASK_STAGE_NONE = 0,      /**< No peer-pair task has been recorded */
 	PUNCH_PAIR_TASK_STAGE_COLLECTED,     /**< Pair was eligible for punch command generation */
 	PUNCH_PAIR_TASK_STAGE_LAUNCHED,      /**< Pair emitted at least one punch command */
 	PUNCH_PAIR_TASK_STAGE_WAITING,       /**< Pair has metadata, but is waiting for the relay interval */
+	PUNCH_PAIR_TASK_STAGE_IN_FLIGHT,     /**< Pair already has a punch task inside its outcome window */
 	PUNCH_PAIR_TASK_STAGE_BLACKLISTED,   /**< Pair was held by relay backoff */
 	PUNCH_PAIR_TASK_STAGE_SUPPRESSED,    /**< Pair was collected, but no command was emitted */
 	PUNCH_PAIR_TASK_STAGE_MISSING_METADATA, /**< Pair lacks usable NAT metadata */
+	PUNCH_PAIR_TASK_STAGE_ABORTED,       /**< In-flight task expired before a usable outcome was observed */
 	PUNCH_PAIR_TASK_STAGE_RESULT_ACCEPTED,  /**< Remote peer accepted a punch command */
 	PUNCH_PAIR_TASK_STAGE_RESULT_HANDSHAKE, /**< Remote peer sent a handshake for a punch command */
 	PUNCH_PAIR_TASK_STAGE_RESULT_SUPPRESSED, /**< Remote peer suppressed a punch command */
@@ -474,6 +479,20 @@ typedef struct fastd_punch_pair_task {
 	uint16_t backoff_skipped;            /**< Candidate commands skipped by relay backoff */
 	bool budget_exhausted;               /**< true if the global packet budget stopped this run */
 } fastd_punch_pair_task_t;
+
+/** Runtime state for one peer pair managed by punch-control task scheduling */
+typedef struct fastd_punch_pair_runtime {
+	uint64_t peer_a_id;                    /**< Lower peer ID in the pair */
+	uint64_t peer_b_id;                    /**< Higher peer ID in the pair */
+	fastd_timeout_t updated;               /**< Last time this runtime entry changed */
+	fastd_timeout_t in_flight_until;       /**< Outcome window for a launched task */
+	fastd_timeout_t backoff_until;         /**< Pair-level retry suppression timeout */
+	fastd_timeout_t recent_demand_until;   /**< Recent forwarded data demand window */
+	uint16_t launch_count;                 /**< Number of task launches tracked for this pair */
+	uint16_t abort_count;                  /**< Number of in-flight windows that expired */
+	uint16_t result_count;                 /**< Number of remote command results observed */
+	uint16_t busy_count;                   /**< Number of busy/suppressed/no-peer results observed */
+} fastd_punch_pair_runtime_t;
 
 
 /** The dynamic state of \em fastd */
@@ -538,9 +557,12 @@ struct fastd_context {
 	uint64_t punch_task_manager_collected; /**< Last task-manager run: pairs with a launchable punch direction */
 	uint64_t punch_task_manager_launched; /**< Last task-manager run: pairs that emitted punch commands */
 	uint64_t punch_task_manager_waiting; /**< Last task-manager run: pairs waiting for relay interval */
+	uint64_t punch_task_manager_in_flight; /**< Last task-manager run: pairs waiting for an in-flight task */
 	uint64_t punch_task_manager_missing_metadata; /**< Last task-manager run: pairs missing useful NAT metadata */
 	uint64_t punch_task_manager_blacklisted; /**< Last task-manager run: pairs held by relay backoff */
 	uint64_t punch_task_manager_suppressed; /**< Last task-manager run: collected pairs that emitted no commands */
+	uint64_t punch_task_manager_aborted; /**< Last task-manager run: in-flight tasks aborted during cleanup */
+	uint64_t punch_task_manager_recent_demand; /**< Last task-manager run: pairs with recent forwarded traffic demand */
 	uint64_t punch_task_manager_budget_exhausted; /**< Last task-manager run: packet budget was exhausted */
 	fastd_timeout_t punch_task_manager_next_retry; /**< Last task-manager run: earliest future retry time */
 	uint64_t punch_task_manager_outcome_success; /**< Direct paths established from punch-control candidates */
@@ -555,6 +577,7 @@ struct fastd_context {
 	fastd_punch_pair_task_t punch_pair_tasks[FASTD_PUNCH_PAIR_TASK_HISTORY]; /**< Recent peer-pair task snapshots */
 	size_t punch_pair_task_pos;       /**< Next ring-buffer slot for peer-pair task snapshots */
 	size_t punch_pair_task_count;     /**< Number of valid peer-pair task snapshots in the ring buffer */
+	VECTOR(fastd_punch_pair_runtime_t) punch_pair_states; /**< Active punch-control peer-pair runtime states */
 	uint32_t next_punch_listener_id;  /**< Monotonic ID for reusable public punch listeners */
 
 	bool has_floating; /**< Specifies if any of the configured peers have floating remotes */
@@ -669,6 +692,8 @@ void fastd_socket_free_deferred(void);
 void fastd_socket_free_dynamic(fastd_socket_t *sock);
 void fastd_tcp_maintenance(void);
 void fastd_tcp_cleanup(void);
+void fastd_punch_note_peer_pair_demand(const fastd_peer_t *a, const fastd_peer_t *b);
+void fastd_punch_cleanup(void);
 
 void fastd_resolve_peer(fastd_peer_t *peer, fastd_remote_t *remote);
 

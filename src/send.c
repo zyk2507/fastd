@@ -238,6 +238,8 @@ static inline bool send_data_tap_single(fastd_buffer_t *buffer, fastd_peer_t *so
 
 	if (!fastd_peer_is_established(dest) && dest->direct_relay && fastd_peer_is_established(dest->direct_relay))
 		dest = dest->direct_relay;
+	else if (source && dest)
+		fastd_punch_note_peer_pair_demand(source, dest);
 
 	conf.protocol->send(dest, buffer);
 	return true;

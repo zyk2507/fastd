@@ -498,6 +498,8 @@ static void respond_handshake(
 	fastd_buffer_t *buffer = fastd_handshake_new_reply(
 		2, fastd_peer_get_mtu(peer), NULL, *fastd_peer_group_lookup_peer(peer, methods),
 		RECORD_LEN(1) + 4 * RECORD_LEN(PUBLICKEYBYTES) + RECORD_LEN(HASHBYTES));
+	if (!buffer)
+		return;
 
 	fastd_handshake_add_transport(buffer, sock);
 	fastd_handshake_add(buffer, RECORD_SENDER_KEY, PUBLICKEYBYTES, &conf.protocol_config->key.public);
@@ -556,6 +558,8 @@ static void finish_handshake(
 	fastd_buffer_t *buffer = fastd_handshake_new_reply(
 		3, fastd_peer_get_mtu(peer), method, NULL,
 		RECORD_LEN(1) + 4 * RECORD_LEN(PUBLICKEYBYTES) + RECORD_LEN(HASHBYTES));
+	if (!buffer)
+		return;
 
 	fastd_handshake_add_transport(buffer, sock);
 	fastd_handshake_add(buffer, RECORD_SENDER_KEY, PUBLICKEYBYTES, &conf.protocol_config->key.public);
@@ -683,6 +687,8 @@ void fastd_protocol_ec25519_fhmqvc_handshake_init(
 
 	fastd_buffer_t *buffer = fastd_handshake_new_init(
 		RECORD_LEN(1) + 3 * RECORD_LEN(PUBLICKEYBYTES) /* sender key, recipient key, handshake key */);
+	if (!buffer)
+		return;
 
 	fastd_handshake_add_transport(buffer, sock);
 	fastd_handshake_add(buffer, RECORD_SENDER_KEY, PUBLICKEYBYTES, &conf.protocol_config->key.public);

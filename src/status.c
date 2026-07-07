@@ -469,12 +469,13 @@ static void print_punch_table(json_object *punch) {
 	}
 
 	json_object *task_manager = get_object_member(punch, "task_manager");
-	if (task_manager) {
-		static const char *const names[] = {
-			"runs",		"pairs",	"collected",	"launched",
-			"waiting",	"blacklisted",	"suppressed",	"missing_metadata",
-			"history_count", "outcome_success", "outcome_failed", "outcome_busy",
-		};
+		if (task_manager) {
+			static const char *const names[] = {
+				"runs",		"pairs",	"collected",	"launched",
+				"waiting",	"in_flight",	"blacklisted",	"suppressed",
+				"aborted",	"recent_demand", "missing_metadata", "runtime_states",
+				"history_count", "outcome_success", "outcome_failed", "outcome_busy",
+			};
 
 		size_t i;
 		for (i = 0; i < array_size(names); i++) {
@@ -890,17 +891,23 @@ static const char *punch_pair_task_stage_name(fastd_punch_pair_task_stage_t stag
 	case PUNCH_PAIR_TASK_STAGE_LAUNCHED:
 		return "launched";
 
-	case PUNCH_PAIR_TASK_STAGE_WAITING:
-		return "waiting";
+		case PUNCH_PAIR_TASK_STAGE_WAITING:
+			return "waiting";
 
-	case PUNCH_PAIR_TASK_STAGE_BLACKLISTED:
-		return "blacklisted";
+		case PUNCH_PAIR_TASK_STAGE_IN_FLIGHT:
+			return "in-flight";
+
+		case PUNCH_PAIR_TASK_STAGE_BLACKLISTED:
+			return "blacklisted";
 
 	case PUNCH_PAIR_TASK_STAGE_SUPPRESSED:
 		return "suppressed";
 
-	case PUNCH_PAIR_TASK_STAGE_MISSING_METADATA:
-		return "missing-metadata";
+		case PUNCH_PAIR_TASK_STAGE_MISSING_METADATA:
+			return "missing-metadata";
+
+		case PUNCH_PAIR_TASK_STAGE_ABORTED:
+			return "aborted";
 
 	case PUNCH_PAIR_TASK_STAGE_RESULT_ACCEPTED:
 		return "result-accepted";
@@ -1564,9 +1571,14 @@ static json_object *dump_punch_task_manager(void) {
 	json_object_object_add(ret, "collected", json_object_new_int64(ctx.punch_task_manager_collected));
 	json_object_object_add(ret, "launched", json_object_new_int64(ctx.punch_task_manager_launched));
 	json_object_object_add(ret, "waiting", json_object_new_int64(ctx.punch_task_manager_waiting));
+	json_object_object_add(ret, "in_flight", json_object_new_int64(ctx.punch_task_manager_in_flight));
 	json_object_object_add(ret, "missing_metadata", json_object_new_int64(ctx.punch_task_manager_missing_metadata));
 	json_object_object_add(ret, "blacklisted", json_object_new_int64(ctx.punch_task_manager_blacklisted));
 	json_object_object_add(ret, "suppressed", json_object_new_int64(ctx.punch_task_manager_suppressed));
+	json_object_object_add(ret, "aborted", json_object_new_int64(ctx.punch_task_manager_aborted));
+	json_object_object_add(ret, "recent_demand", json_object_new_int64(ctx.punch_task_manager_recent_demand));
+	json_object_object_add(ret, "runtime_states", json_object_new_int64(VECTOR_LEN(ctx.punch_pair_states)));
+	json_object_object_add(ret, "runtime_limit", json_object_new_int64(FASTD_PUNCH_PAIR_STATE_LIMIT));
 	json_object_object_add(ret, "budget_exhausted", json_object_new_int64(ctx.punch_task_manager_budget_exhausted));
 	json_object_object_add(
 		ret, "next_retry_min_ms",
