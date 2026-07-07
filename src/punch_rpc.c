@@ -799,6 +799,13 @@ void fastd_punch_note_peer_pair_demand(const fastd_peer_t *a, const fastd_peer_t
 		runtime->served_demand_seq = 0;
 	}
 	runtime->updated = ctx.now;
+
+	fastd_timeout_t maintenance_timeout = fastd_task_timeout(&ctx.next_maintenance);
+	if (maintenance_timeout == FASTD_TIMEOUT_INV || maintenance_timeout > ctx.now) {
+		if (fastd_task_scheduled(&ctx.next_maintenance))
+			fastd_task_unschedule(&ctx.next_maintenance);
+		fastd_task_schedule(&ctx.next_maintenance, TASK_TYPE_MAINTENANCE, ctx.now);
+	}
 }
 
 /** Marks a pair-level punch task as launched */

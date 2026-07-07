@@ -1551,6 +1551,8 @@ static void test_punch_task_manager_launch_lifecycle_accounting(void **state UNU
 
 static void test_punch_pair_runtime_tracks_inflight_backoff_and_demand(void **state UNUSED) {
 	__typeof__(ctx.punch_pair_states) old_pair_states = ctx.punch_pair_states;
+	fastd_task_t old_next_maintenance = ctx.next_maintenance;
+	fastd_pqueue_t *old_task_queue = ctx.task_queue;
 	fastd_punch_pair_task_t old_pair_tasks[FASTD_PUNCH_PAIR_TASK_HISTORY];
 	memcpy(old_pair_tasks, ctx.punch_pair_tasks, sizeof(old_pair_tasks));
 	uint64_t old_next_pair_task_id = ctx.next_punch_pair_task_id;
@@ -1560,6 +1562,8 @@ static void test_punch_pair_runtime_tracks_inflight_backoff_and_demand(void **st
 	int64_t old_now = ctx.now;
 
 	ctx.punch_pair_states = (__typeof__(ctx.punch_pair_states)){};
+	ctx.next_maintenance = (fastd_task_t){};
+	ctx.task_queue = NULL;
 	memset(ctx.punch_pair_tasks, 0, sizeof(ctx.punch_pair_tasks));
 	ctx.next_punch_pair_task_id = 0;
 	ctx.punch_pair_task_pos = 0;
@@ -1600,6 +1604,8 @@ static void test_punch_pair_runtime_tracks_inflight_backoff_and_demand(void **st
 	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).peer_b_id, 30);
 	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).demand_seq, 1);
 	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).served_demand_seq, 0);
+	assert_int_equal(fastd_task_timeout(&ctx.next_maintenance), ctx.now);
+	assert_ptr_equal(ctx.task_queue, &ctx.next_maintenance.entry);
 
 	fastd_punch_test_pair_runtime_mark_launched(&a, &b);
 	pair_state = fastd_punch_test_pair_state(&a, &b);
@@ -1657,9 +1663,17 @@ static void test_punch_pair_runtime_tracks_inflight_backoff_and_demand(void **st
 	assert_int_equal(ctx.punch_pair_tasks[latest_pos].peer_a_id, 20);
 	assert_int_equal(ctx.punch_pair_tasks[latest_pos].peer_b_id, 30);
 
+	fastd_task_unschedule(&ctx.next_maintenance);
+	fastd_task_schedule(&ctx.next_maintenance, TASK_TYPE_MAINTENANCE, ctx.now - 1);
+	fastd_punch_note_peer_pair_demand(&a, &b);
+	assert_int_equal(fastd_task_timeout(&ctx.next_maintenance), ctx.now - 1);
+
 	VECTOR_FREE(a.punch_relay_backoffs);
+	fastd_task_unschedule(&ctx.next_maintenance);
 	VECTOR_FREE(ctx.punch_pair_states);
 	ctx.punch_pair_states = old_pair_states;
+	ctx.next_maintenance = old_next_maintenance;
+	ctx.task_queue = old_task_queue;
 	memcpy(ctx.punch_pair_tasks, old_pair_tasks, sizeof(ctx.punch_pair_tasks));
 	ctx.next_punch_pair_task_id = old_next_pair_task_id;
 	ctx.punch_pair_task_pos = old_pair_task_pos;
