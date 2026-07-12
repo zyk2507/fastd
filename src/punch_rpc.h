@@ -27,6 +27,7 @@ typedef struct fastd_punch_test_pair_state {
 	bool collected;
 	bool waiting;
 	bool demand_waiting;
+	bool settled;
 	bool in_flight;
 	bool backoff;
 	bool recent_demand;

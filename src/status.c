@@ -979,6 +979,9 @@ static const char *punch_pair_task_stage_name(fastd_punch_pair_task_stage_t stag
 	case PUNCH_PAIR_TASK_STAGE_WAITING_DEMAND:
 		return "waiting-demand";
 
+	case PUNCH_PAIR_TASK_STAGE_SETTLED:
+		return "settled";
+
 	case PUNCH_PAIR_TASK_STAGE_IN_FLIGHT:
 		return "in-flight";
 
@@ -1804,7 +1807,9 @@ static json_object *dump_punch_pair_runtime(const fastd_punch_pair_runtime_t *ru
 	bool backoff = punch_runtime_timeout_active(runtime->backoff_until);
 	bool recent_demand = punch_runtime_timeout_active(runtime->recent_demand_until);
 	bool pending_demand = recent_demand && runtime->demand_seq != runtime->served_demand_seq;
-	bool demand_waiting = !in_flight && !backoff && !pending_demand && (runtime->abort_count || runtime->failure_count);
+	bool settled = runtime->success_count && !in_flight && !backoff && !pending_demand;
+	bool demand_waiting = !settled && !in_flight && !backoff && !pending_demand &&
+			      (runtime->abort_count || runtime->failure_count);
 	const char *state = "idle";
 	const char *reason = "no-active-demand";
 
@@ -1820,6 +1825,9 @@ static json_object *dump_punch_pair_runtime(const fastd_punch_pair_runtime_t *ru
 	} else if (demand_waiting) {
 		state = "demand-waiting";
 		reason = "waiting-for-new-demand";
+	} else if (settled) {
+		state = "settled";
+		reason = "punch-result-observed";
 	} else if (recent_demand) {
 		state = "recent";
 		reason = "demand-served";
@@ -1848,6 +1856,7 @@ static json_object *dump_punch_pair_runtime(const fastd_punch_pair_runtime_t *ru
 	json_object_object_add(ret, "in_flight", json_object_new_boolean(in_flight));
 	json_object_object_add(ret, "backoff", json_object_new_boolean(backoff));
 	json_object_object_add(ret, "demand_waiting", json_object_new_boolean(demand_waiting));
+	json_object_object_add(ret, "settled", json_object_new_boolean(settled));
 	json_object_object_add(ret, "recent_demand", json_object_new_boolean(recent_demand));
 	json_object_object_add(ret, "pending_demand", json_object_new_boolean(pending_demand));
 	json_object_object_add(ret, "in_flight_ms", wrap_active_runtime_timeout(runtime->in_flight_until));
@@ -1858,6 +1867,7 @@ static json_object *dump_punch_pair_runtime(const fastd_punch_pair_runtime_t *ru
 	json_object_object_add(ret, "launch_count", json_object_new_int(runtime->launch_count));
 	json_object_object_add(ret, "abort_count", json_object_new_int(runtime->abort_count));
 	json_object_object_add(ret, "result_count", json_object_new_int(runtime->result_count));
+	json_object_object_add(ret, "success_count", json_object_new_int(runtime->success_count));
 	json_object_object_add(ret, "failure_count", json_object_new_int(runtime->failure_count));
 	json_object_object_add(ret, "busy_count", json_object_new_int(runtime->busy_count));
 	return ret;

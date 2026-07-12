@@ -459,6 +459,7 @@ typedef enum fastd_punch_pair_task_stage {
 	PUNCH_PAIR_TASK_STAGE_LAUNCHED,      /**< Pair emitted at least one punch command */
 	PUNCH_PAIR_TASK_STAGE_WAITING,       /**< Pair has metadata, but is waiting for the relay interval */
 	PUNCH_PAIR_TASK_STAGE_WAITING_DEMAND, /**< Pair had a failed attempt and is waiting for new traffic demand */
+	PUNCH_PAIR_TASK_STAGE_SETTLED,       /**< Pair has a remote-busy path and waits for new traffic demand */
 	PUNCH_PAIR_TASK_STAGE_IN_FLIGHT,     /**< Pair already has a punch task inside its outcome window */
 	PUNCH_PAIR_TASK_STAGE_BLACKLISTED,   /**< Pair was held by relay backoff */
 	PUNCH_PAIR_TASK_STAGE_SUPPRESSED,    /**< Pair was collected, but no command was emitted */
@@ -500,6 +501,7 @@ typedef struct fastd_punch_pair_runtime {
 	uint16_t launch_count;                 /**< Number of task launches tracked for this pair */
 	uint16_t abort_count;                  /**< Number of in-flight windows that expired */
 	uint16_t result_count;                 /**< Number of remote command results observed */
+	uint16_t success_count;                /**< Number of remote-busy settled results observed */
 	uint16_t failure_count;                /**< Number of suppressed/no-peer relay failures observed */
 	uint16_t busy_count;                   /**< Number of remote-busy results observed */
 } fastd_punch_pair_runtime_t;

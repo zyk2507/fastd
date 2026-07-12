@@ -1653,7 +1653,7 @@ static void test_punch_result_backoff_policy(void **state UNUSED) {
 	assert_false(fastd_punch_test_result_causes_relay_backoff(TEST_PUNCH_RESULT_HANDSHAKE));
 	assert_true(fastd_punch_test_result_causes_relay_backoff(TEST_PUNCH_RESULT_SUPPRESSED));
 	assert_true(fastd_punch_test_result_causes_relay_backoff(TEST_PUNCH_RESULT_NO_PEER));
-	assert_true(fastd_punch_test_result_causes_relay_backoff(TEST_PUNCH_RESULT_BUSY));
+	assert_false(fastd_punch_test_result_causes_relay_backoff(TEST_PUNCH_RESULT_BUSY));
 }
 
 static void test_punch_relay_backoff_expires(void **state UNUSED) {
@@ -2466,17 +2466,33 @@ static void test_punch_pair_runtime_tracks_inflight_backoff_and_demand(void **st
 	assert_true(pair_state.waiting);
 	assert_true(pair_state.in_flight);
 	assert_int_equal(pair_state.next_retry, ctx.now + FASTD_HOLE_PUNCH_TIMEOUT);
+	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).success_count, 0);
+
+	fastd_punch_test_task_manager_record_pair_result(&a, &b, TEST_PUNCH_RESULT_BUSY, &endpoint);
+	pair_state = fastd_punch_test_pair_state(&a, &b);
+	assert_true(pair_state.recent_demand);
+	assert_false(pair_state.pending_demand);
+	assert_false(pair_state.in_flight);
+	assert_false(pair_state.backoff);
+	assert_true(pair_state.waiting);
+	assert_true(pair_state.settled);
+	assert_int_equal(pair_state.next_retry, FASTD_TIMEOUT_INV);
+	assert_int_equal(ctx.punch_task_manager_aborted, 0);
+	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).success_count, 1);
+	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).busy_count, 1);
 
 	fastd_punch_note_peer_pair_demand(&a, &b);
 	pair_state = fastd_punch_test_pair_state(&a, &b);
 	assert_true(pair_state.recent_demand);
 	assert_true(pair_state.pending_demand);
-	assert_false(pair_state.collected);
-	assert_true(pair_state.in_flight);
-	assert_int_equal(pair_state.next_retry, ctx.now + FASTD_HOLE_PUNCH_TIMEOUT);
+	assert_true(pair_state.collected);
+	assert_false(pair_state.in_flight);
+	assert_false(pair_state.settled);
 	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).demand_seq, 2);
 	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).served_demand_seq, 1);
 
+	fastd_punch_test_pair_runtime_mark_launched(&a, &b);
+	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).success_count, 0);
 	fastd_peer_add_punch_relay_backoff(&a, &endpoint);
 	fastd_punch_test_task_manager_record_pair_result(&a, &b, TEST_PUNCH_RESULT_SUPPRESSED, &endpoint);
 	pair_state = fastd_punch_test_pair_state(&a, &b);
@@ -2485,9 +2501,10 @@ static void test_punch_pair_runtime_tracks_inflight_backoff_and_demand(void **st
 	assert_true(pair_state.backoff);
 	assert_false(pair_state.in_flight);
 	assert_int_equal(pair_state.next_retry, ctx.now + FASTD_PUNCH_SUPPRESSION_TIME);
-	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).result_count, 2);
+	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).result_count, 3);
+	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).success_count, 0);
 	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).failure_count, 1);
-	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).busy_count, 0);
+	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).busy_count, 1);
 
 	ctx.now += FASTD_PUNCH_SUPPRESSION_TIME + 1;
 	a.next_punch_relay = ctx.now;
@@ -2511,7 +2528,7 @@ static void test_punch_pair_runtime_tracks_inflight_backoff_and_demand(void **st
 	ctx.now += 5001;
 	fastd_punch_test_task_manager_compact_pair_states();
 	assert_int_equal(ctx.punch_task_manager_aborted, 1);
-	assert_int_equal(ctx.punch_pair_task_count, 3);
+	assert_int_equal(ctx.punch_pair_task_count, 4);
 	size_t latest_pos =
 		(ctx.punch_pair_task_pos + FASTD_PUNCH_PAIR_TASK_HISTORY - 1) % FASTD_PUNCH_PAIR_TASK_HISTORY;
 	assert_int_equal(ctx.punch_pair_tasks[latest_pos].stage, PUNCH_PAIR_TASK_STAGE_ABORTED);
@@ -2643,6 +2660,35 @@ static void test_punch_task_manager_waits_for_new_demand_after_failed_pair(void 
 	assert_int_equal(test_control_send_types[0], TEST_PUNCH_SEND_CONE);
 	assert_int_equal(VECTOR_LEN(ctx.punch_pair_states), 1);
 
+	fastd_peer_address_t accepted_endpoint = addr4(0xcb007105, 41001);
+	fastd_punch_test_task_manager_record_pair_result(&a, &b, TEST_PUNCH_RESULT_BUSY, &accepted_endpoint);
+	ctx.now += FASTD_HOLE_PUNCH_TIMEOUT + 1;
+	a.next_punch_relay = ctx.now;
+	b.next_punch_relay = ctx.now;
+	test_reset_control_sends();
+
+	fastd_punch_test_relay_peer_endpoints();
+	assert_int_equal(ctx.punch_task_manager_pairs, 1);
+	assert_int_equal(ctx.punch_task_manager_collected, 0);
+	assert_int_equal(ctx.punch_task_manager_launched, 0);
+	assert_int_equal(ctx.punch_task_manager_waiting, 1);
+	assert_int_equal(ctx.punch_task_manager_demand_waiting, 0);
+	assert_int_equal(ctx.punch_task_manager_next_retry, FASTD_TIMEOUT_INV);
+	assert_int_equal(test_control_send_count, 0);
+	size_t latest_pos =
+		(ctx.punch_pair_task_pos + FASTD_PUNCH_PAIR_TASK_HISTORY - 1) % FASTD_PUNCH_PAIR_TASK_HISTORY;
+	assert_int_equal(ctx.punch_pair_tasks[latest_pos].stage, PUNCH_PAIR_TASK_STAGE_SETTLED);
+	assert_int_equal(ctx.punch_pair_tasks[latest_pos].next_retry, FASTD_TIMEOUT_INV);
+
+	fastd_punch_note_peer_pair_demand(&a, &b);
+	test_reset_control_sends();
+	fastd_punch_test_relay_peer_endpoints();
+	assert_int_equal(ctx.punch_task_manager_pairs, 1);
+	assert_int_equal(ctx.punch_task_manager_collected, 1);
+	assert_int_equal(ctx.punch_task_manager_launched, 1);
+	assert_int_equal(ctx.punch_task_manager_waiting, 0);
+	assert_true(test_control_send_count > 0);
+
 	fastd_peer_address_t failed_endpoint = addr4(0xcb007105, 41000);
 	fastd_punch_test_task_manager_record_pair_result(&a, &b, TEST_PUNCH_RESULT_SUPPRESSED, &failed_endpoint);
 	ctx.now += FASTD_PUNCH_SUPPRESSION_TIME + 1;
@@ -2658,7 +2704,7 @@ static void test_punch_task_manager_waits_for_new_demand_after_failed_pair(void 
 	assert_int_equal(ctx.punch_task_manager_demand_waiting, 1);
 	assert_int_equal(ctx.punch_task_manager_next_retry, FASTD_TIMEOUT_INV);
 	assert_int_equal(test_control_send_count, 0);
-	size_t latest_pos =
+	latest_pos =
 		(ctx.punch_pair_task_pos + FASTD_PUNCH_PAIR_TASK_HISTORY - 1) % FASTD_PUNCH_PAIR_TASK_HISTORY;
 	assert_int_equal(ctx.punch_pair_tasks[latest_pos].stage, PUNCH_PAIR_TASK_STAGE_WAITING_DEMAND);
 	assert_int_equal(ctx.punch_pair_tasks[latest_pos].next_retry, FASTD_TIMEOUT_INV);
@@ -4509,8 +4555,8 @@ static void test_punch_pair_task_history_records_remote_results(void **state UNU
 	latest = &ctx.punch_pair_tasks[latest_pos];
 	assert_int_equal(ctx.punch_pair_task_count, 2);
 	assert_int_equal(latest->stage, PUNCH_PAIR_TASK_STAGE_RESULT_BUSY);
-	assert_int_equal(latest->backoff_skipped, 1);
-	assert_int_equal(latest->next_retry, ctx.now + FASTD_PUNCH_SUPPRESSION_TIME);
+	assert_int_equal(latest->backoff_skipped, 0);
+	assert_int_equal(latest->next_retry, FASTD_TIMEOUT_INV);
 
 	VECTOR_FREE(sender.punch_relay_backoffs);
 	memcpy(ctx.punch_pair_tasks, old_pair_tasks, sizeof(old_pair_tasks));
@@ -5136,6 +5182,7 @@ static void test_status_punch_exposes_udp_socket_pool(void **state UNUSED) {
 	assert_true(json_get_bool_required(runtime_state, "in_flight"));
 	assert_true(json_get_bool_required(runtime_state, "backoff"));
 	assert_false(json_get_bool_required(runtime_state, "demand_waiting"));
+	assert_false(json_get_bool_required(runtime_state, "settled"));
 	assert_true(json_get_bool_required(runtime_state, "recent_demand"));
 	assert_true(json_get_bool_required(runtime_state, "pending_demand"));
 	assert_int_equal(json_get_int_required(runtime_state, "in_flight_ms"), 5000);
@@ -5146,6 +5193,7 @@ static void test_status_punch_exposes_udp_socket_pool(void **state UNUSED) {
 	assert_int_equal(json_get_int_required(runtime_state, "launch_count"), 4);
 	assert_int_equal(json_get_int_required(runtime_state, "abort_count"), 1);
 	assert_int_equal(json_get_int_required(runtime_state, "result_count"), 2);
+	assert_int_equal(json_get_int_required(runtime_state, "success_count"), 0);
 	assert_int_equal(json_get_int_required(runtime_state, "failure_count"), 3);
 	assert_int_equal(json_get_int_required(runtime_state, "busy_count"), 1);
 	assert_int_equal(json_get_int_required(manager, "budget_exhausted"), 1);
@@ -5168,8 +5216,8 @@ static void test_status_punch_exposes_udp_socket_pool(void **state UNUSED) {
 	assert_int_equal(json_get_int_required(latest_task, "peer_b_id"), 78);
 	assert_string_equal(json_get_string_required(latest_task, "subject"), "peer-a");
 	assert_string_equal(json_get_string_required(latest_task, "destination"), "peer-b");
-	assert_int_equal(json_get_int_required(latest_task, "backoff_skipped"), 1);
-	assert_int_equal(json_get_int_required(latest_task, "next_retry_ms"), FASTD_PUNCH_SUPPRESSION_TIME);
+	assert_int_equal(json_get_int_required(latest_task, "backoff_skipped"), 0);
+	json_get_null_required(latest_task, "next_retry_ms");
 	assert_false(json_get_bool_required(latest_task, "budget_exhausted"));
 	struct json_object *demand_task = json_object_array_get_idx(history, 1);
 	assert_string_equal(json_get_string_required(demand_task, "stage"), "waiting-demand");
