@@ -481,9 +481,9 @@ static void print_punch_table(json_object *punch) {
 		static const char *const names[] = {
 			"runs",		     "pairs",	      "collected",	 "launched",
 			"waiting",	     "in_flight",     "blacklisted",	 "suppressed",
-			"aborted",	     "recent_demand", "missing_metadata", "metadata_requests",
-			"metadata_relays",   "runtime_states", "history_count",	 "outcome_success",
-			"outcome_failed",    "outcome_busy",
+			"aborted",	     "recent_demand", "missing_metadata", "unpunchable",
+			"metadata_requests", "metadata_relays", "runtime_states", "history_count",
+			"outcome_success",   "outcome_failed", "outcome_busy",
 		};
 
 		size_t i;
@@ -996,6 +996,9 @@ static const char *punch_pair_task_stage_name(fastd_punch_pair_task_stage_t stag
 
 	case PUNCH_PAIR_TASK_STAGE_MISSING_METADATA:
 		return "missing-metadata";
+
+	case PUNCH_PAIR_TASK_STAGE_UNPUNCHABLE:
+		return "unpunchable";
 
 	case PUNCH_PAIR_TASK_STAGE_METADATA_REQUESTED:
 		return "metadata-requested";
@@ -1900,6 +1903,7 @@ static json_object *dump_punch_task_manager(void) {
 	json_object_object_add(ret, "demand_waiting", json_object_new_int64(ctx.punch_task_manager_demand_waiting));
 	json_object_object_add(ret, "in_flight", json_object_new_int64(ctx.punch_task_manager_in_flight));
 	json_object_object_add(ret, "missing_metadata", json_object_new_int64(ctx.punch_task_manager_missing_metadata));
+	json_object_object_add(ret, "unpunchable", json_object_new_int64(ctx.punch_task_manager_unpunchable));
 	json_object_object_add(ret, "metadata_requests", json_object_new_int64(ctx.punch_task_manager_metadata_requests));
 	json_object_object_add(ret, "metadata_relays", json_object_new_int64(ctx.punch_task_manager_metadata_relays));
 	json_object_object_add(ret, "blacklisted", json_object_new_int64(ctx.punch_task_manager_blacklisted));

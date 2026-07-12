@@ -639,12 +639,22 @@ static bool peer_has_fresh_tcp_punch_nat_info(const fastd_peer_t *peer) {
 	return peer->tcp_punch_endpoint.sa.sa_family != AF_UNSPEC && !fastd_timed_out(peer->tcp_punch_timeout);
 }
 
-/** Returns true if a peer has fresh UDP or TCP punch metadata */
-static bool peer_has_fresh_punch_task_metadata(const fastd_peer_t *peer) {
-	return peer_has_fresh_punch_nat_info(peer) || peer_has_fresh_tcp_punch_nat_info(peer);
+static bool tcp_nat_type_punchable(fastd_nat_type_t nat_type);
+
+/** Returns true if a peer has fresh TCP punch metadata with a punchable NAT type */
+static bool peer_has_fresh_tcp_punch_task_metadata(const fastd_peer_t *peer) {
+	return peer_has_fresh_tcp_punch_nat_info(peer) && tcp_nat_type_punchable(peer->tcp_punch_nat_type);
 }
 
-static bool tcp_nat_type_punchable(fastd_nat_type_t nat_type);
+/** Returns true if a peer has fresh UDP or punchable TCP metadata */
+static bool peer_has_fresh_punch_task_metadata(const fastd_peer_t *peer) {
+	return peer_has_fresh_punch_nat_info(peer) || peer_has_fresh_tcp_punch_task_metadata(peer);
+}
+
+/** Returns true if a peer has fresh metadata that exists but cannot drive any punch task */
+static bool peer_has_unpunchable_punch_task_metadata(const fastd_peer_t *peer) {
+	return !peer_has_fresh_punch_task_metadata(peer) && peer_has_fresh_tcp_punch_nat_info(peer);
+}
 
 /** Returns true if a peer's UDP punch metadata needs the destination NAT metadata to choose a command */
 static bool peer_udp_metadata_needs_dest_nat_info(const fastd_peer_t *peer) {
@@ -1069,6 +1079,7 @@ typedef struct fastd_punch_pair_state {
 	bool recent_demand;
 	bool pending_demand;
 	bool missing_metadata;
+	bool unpunchable_metadata;
 	fastd_timeout_t next_retry;
 } fastd_punch_pair_state_t;
 
@@ -1184,6 +1195,9 @@ static fastd_punch_pair_state_t punch_pair_state(const fastd_peer_t *a, const fa
 
 	state.has_metadata_a = peer_has_fresh_punch_task_metadata(a);
 	state.has_metadata_b = peer_has_fresh_punch_task_metadata(b);
+	state.unpunchable_metadata =
+		!state.has_metadata_a && !state.has_metadata_b &&
+		(peer_has_unpunchable_punch_task_metadata(a) || peer_has_unpunchable_punch_task_metadata(b));
 	state.due_a = peer_punch_relay_due(a);
 	state.due_b = peer_punch_relay_due(b);
 
@@ -1202,9 +1216,15 @@ static fastd_punch_pair_state_t punch_pair_state(const fastd_peer_t *a, const fa
 	bool want_a = state.has_metadata_a && (state.due_a || state.pending_demand);
 	bool want_b = state.has_metadata_b && (state.due_b || state.pending_demand);
 	state.missing_metadata =
-		(!state.has_metadata_a && !state.has_metadata_b) ||
+		(!state.unpunchable_metadata && !state.has_metadata_a && !state.has_metadata_b) ||
 		peer_direction_needs_missing_metadata(a, b, want_a) ||
 		peer_direction_needs_missing_metadata(b, a, want_b);
+
+	if (state.unpunchable_metadata) {
+		state.waiting = true;
+		state.next_retry = FASTD_TIMEOUT_INV;
+		return state;
+	}
 
 	if (pair_failure_waits_for_demand(runtime, &state)) {
 		state.waiting = true;
@@ -2906,6 +2926,7 @@ fastd_punch_test_pair_state_t fastd_punch_test_pair_state(const fastd_peer_t *a,
 		.recent_demand = state.recent_demand,
 		.pending_demand = state.pending_demand,
 		.missing_metadata = state.missing_metadata,
+		.unpunchable_metadata = state.unpunchable_metadata,
 		.next_retry = state.next_retry,
 	};
 }
@@ -3385,6 +3406,7 @@ static void relay_peer_endpoints(void) {
 	ctx.punch_task_manager_demand_waiting = 0;
 	ctx.punch_task_manager_in_flight = 0;
 	ctx.punch_task_manager_missing_metadata = 0;
+	ctx.punch_task_manager_unpunchable = 0;
 	ctx.punch_task_manager_metadata_requests = 0;
 	ctx.punch_task_manager_metadata_relays = 0;
 	ctx.punch_task_manager_blacklisted = 0;
@@ -3445,6 +3467,13 @@ static void relay_peer_endpoints(void) {
 				task_manager_note_next_retry(state.next_retry);
 				task_manager_record_pair_task(
 					a, b, NULL, NULL, PUNCH_PAIR_TASK_STAGE_BLACKLISTED, 0, 0,
+					state.next_retry, false);
+				continue;
+			}
+			if (state.unpunchable_metadata) {
+				ctx.punch_task_manager_unpunchable++;
+				task_manager_record_pair_task(
+					a, b, NULL, NULL, PUNCH_PAIR_TASK_STAGE_UNPUNCHABLE, 0, 0,
 					state.next_retry, false);
 				continue;
 			}
