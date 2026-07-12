@@ -4023,6 +4023,7 @@ static void test_punch_metadata_updates_wake_task_manager(void **state UNUSED) {
 		.max_port = 52010,
 		.port_delta = 1,
 	};
+	fastd_punch_test_pair_runtime_mark_launched(&peer, &other);
 	fastd_task_unschedule(&ctx.next_maintenance);
 	fastd_task_schedule(&ctx.next_maintenance, TASK_TYPE_MAINTENANCE, ctx.now + 10000);
 	fastd_peer_address_t udp_endpoint_changed = addr4(0xc6336408, 52011);
@@ -4033,6 +4034,24 @@ static void test_punch_metadata_updates_wake_task_manager(void **state UNUSED) {
 	easy_payload->port_delta = htobe16(1);
 	assert_true(fastd_punch_handle_control(&peer, easy_buf));
 	assert_int_equal(fastd_task_timeout(&ctx.next_maintenance), ctx.now + 10000);
+	pair_state = fastd_punch_test_pair_state(&peer, &other);
+	assert_true(pair_state.in_flight);
+	assert_false(pair_state.pending_demand);
+
+	fastd_punch_note_peer_pair_demand(&peer, &other);
+	fastd_task_unschedule(&ctx.next_maintenance);
+	fastd_task_schedule(&ctx.next_maintenance, TASK_TYPE_MAINTENANCE, ctx.now + 10000);
+	fastd_peer_address_t udp_endpoint_pending = addr4(0xc6336408, 52012);
+	easy_buf = make_punch_control_buffer(
+		TEST_PUNCH_NAT_INFO, &udp_endpoint_pending, FASTD_NAT_SYMMETRIC_EASY_INC, test_key_b,
+		sizeof(test_key_b));
+	easy_payload = (test_punch_endpoint_t *)((test_punch_header_t *)easy_buf->data + 1);
+	easy_payload->port_delta = htobe16(1);
+	assert_true(fastd_punch_handle_control(&peer, easy_buf));
+	assert_int_equal(fastd_task_timeout(&ctx.next_maintenance), ctx.now);
+	pair_state = fastd_punch_test_pair_state(&peer, &other);
+	assert_false(pair_state.in_flight);
+	assert_true(pair_state.pending_demand);
 
 	fastd_task_unschedule(&ctx.next_maintenance);
 	fastd_peer_address_t tcp_endpoint = addr4(0xc6336408, 53000);

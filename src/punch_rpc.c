@@ -613,12 +613,19 @@ static bool nat_type_needs_dest_nat_info(fastd_nat_type_t nat_type) {
 	return nat_type_is_endpoint_dependent(nat_type);
 }
 
+static bool task_timeout_active(fastd_timeout_t timeout);
+static bool peer_has_pending_pair_demand(const fastd_peer_t *peer);
+
 /** Returns true if a UDP NAT metadata update should immediately wake route-style punch collection */
-static bool udp_metadata_update_should_wake(bool was_fresh, fastd_nat_type_t old_nat_type, fastd_nat_type_t new_nat_type) {
+static bool udp_metadata_update_should_wake(
+	const fastd_peer_t *peer, bool was_fresh, fastd_nat_type_t old_nat_type, fastd_nat_type_t new_nat_type) {
 	if (!was_fresh)
 		return true;
 
-	return !nat_type_is_endpoint_dependent(old_nat_type) || !nat_type_is_endpoint_dependent(new_nat_type);
+	if (!nat_type_is_endpoint_dependent(old_nat_type) || !nat_type_is_endpoint_dependent(new_nat_type))
+		return true;
+
+	return peer_has_pending_pair_demand(peer);
 }
 
 /** Returns true if a peer has fresh punch NAT metadata */
@@ -793,6 +800,22 @@ static void task_manager_record_remote_result(fastd_punch_result_t result) {
 /** Returns true if a timeout is active and still in the future */
 static bool task_timeout_active(fastd_timeout_t timeout) {
 	return timeout != FASTD_TIMEOUT_INV && !fastd_timed_out(timeout);
+}
+
+/** Returns true if this peer has fresh traffic demand not covered by a launched pair task */
+static bool peer_has_pending_pair_demand(const fastd_peer_t *peer) {
+	size_t i;
+	for (i = 0; i < VECTOR_LEN(ctx.punch_pair_states); i++) {
+		const fastd_punch_pair_runtime_t *runtime = &VECTOR_INDEX(ctx.punch_pair_states, i);
+		if (runtime->peer_a_id != peer->id && runtime->peer_b_id != peer->id)
+			continue;
+
+		if (task_timeout_active(runtime->recent_demand_until) &&
+		    runtime->demand_seq != runtime->served_demand_seq)
+			return true;
+	}
+
+	return false;
 }
 
 /** Returns true if a remote result means the launched punch is still inside its outcome window */
@@ -3484,7 +3507,7 @@ static void handle_nat_info(fastd_peer_t *sender, const fastd_punch_endpoint_t *
 		       old_listener_id != subject->punch_listener_id ||
 		       !punch_endpoint_metadata_list_equal(
 			       old_endpoints, old_n_endpoints, subject->punch_endpoints, subject->n_punch_endpoints);
-	if (changed && udp_metadata_update_should_wake(was_fresh, old_nat_type, subject->punch_nat_type))
+	if (changed && udp_metadata_update_should_wake(subject, was_fresh, old_nat_type, subject->punch_nat_type))
 		wake_punch_task_manager_for_peer_metadata(subject);
 
 	pr_debug(
@@ -3628,7 +3651,7 @@ static void handle_listener_info(fastd_peer_t *sender, const fastd_punch_endpoin
 		       old_listener_id != sender->punch_listener_id ||
 		       !punch_endpoint_metadata_list_equal(
 			       old_endpoints, old_n_endpoints, sender->punch_endpoints, sender->n_punch_endpoints);
-	if (changed && udp_metadata_update_should_wake(was_fresh, old_nat_type, sender->punch_nat_type))
+	if (changed && udp_metadata_update_should_wake(sender, was_fresh, old_nat_type, sender->punch_nat_type))
 		wake_punch_task_manager_for_peer_metadata(sender);
 
 	pr_debug("received punch listener info from %P: listener %u %I", sender, (unsigned)listener_id, &endpoint);
