@@ -16,6 +16,8 @@
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -1972,7 +1974,7 @@ static void test_punch_data_relay_only_for_learned_nat_unicast(void **state UNUS
 	ctx.punch_data_relay_bytes = old_data_relay_bytes;
 }
 
-static void test_punch_data_relay_receive_path_records_demand(void **state UNUSED) {
+static void test_punch_data_relay_receive_path_bypasses_local_iface(void **state UNUSED) {
 	__typeof__(ctx.eth_addrs) old_eth_addrs = ctx.eth_addrs;
 	__typeof__(ctx.punch_pair_states) old_pair_states = ctx.punch_pair_states;
 	const fastd_protocol_t *old_protocol = conf.protocol;
@@ -1987,6 +1989,9 @@ static void test_punch_data_relay_receive_path_records_demand(void **state UNUSE
 
 	int pipefd[2];
 	assert_int_equal(pipe(pipefd), 0);
+	int pipe_flags = fcntl(pipefd[0], F_GETFL, 0);
+	assert_int_not_equal(pipe_flags, -1);
+	assert_int_equal(fcntl(pipefd[0], F_SETFL, pipe_flags | O_NONBLOCK), 0);
 
 	ctx.eth_addrs = (__typeof__(ctx.eth_addrs)){};
 	ctx.punch_pair_states = (__typeof__(ctx.punch_pair_states)){};
@@ -2023,6 +2028,7 @@ static void test_punch_data_relay_receive_path_records_demand(void **state UNUSE
 
 	fastd_eth_addr_t source_mac = { .data = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 } };
 	fastd_eth_addr_t dest_mac = { .data = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x02 } };
+	fastd_eth_addr_t multicast_mac = { .data = { 0x01, 0x00, 0x00, 0x00, 0x00, 0x03 } };
 	fastd_peer_eth_addr_add(&dest, dest_mac);
 
 	test_send_peer = NULL;
@@ -2030,15 +2036,22 @@ static void test_punch_data_relay_receive_path_records_demand(void **state UNUSE
 	fastd_handle_receive(&source, test_eth_frame(dest_mac, source_mac), false);
 
 	fastd_eth_header_t written = {};
-	assert_int_equal(read(pipefd[0], &written, sizeof(written)), (ssize_t)sizeof(written));
-	assert_memory_equal(&written.dest, &dest_mac, sizeof(dest_mac));
-	assert_memory_equal(&written.source, &source_mac, sizeof(source_mac));
+	assert_int_equal(read(pipefd[0], &written, sizeof(written)), -1);
+	assert_int_equal(errno, EAGAIN);
 	assert_ptr_equal(test_send_peer, &dest);
 	assert_int_equal(test_send_count, 1);
 	assert_int_equal(ctx.punch_data_relay_packets, 1);
 	assert_int_equal(ctx.punch_data_relay_bytes, sizeof(fastd_eth_header_t));
 	assert_int_equal(VECTOR_LEN(ctx.punch_pair_states), 1);
 	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).demand_seq, 1);
+
+	fastd_handle_receive(&source, test_eth_frame(multicast_mac, source_mac), false);
+	assert_int_equal(read(pipefd[0], &written, sizeof(written)), (ssize_t)sizeof(written));
+	assert_memory_equal(&written.dest, &multicast_mac, sizeof(multicast_mac));
+	assert_memory_equal(&written.source, &source_mac, sizeof(source_mac));
+	assert_int_equal(test_send_count, 1);
+	assert_int_equal(ctx.punch_data_relay_packets, 1);
+	assert_int_equal(ctx.punch_data_relay_bytes, sizeof(fastd_eth_header_t));
 
 	fastd_cleanup_buffers();
 	VECTOR_FREE(ctx.eth_addrs);
@@ -5540,7 +5553,7 @@ int main(void) {
 		cmocka_unit_test(test_ec25519_same_active_simultaneous_responder_requires_unproven_path),
 		cmocka_unit_test(test_punch_data_relay_effective_setting),
 		cmocka_unit_test(test_punch_data_relay_only_for_learned_nat_unicast),
-		cmocka_unit_test(test_punch_data_relay_receive_path_records_demand),
+		cmocka_unit_test(test_punch_data_relay_receive_path_bypasses_local_iface),
 		cmocka_unit_test(test_punch_udp_command_suppressed_for_tcp_only_peer),
 		cmocka_unit_test(test_punch_nat_refresh_policy),
 		cmocka_unit_test(test_punch_observed_udp_metadata_fills_without_stun),
