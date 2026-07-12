@@ -400,6 +400,13 @@ static void print_nat_table(json_object *nat) {
 	add_key_value_row(table, "TCP type", value_or_dash(get_string_member(nat, "tcp_type")));
 	add_key_value_row(table, "TCP public address", get_string_member(nat, "tcp_public_address"));
 
+	char tcp_source_port[32];
+	if (tcp_available)
+		format_counter(tcp_source_port, get_int_member(nat, "tcp_source_port"));
+	else
+		snprintf(tcp_source_port, sizeof(tcp_source_port), "-");
+	add_key_value_row(table, "TCP source port", tcp_source_port);
+
 	char ports[64];
 	format_port_range(ports, nat);
 	add_key_value_row(table, "Port range", ports);
@@ -1419,6 +1426,7 @@ static json_object *dump_nat(void) {
 		json_object_object_add(ret, "tcp_type", json_object_new_string(fastd_nat_type_name(FASTD_NAT_UNKNOWN)));
 		json_object_object_add(ret, "tcp_public_address", NULL);
 		json_object_object_add(ret, "tcp_public_addresses", json_object_new_array());
+		json_object_object_add(ret, "tcp_source_port", NULL);
 		return ret;
 	}
 
@@ -1464,12 +1472,14 @@ static json_object *dump_nat(void) {
 		json_object_object_add(
 			ret, "tcp_public_addresses",
 			wrap_peer_address_array(status.tcp_reflexive_addrs, status.n_tcp_reflexive_addrs));
+		json_object_object_add(ret, "tcp_source_port", json_object_new_int(status.tcp_source_port));
 		json_object_object_add(ret, "tcp_min_port", json_object_new_int(status.tcp_min_port));
 		json_object_object_add(ret, "tcp_max_port", json_object_new_int(status.tcp_max_port));
 		json_object_object_add(ret, "tcp_responses", json_object_new_int64(status.tcp_responses));
 	} else {
 		json_object_object_add(ret, "tcp_public_address", NULL);
 		json_object_object_add(ret, "tcp_public_addresses", json_object_new_array());
+		json_object_object_add(ret, "tcp_source_port", NULL);
 		json_object_object_add(ret, "tcp_min_port", NULL);
 		json_object_object_add(ret, "tcp_max_port", NULL);
 		json_object_object_add(ret, "tcp_responses", json_object_new_int64(status.tcp_responses));

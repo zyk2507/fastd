@@ -17,6 +17,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <sys/socket.h>
+#include <unistd.h>
 
 #include <cmocka.h>
 
@@ -308,6 +309,44 @@ static fastd_peer_address_t addr6(uint16_t suffix, uint16_t port) {
 
 static uint16_t port4(const fastd_peer_address_t *addr) {
 	return ntohs(addr->in.sin_port);
+}
+
+static uint16_t test_tcp_fd_port(int fd) {
+	struct sockaddr_in addr = {};
+	socklen_t len = sizeof(addr);
+
+	assert_int_equal(getsockname(fd, (struct sockaddr *)&addr, &len), 0);
+	assert_int_equal(addr.sin_family, AF_INET);
+	return ntohs(addr.sin_port);
+}
+
+static int test_open_loopback_tcp_socket(void) {
+	int fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, IPPROTO_TCP);
+	assert_true(fd >= 0);
+
+	const int one = 1;
+	assert_int_equal(setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)), 0);
+
+	struct sockaddr_in addr = {
+		.sin_family = AF_INET,
+		.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+		.sin_port = 0,
+	};
+	assert_int_equal(bind(fd, (struct sockaddr *)&addr, sizeof(addr)), 0);
+	return fd;
+}
+
+static int test_open_loopback_tcp_listener(void) {
+	int fd = test_open_loopback_tcp_socket();
+	assert_int_equal(listen(fd, 1), 0);
+	return fd;
+}
+
+static uint16_t test_pick_loopback_tcp_port(void) {
+	int fd = test_open_loopback_tcp_socket();
+	uint16_t port = test_tcp_fd_port(fd);
+	assert_int_equal(close(fd), 0);
+	return port;
 }
 
 static uint16_t port6(const fastd_peer_address_t *addr) {
@@ -3299,6 +3338,124 @@ static void test_tcp_direct_handshake_reuses_unestablished_candidate_socket(void
 	test_handshake_remote = (fastd_peer_address_t){};
 }
 
+static void test_tcp_punch_candidate_binds_nat_source_port(void **state UNUSED) {
+	const fastd_protocol_t *old_protocol = conf.protocol;
+	fastd_peer_group_t *old_peer_group = conf.peer_group;
+	int old_epoll_fd = ctx.epoll_fd;
+	uint32_t old_peer_addr_ht_seed = ctx.peer_addr_ht_seed;
+	size_t old_peer_addr_ht_size = ctx.peer_addr_ht_size;
+	size_t old_peer_addr_ht_used = ctx.peer_addr_ht_used;
+	__typeof__(ctx.peer_addr_ht) old_peer_addr_ht = ctx.peer_addr_ht;
+	__typeof__(ctx.tcp_socks) old_tcp_socks = ctx.tcp_socks;
+	__typeof__(ctx.deferred_socks) old_deferred_socks = ctx.deferred_socks;
+	fastd_nat_detect_t *old_nat_detect = ctx.nat_detect;
+	int64_t old_now = ctx.now;
+
+	ctx.now = 1000;
+	ctx.peer_addr_ht_seed = 0;
+	ctx.peer_addr_ht_size = 0;
+	ctx.peer_addr_ht_used = 0;
+	ctx.peer_addr_ht = NULL;
+	ctx.tcp_socks = (__typeof__(ctx.tcp_socks)){};
+	ctx.deferred_socks = (__typeof__(ctx.deferred_socks)){};
+	ctx.nat_detect = NULL;
+	conf.protocol = &test_protocol;
+	test_handshake_count = 0;
+	test_handshake_peer = NULL;
+	test_handshake_transport = TRANSPORT_UNSET;
+	test_handshake_remote = (fastd_peer_address_t){};
+	fastd_poll_init();
+	ctx.peer_addr_ht_seed = 0x12345678;
+	ctx.peer_addr_ht_size = 8;
+	ctx.peer_addr_ht = fastd_new0_array(ctx.peer_addr_ht_size, __typeof__(*ctx.peer_addr_ht));
+
+	int listener_fd = test_open_loopback_tcp_listener();
+	uint16_t remote_port = test_tcp_fd_port(listener_fd);
+	uint16_t source_port = 0;
+	do {
+		source_port = test_pick_loopback_tcp_port();
+	} while (source_port == remote_port);
+
+	fastd_nat_status_t status = {
+		.enabled = true,
+		.available = true,
+		.type = FASTD_NAT_FULL_CONE,
+		.reflexive = addr4(0xc6336401, 61000),
+		.tcp_available = true,
+		.tcp_type = FASTD_NAT_FULL_CONE,
+		.tcp_reflexive = addr4(0xc6336401, 62000),
+		.n_tcp_reflexive_addrs = 1,
+		.tcp_source_port = source_port,
+		.tcp_min_port = 62000,
+		.tcp_max_port = 62000,
+		.tcp_responses = 2,
+		.servers = 2,
+		.last_update = ctx.now,
+	};
+	status.tcp_reflexive_addrs[0] = status.tcp_reflexive;
+	assert_true(fastd_nat_test_set_status(&status));
+
+	fastd_peer_group_t group = {
+		.transport = TRANSPORT_TCP,
+		.hole_punch = HOLE_PUNCH_TCP,
+		.nat_traversal = FASTD_TRISTATE_TRUE,
+		.max_connections = -1,
+	};
+	conf.peer_group = &group;
+
+	fastd_peer_address_t endpoint = addr4(0x7f000001, remote_port);
+	fastd_peer_t peer = {
+		.id = 20,
+		.group = &group,
+		.config_state = CONFIG_STATIC,
+		.name = "peer-b",
+		.state = STATE_INACTIVE,
+		.transport = TRANSPORT_TCP,
+		.hole_punch = HOLE_PUNCH_TCP,
+		.nat_traversal = FASTD_TRISTATE_TRUE,
+	};
+
+	assert_true(fastd_peer_add_punch_control_candidate_transport(
+		&peer, &endpoint, 120, false, 0, 0, DIRECT_CANDIDATE_TRANSPORT_TCP));
+	assert_true(fastd_peer_send_direct_handshake_transport(&peer, &endpoint, TRANSPORT_TCP));
+
+	assert_non_null(peer.sock);
+	assert_non_null(peer.sock->bound_addr);
+	assert_port4(peer.sock->bound_addr, source_port);
+	assert_int_equal(test_handshake_count, 1);
+	assert_ptr_equal(test_handshake_peer, &peer);
+	assert_int_equal(test_handshake_transport, TRANSPORT_TCP);
+	assert_true(fastd_peer_address_equal(&test_handshake_remote, &endpoint));
+
+	fastd_tcp_cleanup();
+	fastd_socket_free_deferred();
+	assert_int_equal(close(listener_fd), 0);
+	fastd_peer_hashtable_remove(&peer);
+	peer.address = (fastd_peer_address_t){};
+	fastd_peer_hashtable_free();
+	fastd_poll_free();
+	VECTOR_FREE(ctx.deferred_socks);
+	VECTOR_FREE(peer.direct_candidates);
+	VECTOR_FREE(peer.punch_suppressions);
+	fastd_task_unschedule(&peer.task);
+	fastd_nat_test_clear_status();
+	ctx.nat_detect = old_nat_detect;
+	conf.protocol = old_protocol;
+	conf.peer_group = old_peer_group;
+	ctx.epoll_fd = old_epoll_fd;
+	ctx.peer_addr_ht_seed = old_peer_addr_ht_seed;
+	ctx.peer_addr_ht_size = old_peer_addr_ht_size;
+	ctx.peer_addr_ht_used = old_peer_addr_ht_used;
+	ctx.peer_addr_ht = old_peer_addr_ht;
+	ctx.tcp_socks = old_tcp_socks;
+	ctx.deferred_socks = old_deferred_socks;
+	ctx.now = old_now;
+	test_handshake_count = 0;
+	test_handshake_peer = NULL;
+	test_handshake_transport = TRANSPORT_UNSET;
+	test_handshake_remote = (fastd_peer_address_t){};
+}
+
 static void test_punch_accepts_relayed_nat_metadata(void **state UNUSED) {
 	const fastd_protocol_t *old_protocol = conf.protocol;
 	fastd_peer_group_t *old_peer_group = conf.peer_group;
@@ -5023,6 +5180,7 @@ int main(void) {
 		cmocka_unit_test(test_punch_task_manager_tcp_only_skips_udp_commands),
 		cmocka_unit_test(test_punch_send_tcp_preserves_multiple_received_endpoints),
 		cmocka_unit_test(test_tcp_direct_handshake_reuses_unestablished_candidate_socket),
+		cmocka_unit_test(test_tcp_punch_candidate_binds_nat_source_port),
 		cmocka_unit_test(test_punch_accepts_relayed_nat_metadata),
 		cmocka_unit_test(test_punch_control_preserves_scoped_ipv6_metadata_and_candidate),
 		cmocka_unit_test(test_punch_metadata_updates_wake_task_manager),

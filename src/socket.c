@@ -203,6 +203,49 @@ static void set_address_port(fastd_peer_address_t *addr, uint16_t port) {
 	}
 }
 
+/** Returns true for TCP NAT types where the local STUN source port must be reused for punching */
+static bool tcp_nat_type_reuses_source_port(fastd_nat_type_t type) {
+	switch (type) {
+	case FASTD_NAT_OPEN_INTERNET:
+	case FASTD_NAT_NO_PAT:
+	case FASTD_NAT_FULL_CONE:
+	case FASTD_NAT_RESTRICTED:
+	case FASTD_NAT_PORT_RESTRICTED:
+		return true;
+
+	default:
+		return false;
+	}
+}
+
+/** Returns the local TCP source port that produced the current reflexive TCP endpoint */
+static bool get_tcp_punch_source_port(sa_family_t family, uint16_t *port) {
+	fastd_nat_status_t status = {};
+	if (!fastd_nat_get_status(&status) || !status.tcp_available || !status.tcp_source_port)
+		return false;
+
+	if (status.tcp_reflexive.sa.sa_family != family)
+		return false;
+
+	if (!tcp_nat_type_reuses_source_port(status.tcp_type))
+		return false;
+
+	*port = status.tcp_source_port;
+	return true;
+}
+
+/** Builds the local bind address for a TCP punch attempt */
+static fastd_peer_address_t tcp_bind_address_for_port(
+	const fastd_socket_t *base_sock, sa_family_t family, uint16_t port) {
+	fastd_peer_address_t ret = { .sa.sa_family = family };
+
+	if (base_sock && base_sock->bound_addr && base_sock->bound_addr->sa.sa_family == family)
+		ret = *base_sock->bound_addr;
+
+	set_address_port(&ret, port);
+	return ret;
+}
+
 /** Returns the default UDP socket matching an address family */
 static const fastd_socket_t *get_default_socket(int af) {
 	switch (af) {
@@ -434,11 +477,12 @@ static fastd_socket_t *open_tcp_hole_punch_socket(fastd_peer_t *peer, const fast
 	}
 #endif
 
-	fastd_peer_address_t local_addr = { .sa.sa_family = remote_addr->sa.sa_family };
-	if (base_sock && base_sock->bound_addr && base_sock->bound_addr->sa.sa_family == remote_addr->sa.sa_family)
-		local_addr = *base_sock->bound_addr;
+	uint16_t local_port = 0;
+	if (!get_tcp_punch_source_port(remote_addr->sa.sa_family, &local_port))
+		local_port = ntohs(fastd_peer_address_get_port(remote_addr));
 
-	set_address_port(&local_addr, ntohs(fastd_peer_address_get_port(remote_addr)));
+	fastd_peer_address_t local_addr =
+		tcp_bind_address_for_port(base_sock, remote_addr->sa.sa_family, local_port);
 
 	if (bind(fd, &local_addr.sa, address_len(&local_addr))) {
 		pr_debug2_errno("unable to bind TCP hole punch socket");
@@ -900,7 +944,20 @@ fastd_socket_open_tcp(fastd_peer_t *peer, const fastd_socket_t *base_sock, const
 	}
 #endif
 
-	if (base_sock && base_sock->bound_addr && base_sock->bound_addr->sa.sa_family == remote_addr->sa.sa_family) {
+	bool punch_candidate = false;
+	if (peer)
+		punch_candidate =
+			fastd_peer_is_punch_control_candidate_transport(peer, remote_addr, TRANSPORT_TCP, NULL, NULL);
+	uint16_t punch_source_port = 0;
+	if (punch_candidate && get_tcp_punch_source_port(remote_addr->sa.sa_family, &punch_source_port)) {
+		fastd_peer_address_t local_addr =
+			tcp_bind_address_for_port(base_sock, remote_addr->sa.sa_family, punch_source_port);
+
+		if (bind(fd, &local_addr.sa, address_len(&local_addr))) {
+			pr_warn_errno("unable to bind TCP punch source port");
+			goto error;
+		}
+	} else if (base_sock && base_sock->bound_addr && base_sock->bound_addr->sa.sa_family == remote_addr->sa.sa_family) {
 		fastd_peer_address_t local_addr = *base_sock->bound_addr;
 
 		if (bind(fd, &local_addr.sa, address_len(&local_addr))) {

@@ -31,5 +31,7 @@ size_t fastd_nat_test_collect_public_endpoints(
 
 fastd_nat_type_t fastd_nat_test_classify_tcp(
 	const fastd_peer_address_t *samples, size_t n_samples, const fastd_peer_address_t *source);
+bool fastd_nat_test_set_status(const fastd_nat_status_t *status);
+void fastd_nat_test_clear_status(void);
 
 #endif

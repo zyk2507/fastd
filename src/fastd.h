@@ -295,6 +295,7 @@ struct fastd_nat_status {
 	fastd_peer_address_t tcp_reflexive; /**< Latest server-reflexive TCP endpoint */
 	fastd_peer_address_t tcp_reflexive_addrs[FASTD_NAT_MAX_PUBLIC_ENDPOINTS]; /**< Unique TCP reflexive endpoints */
 	size_t n_tcp_reflexive_addrs;   /**< Number of unique TCP reflexive endpoints */
+	uint16_t tcp_source_port;       /**< Local TCP source port used to obtain the reflexive endpoint */
 	uint16_t tcp_min_port;          /**< Lowest observed public TCP port, host byte order */
 	uint16_t tcp_max_port;          /**< Highest observed public TCP port, host byte order */
 	size_t tcp_responses;           /**< Number of successful TCP STUN responses used for classification */

@@ -965,7 +965,7 @@ classify_tcp_nat(const nat_stun_sample_t *samples, size_t n_samples, const fastd
 	return FASTD_NAT_FULL_CONE;
 }
 
-#ifdef WITH_TESTS
+#if defined(WITH_NAT_DETECT) && defined(WITH_TESTS)
 
 /** Converts address samples to the worker-internal representation used by NAT classification */
 static nat_stun_sample_t *samples_from_addresses(const fastd_peer_address_t *addresses, size_t n_addresses) {
@@ -1078,6 +1078,7 @@ static void detect_tcp_nat(const nat_worker_t *work, fastd_nat_status_t *status)
 		status->tcp_reflexive = samples[0].mapped;
 		status->n_tcp_reflexive_addrs =
 			collect_public_endpoints(status->tcp_reflexive_addrs, samples, n_samples);
+		status->tcp_source_port = address_port_host(&source);
 		status->tcp_min_port = min_port;
 		status->tcp_max_port = max_port;
 		status->tcp_responses = n_samples;
@@ -1444,3 +1445,34 @@ bool fastd_nat_get_tcp_public_address(fastd_peer_address_t *addr) {
 	*addr = status.tcp_reflexive;
 	return true;
 }
+
+#ifdef WITH_TESTS
+
+/** Replaces the current NAT status for tests that need deterministic runtime state */
+bool fastd_nat_test_set_status(const fastd_nat_status_t *status) {
+	if (!status)
+		return false;
+
+	if (!ctx.nat_detect) {
+		ctx.nat_detect = fastd_new0(fastd_nat_detect_t);
+		if (pthread_mutex_init(&ctx.nat_detect->mutex, NULL))
+			exit_errno("pthread_mutex_init");
+	}
+
+	pthread_mutex_lock(&ctx.nat_detect->mutex);
+	ctx.nat_detect->status = *status;
+	pthread_mutex_unlock(&ctx.nat_detect->mutex);
+	return true;
+}
+
+/** Clears the test-owned NAT status */
+void fastd_nat_test_clear_status(void) {
+	if (!ctx.nat_detect)
+		return;
+
+	pthread_mutex_destroy(&ctx.nat_detect->mutex);
+	free(ctx.nat_detect);
+	ctx.nat_detect = NULL;
+}
+
+#endif
