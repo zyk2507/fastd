@@ -574,6 +574,7 @@ static size_t get_peer_endpoints(
 	size_t n_endpoints = 0;
 
 	if (fastd_peer_is_established(peer) &&
+	    peer->sock && !fastd_socket_is_tcp(peer->sock) &&
 	    (peer->address.sa.sa_family == AF_INET || peer->address.sa.sa_family == AF_INET6)) {
 		fastd_peer_punch_endpoint_t endpoint = make_punch_endpoint(
 			&peer->address, have_nat_info ? peer->punch_nat_type : FASTD_NAT_UNKNOWN,

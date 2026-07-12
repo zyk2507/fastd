@@ -2848,11 +2848,18 @@ static void test_punch_task_manager_waits_for_new_demand_after_failed_pair(void 
 	};
 	conf.peer_group = &group;
 
+	fastd_socket_t a_udp_sock = {
+		.type = SOCKET_TYPE_UDP,
+	};
+	fastd_socket_t b_udp_sock = {
+		.type = SOCKET_TYPE_UDP,
+	};
 	fastd_peer_t a = {
 		.id = 30,
 		.group = &group,
 		.name = "peer-a",
 		.state = STATE_ESTABLISHED,
+		.sock = &a_udp_sock,
 		.address = addr4(0xcb007105, 41000),
 		.punch_endpoint = addr4(0xc6336407, 51000),
 		.punch_nat_type = FASTD_NAT_FULL_CONE,
@@ -2866,6 +2873,7 @@ static void test_punch_task_manager_waits_for_new_demand_after_failed_pair(void 
 		.group = &group,
 		.name = "peer-b",
 		.state = STATE_ESTABLISHED,
+		.sock = &b_udp_sock,
 		.address = addr4(0xcb007106, 42000),
 		.punch_endpoint = addr4(0xc6336408, 52000),
 		.punch_nat_type = FASTD_NAT_FULL_CONE,
@@ -3307,11 +3315,18 @@ static void test_punch_task_manager_prewarms_relayed_nat_metadata(void **state U
 	};
 	conf.peer_group = &group;
 
+	fastd_socket_t prewarm_a_udp_sock = {
+		.type = SOCKET_TYPE_UDP,
+	};
+	fastd_socket_t prewarm_b_udp_sock = {
+		.type = SOCKET_TYPE_UDP,
+	};
 	fastd_peer_t a = {
 		.id = 30,
 		.group = &group,
 		.name = "peer-a",
 		.state = STATE_ESTABLISHED,
+		.sock = &prewarm_a_udp_sock,
 		.address = addr4(0xcb007105, 41000),
 		.punch_endpoint = addr4(0xc6336407, 51000),
 		.punch_nat_type = FASTD_NAT_FULL_CONE,
@@ -3332,6 +3347,7 @@ static void test_punch_task_manager_prewarms_relayed_nat_metadata(void **state U
 		.group = &group,
 		.name = "peer-b",
 		.state = STATE_ESTABLISHED,
+		.sock = &prewarm_b_udp_sock,
 		.address = addr4(0xcb007106, 42000),
 		.punch_endpoint = addr4(0xc6336408, 52000),
 		.punch_nat_type = FASTD_NAT_FULL_CONE,
@@ -3584,11 +3600,18 @@ static void test_punch_task_manager_relays_multiple_tcp_endpoints_with_budget(vo
 	};
 	conf.peer_group = &group;
 
+	fastd_socket_t a_udp_sock = {
+		.type = SOCKET_TYPE_UDP,
+	};
+	fastd_socket_t b_udp_sock = {
+		.type = SOCKET_TYPE_UDP,
+	};
 	fastd_peer_t a = {
 		.id = 30,
 		.group = &group,
 		.name = "peer-a",
 		.state = STATE_ESTABLISHED,
+		.sock = &a_udp_sock,
 		.address = addr4(0xcb007105, 41000),
 		.tcp_punch_endpoint = addr4(0xc6336407, 51000),
 		.n_tcp_punch_endpoints = 4,
@@ -3608,6 +3631,7 @@ static void test_punch_task_manager_relays_multiple_tcp_endpoints_with_budget(vo
 		.group = &group,
 		.name = "peer-b",
 		.state = STATE_ESTABLISHED,
+		.sock = &b_udp_sock,
 		.address = addr4(0xcb007106, 42000),
 		.tcp_punch_endpoint = addr4(0xc6336408, 52000),
 		.n_tcp_punch_endpoints = 1,
@@ -3805,6 +3829,132 @@ static void test_punch_task_manager_tcp_only_skips_udp_commands(void **state UNU
 	conf.punch_max_packets = old_max_packets;
 	conf.encrypt_headroom = old_encrypt_headroom;
 	ctx.max_buffer = old_max_buffer;
+	ctx.now = old_now;
+	test_reset_control_sends();
+	fastd_cleanup_buffers();
+}
+
+static void test_punch_task_manager_tcp_path_does_not_infer_udp_endpoint(void **state UNUSED) {
+	__typeof__(ctx.peers) old_peers = ctx.peers;
+	__typeof__(ctx.punch_pair_states) old_pair_states = ctx.punch_pair_states;
+	const fastd_protocol_t *old_protocol = conf.protocol;
+	fastd_peer_group_t *old_peer_group = conf.peer_group;
+	bool old_control_relay = conf.punch_control_relay;
+	unsigned old_relay_interval = conf.punch_relay_interval;
+	unsigned old_max_packets = conf.punch_max_packets;
+	size_t old_encrypt_headroom = conf.encrypt_headroom;
+	size_t old_max_buffer = ctx.max_buffer;
+	uint64_t old_pairs = ctx.punch_task_manager_pairs;
+	uint64_t old_collected = ctx.punch_task_manager_collected;
+	uint64_t old_launched = ctx.punch_task_manager_launched;
+	uint64_t old_suppressed = ctx.punch_task_manager_suppressed;
+	uint64_t old_budget_exhausted = ctx.punch_task_manager_budget_exhausted;
+	fastd_timeout_t old_next_retry = ctx.punch_task_manager_next_retry;
+	fastd_punch_pair_task_t old_pair_tasks[FASTD_PUNCH_PAIR_TASK_HISTORY];
+	memcpy(old_pair_tasks, ctx.punch_pair_tasks, sizeof(old_pair_tasks));
+	uint64_t old_next_pair_task_id = ctx.next_punch_pair_task_id;
+	size_t old_pair_task_pos = ctx.punch_pair_task_pos;
+	size_t old_pair_task_count = ctx.punch_pair_task_count;
+	int64_t old_now = ctx.now;
+
+	ctx.peers = (__typeof__(ctx.peers)){};
+	ctx.punch_pair_states = (__typeof__(ctx.punch_pair_states)){};
+	memset(ctx.punch_pair_tasks, 0, sizeof(ctx.punch_pair_tasks));
+	ctx.next_punch_pair_task_id = 0;
+	ctx.punch_pair_task_pos = 0;
+	ctx.punch_pair_task_count = 0;
+	ctx.now = 1000;
+	conf.protocol = &test_protocol;
+	conf.punch_control_relay = true;
+	conf.punch_relay_interval = 7000;
+	conf.punch_max_packets = 8;
+	conf.encrypt_headroom = 0;
+	ctx.max_buffer = 2048;
+	test_reset_control_sends();
+	fastd_init_buffers();
+
+	fastd_peer_group_t group = {
+		.transport = TRANSPORT_AUTO,
+		.hole_punch = HOLE_PUNCH_AUTO,
+		.nat_traversal = FASTD_TRISTATE_TRUE,
+	};
+	conf.peer_group = &group;
+
+	fastd_socket_t a_tcp_sock = {
+		.type = SOCKET_TYPE_TCP_CONNECTION,
+	};
+	fastd_socket_t b_tcp_sock = {
+		.type = SOCKET_TYPE_TCP_CONNECTION,
+	};
+	fastd_peer_t a = {
+		.id = 30,
+		.group = &group,
+		.name = "peer-a",
+		.state = STATE_ESTABLISHED,
+		.sock = &a_tcp_sock,
+		.address = addr4(0xcb007105, 41000),
+		.tcp_punch_endpoint = addr4(0xc6336407, 51000),
+		.n_tcp_punch_endpoints = 1,
+		.tcp_punch_nat_type = FASTD_NAT_FULL_CONE,
+		.tcp_punch_min_port = 51000,
+		.tcp_punch_max_port = 51000,
+		.tcp_punch_timeout = ctx.now + 10000,
+		.next_punch_relay = ctx.now,
+	};
+	a.tcp_punch_endpoints[0] = a.tcp_punch_endpoint;
+	fastd_peer_t b = {
+		.id = 20,
+		.group = &group,
+		.name = "peer-b",
+		.state = STATE_ESTABLISHED,
+		.sock = &b_tcp_sock,
+		.address = addr4(0xcb007106, 42000),
+		.tcp_punch_endpoint = addr4(0xc6336408, 52000),
+		.n_tcp_punch_endpoints = 1,
+		.tcp_punch_nat_type = FASTD_NAT_FULL_CONE,
+		.tcp_punch_min_port = 52000,
+		.tcp_punch_max_port = 52000,
+		.tcp_punch_timeout = ctx.now + 10000,
+		.next_punch_relay = ctx.now,
+	};
+	b.tcp_punch_endpoints[0] = b.tcp_punch_endpoint;
+
+	VECTOR_ADD(ctx.peers, &a);
+	VECTOR_ADD(ctx.peers, &b);
+
+	fastd_punch_test_relay_peer_endpoints();
+	assert_int_equal(ctx.punch_task_manager_pairs, 1);
+	assert_int_equal(ctx.punch_task_manager_collected, 1);
+	assert_int_equal(ctx.punch_task_manager_launched, 1);
+	assert_int_equal(ctx.punch_task_manager_suppressed, 0);
+	assert_int_equal(ctx.punch_task_manager_budget_exhausted, 0);
+	assert_int_equal(test_control_send_count, 2);
+	assert_int_equal(test_control_send_types[0], TEST_PUNCH_SEND_TCP);
+	assert_int_equal(test_control_send_types[1], TEST_PUNCH_SEND_TCP);
+	assert_int_equal(test_control_send_ports[0], 51000);
+	assert_int_equal(test_control_send_ports[1], 52000);
+
+	VECTOR_FREE(ctx.peers);
+	VECTOR_FREE(ctx.punch_pair_states);
+	ctx.peers = old_peers;
+	ctx.punch_pair_states = old_pair_states;
+	conf.protocol = old_protocol;
+	conf.peer_group = old_peer_group;
+	conf.punch_control_relay = old_control_relay;
+	conf.punch_relay_interval = old_relay_interval;
+	conf.punch_max_packets = old_max_packets;
+	conf.encrypt_headroom = old_encrypt_headroom;
+	ctx.max_buffer = old_max_buffer;
+	ctx.punch_task_manager_pairs = old_pairs;
+	ctx.punch_task_manager_collected = old_collected;
+	ctx.punch_task_manager_launched = old_launched;
+	ctx.punch_task_manager_suppressed = old_suppressed;
+	ctx.punch_task_manager_budget_exhausted = old_budget_exhausted;
+	ctx.punch_task_manager_next_retry = old_next_retry;
+	memcpy(ctx.punch_pair_tasks, old_pair_tasks, sizeof(ctx.punch_pair_tasks));
+	ctx.next_punch_pair_task_id = old_next_pair_task_id;
+	ctx.punch_pair_task_pos = old_pair_task_pos;
+	ctx.punch_pair_task_count = old_pair_task_count;
 	ctx.now = old_now;
 	test_reset_control_sends();
 	fastd_cleanup_buffers();
@@ -6157,6 +6307,7 @@ int main(void) {
 		cmocka_unit_test(test_punch_task_manager_skips_endpoint_dependent_post_command_prewarm),
 		cmocka_unit_test(test_punch_task_manager_relays_multiple_tcp_endpoints_with_budget),
 		cmocka_unit_test(test_punch_task_manager_tcp_only_skips_udp_commands),
+		cmocka_unit_test(test_punch_task_manager_tcp_path_does_not_infer_udp_endpoint),
 		cmocka_unit_test(test_punch_send_tcp_preserves_multiple_received_endpoints),
 		cmocka_unit_test(test_tcp_direct_handshake_reuses_unestablished_candidate_socket),
 		cmocka_unit_test(test_tcp_punch_candidate_binds_nat_source_port),
