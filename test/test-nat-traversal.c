@@ -184,6 +184,7 @@ static size_t test_control_send_count;
 static uint8_t test_control_last_type;
 static fastd_peer_t *test_control_send_peers[TEST_CONTROL_HISTORY];
 static uint8_t test_control_send_types[TEST_CONTROL_HISTORY];
+static uint8_t test_control_send_reserved[TEST_CONTROL_HISTORY];
 static uint16_t test_control_send_ports[TEST_CONTROL_HISTORY];
 static fastd_peer_t *test_lookup_peer;
 static const uint8_t test_key_self[32] = { 9 };
@@ -201,6 +202,7 @@ static void test_reset_control_sends(void) {
 	test_control_last_type = 0;
 	memset(test_control_send_peers, 0, sizeof(test_control_send_peers));
 	memset(test_control_send_types, 0, sizeof(test_control_send_types));
+	memset(test_control_send_reserved, 0, sizeof(test_control_send_reserved));
 	memset(test_control_send_ports, 0, sizeof(test_control_send_ports));
 }
 
@@ -233,6 +235,7 @@ static void test_protocol_send_control(fastd_peer_t *peer, fastd_buffer_t *buffe
 				test_control_send_types[pos] = header->type;
 				if (buffer->len >= sizeof(test_punch_header_t) + sizeof(test_punch_endpoint_t)) {
 					const test_punch_endpoint_t *endpoint = (const test_punch_endpoint_t *)(header + 1);
+					test_control_send_reserved[pos] = endpoint->reserved;
 					test_control_send_ports[pos] = be16toh(endpoint->port);
 				}
 			}
@@ -3927,6 +3930,135 @@ static void test_punch_accepts_relayed_nat_metadata(void **state UNUSED) {
 	fastd_cleanup_buffers();
 }
 
+static void test_punch_route_relays_fresh_nat_metadata(void **state UNUSED) {
+	__typeof__(ctx.peers) old_peers = ctx.peers;
+	__typeof__(ctx.punch_pair_states) old_pair_states = ctx.punch_pair_states;
+	const fastd_protocol_t *old_protocol = conf.protocol;
+	fastd_peer_group_t *old_peer_group = conf.peer_group;
+	fastd_peer_t *old_lookup_peer = test_lookup_peer;
+	bool old_control_relay = conf.punch_control_relay;
+	unsigned old_max_packets = conf.punch_max_packets;
+	fastd_task_t old_next_maintenance = ctx.next_maintenance;
+	fastd_pqueue_t *old_task_queue = ctx.task_queue;
+	size_t old_encrypt_headroom = conf.encrypt_headroom;
+	size_t old_max_buffer = ctx.max_buffer;
+	uint64_t old_rx = ctx.punch_control_rx;
+	uint64_t old_tx = ctx.punch_control_tx;
+	int64_t old_now = ctx.now;
+
+	ctx.peers = (__typeof__(ctx.peers)){};
+	ctx.punch_pair_states = (__typeof__(ctx.punch_pair_states)){};
+	ctx.next_maintenance = (fastd_task_t){};
+	ctx.task_queue = NULL;
+	ctx.now = 1000;
+	conf.protocol = &test_protocol;
+	conf.punch_control_relay = true;
+	conf.punch_max_packets = 1;
+	conf.encrypt_headroom = 0;
+	ctx.max_buffer = 2048;
+	test_reset_control_sends();
+	fastd_init_buffers();
+
+	fastd_peer_group_t group = {
+		.transport = TRANSPORT_AUTO,
+		.hole_punch = HOLE_PUNCH_AUTO,
+		.nat_traversal = FASTD_TRISTATE_TRUE,
+	};
+	conf.peer_group = &group;
+
+	fastd_peer_t a = {
+		.id = 30,
+		.group = &group,
+		.config_state = CONFIG_STATIC,
+		.name = "peer-a",
+		.state = STATE_ESTABLISHED,
+	};
+	fastd_peer_t b = {
+		.id = 20,
+		.group = &group,
+		.config_state = CONFIG_STATIC,
+		.name = "peer-b",
+		.state = STATE_ESTABLISHED,
+	};
+	fastd_peer_t d = {
+		.id = 50,
+		.group = &group,
+		.config_state = CONFIG_STATIC,
+		.name = "peer-d",
+		.state = STATE_ESTABLISHED,
+	};
+	fastd_peer_t relay = {
+		.id = 60,
+		.group = &group,
+		.config_state = CONFIG_STATIC,
+		.name = "relay",
+		.state = STATE_ESTABLISHED,
+	};
+	VECTOR_ADD(ctx.peers, &a);
+	VECTOR_ADD(ctx.peers, &b);
+	VECTOR_ADD(ctx.peers, &d);
+	test_lookup_peer = &a;
+
+	fastd_peer_address_t udp_endpoint = addr4(0xc6336407, 51000);
+	assert_true(fastd_punch_handle_control(
+		&a,
+		make_punch_control_buffer(
+			TEST_PUNCH_NAT_INFO, &udp_endpoint, FASTD_NAT_FULL_CONE, test_key_a, sizeof(test_key_a))));
+	assert_int_equal(test_control_send_count, 1);
+	assert_ptr_equal(test_control_send_peers[0], &b);
+	assert_int_equal(test_control_send_types[0], TEST_PUNCH_NAT_INFO);
+	assert_int_equal(test_control_send_ports[0], 51000);
+	assert_int_equal(test_control_send_reserved[0] & TEST_PUNCH_NAT_INFO_RELAYED, TEST_PUNCH_NAT_INFO_RELAYED);
+	assert_int_equal(port4(&a.punch_endpoint), 51000);
+
+	conf.punch_max_packets = 4;
+	test_reset_control_sends();
+	fastd_peer_address_t tcp_endpoint = addr4(0xc6336407, 53000);
+	assert_true(fastd_punch_handle_control(
+		&a,
+		make_punch_control_buffer(
+			TEST_PUNCH_TCP_NAT_INFO, &tcp_endpoint, FASTD_NAT_FULL_CONE, test_key_a, sizeof(test_key_a))));
+	assert_int_equal(test_control_send_count, 2);
+	assert_ptr_equal(test_control_send_peers[0], &b);
+	assert_ptr_equal(test_control_send_peers[1], &d);
+	assert_int_equal(test_control_send_types[0], TEST_PUNCH_TCP_NAT_INFO);
+	assert_int_equal(test_control_send_types[1], TEST_PUNCH_TCP_NAT_INFO);
+	assert_int_equal(test_control_send_ports[0], 53000);
+	assert_int_equal(test_control_send_ports[1], 53000);
+	assert_int_equal(test_control_send_reserved[0] & TEST_PUNCH_NAT_INFO_RELAYED, TEST_PUNCH_NAT_INFO_RELAYED);
+	assert_int_equal(test_control_send_reserved[1] & TEST_PUNCH_NAT_INFO_RELAYED, TEST_PUNCH_NAT_INFO_RELAYED);
+
+	test_reset_control_sends();
+	fastd_peer_address_t relayed_endpoint = addr4(0xc6336407, 51010);
+	assert_true(fastd_punch_handle_control(
+		&relay,
+		make_punch_control_buffer_extra(
+			TEST_PUNCH_NAT_INFO, &relayed_endpoint, FASTD_NAT_FULL_CONE, test_key_a,
+			sizeof(test_key_a), TEST_PUNCH_NAT_INFO_RELAYED)));
+	assert_int_equal(test_control_send_count, 0);
+	assert_int_equal(port4(&a.punch_endpoint), 51010);
+
+	fastd_task_unschedule(&ctx.next_maintenance);
+	VECTOR_FREE(ctx.peers);
+	VECTOR_FREE(ctx.punch_pair_states);
+	ctx.peers = old_peers;
+	ctx.punch_pair_states = old_pair_states;
+	ctx.next_maintenance = old_next_maintenance;
+	ctx.task_queue = old_task_queue;
+	test_lookup_peer = old_lookup_peer;
+	conf.protocol = old_protocol;
+	conf.peer_group = old_peer_group;
+	conf.punch_control_relay = old_control_relay;
+	conf.punch_max_packets = old_max_packets;
+	conf.encrypt_headroom = old_encrypt_headroom;
+	ctx.max_buffer = old_max_buffer;
+	ctx.punch_control_rx = old_rx;
+	ctx.punch_control_tx = old_tx;
+	ctx.now = old_now;
+	test_reset_control_sends();
+	fastd_cleanup_buffers();
+}
+
 static void test_punch_control_preserves_scoped_ipv6_metadata_and_candidate(void **state UNUSED) {
 	const fastd_protocol_t *old_protocol = conf.protocol;
 	fastd_peer_group_t *old_peer_group = conf.peer_group;
@@ -5679,6 +5811,7 @@ int main(void) {
 		cmocka_unit_test(test_tcp_direct_handshake_reuses_unestablished_candidate_socket),
 		cmocka_unit_test(test_tcp_punch_candidate_binds_nat_source_port),
 		cmocka_unit_test(test_punch_accepts_relayed_nat_metadata),
+		cmocka_unit_test(test_punch_route_relays_fresh_nat_metadata),
 		cmocka_unit_test(test_punch_control_preserves_scoped_ipv6_metadata_and_candidate),
 		cmocka_unit_test(test_punch_metadata_updates_wake_task_manager),
 		cmocka_unit_test(test_punch_task_manager_outcome_accounting),

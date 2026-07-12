@@ -1057,6 +1057,11 @@ typedef struct fastd_punch_pair_state {
 static bool request_peer_punch_metadata(fastd_peer_t *peer);
 static size_t relay_nat_metadata_to_peer(fastd_peer_t *dest, const fastd_peer_t *subject, size_t limit);
 
+enum {
+	PUNCH_METADATA_RELAY_UDP = 1u << 0,
+	PUNCH_METADATA_RELAY_TCP = 1u << 1,
+};
+
 /** Returns true if a wanted relay direction is blocked by missing destination-side metadata */
 static bool peer_direction_needs_missing_metadata(
 	const fastd_peer_t *subject, const fastd_peer_t *dest, bool wanted) {
@@ -1887,60 +1892,109 @@ static void send_nat_info_extra_endpoints(
 	}
 }
 
-/** Relays one peer's current UDP/TCP NAT metadata to another established peer */
-static size_t relay_nat_metadata_to_peer(fastd_peer_t *dest, const fastd_peer_t *subject, size_t limit) {
+static bool nat_metadata_relay_allowed(fastd_peer_t *dest, const fastd_peer_t *subject, size_t limit) {
 	if (!limit || !fastd_peer_is_established(dest) || dest == subject)
-		return 0;
+		return false;
 	if (!fastd_peer_get_nat_traversal(dest) || !fastd_peer_get_nat_traversal(subject))
+		return false;
+
+	return true;
+}
+
+/** Relays one peer's current UDP NAT metadata to another established peer */
+static size_t relay_udp_nat_metadata_to_peer(fastd_peer_t *dest, const fastd_peer_t *subject, size_t limit) {
+	if (!nat_metadata_relay_allowed(dest, subject, limit))
+		return 0;
+	if (!peer_has_fresh_punch_nat_info(subject))
 		return 0;
 
 	const void *subject_key = conf.protocol->get_peer_key(subject);
 	size_t key_len = conf.protocol->key_length();
 	size_t sent = 0;
 
-	if (peer_has_fresh_punch_nat_info(subject)) {
+	if (send_endpoint_message(
+		    dest, FASTD_PUNCH_NAT_INFO, subject_key, key_len, &subject->punch_endpoint,
+		    subject->punch_nat_type, subject->punch_min_port, subject->punch_max_port,
+		    subject->punch_port_delta, FASTD_PUNCH_NAT_INFO_RELAYED, 0))
+		sent++;
+
+	size_t i;
+	for (i = 0; sent < limit && i < subject->n_punch_endpoints; i++) {
+		const fastd_peer_punch_endpoint_t *endpoint = &subject->punch_endpoints[i];
+		if (fastd_peer_address_equal(&endpoint->address, &subject->punch_endpoint))
+			continue;
+
 		if (send_endpoint_message(
-			    dest, FASTD_PUNCH_NAT_INFO, subject_key, key_len, &subject->punch_endpoint,
-			    subject->punch_nat_type, subject->punch_min_port, subject->punch_max_port,
-			    subject->punch_port_delta, FASTD_PUNCH_NAT_INFO_RELAYED, 0))
+			    dest, FASTD_PUNCH_NAT_INFO_EXTRA, subject_key, key_len, &endpoint->address,
+			    endpoint->nat_type, endpoint->min_port, endpoint->max_port, endpoint->port_delta,
+			    FASTD_PUNCH_NAT_INFO_RELAYED, 0))
 			sent++;
-
-		size_t i;
-		for (i = 0; sent < limit && i < subject->n_punch_endpoints; i++) {
-			const fastd_peer_punch_endpoint_t *endpoint = &subject->punch_endpoints[i];
-			if (fastd_peer_address_equal(&endpoint->address, &subject->punch_endpoint))
-				continue;
-
-			if (send_endpoint_message(
-				    dest, FASTD_PUNCH_NAT_INFO_EXTRA, subject_key, key_len, &endpoint->address,
-				    endpoint->nat_type, endpoint->min_port, endpoint->max_port,
-				    endpoint->port_delta, FASTD_PUNCH_NAT_INFO_RELAYED, 0))
-				sent++;
-		}
 	}
 
-	if (sent >= limit)
-		return sent;
+	return sent;
+}
 
-	if (peer_has_fresh_tcp_punch_nat_info(subject) && tcp_nat_type_punchable(subject->tcp_punch_nat_type)) {
+/** Relays one peer's current TCP NAT metadata to another established peer */
+static size_t relay_tcp_nat_metadata_to_peer(fastd_peer_t *dest, const fastd_peer_t *subject, size_t limit) {
+	if (!nat_metadata_relay_allowed(dest, subject, limit))
+		return 0;
+	if (!peer_has_fresh_tcp_punch_nat_info(subject) || !tcp_nat_type_punchable(subject->tcp_punch_nat_type))
+		return 0;
+
+	const void *subject_key = conf.protocol->get_peer_key(subject);
+	size_t key_len = conf.protocol->key_length();
+	size_t sent = 0;
+
+	if (send_endpoint_message(
+		    dest, FASTD_PUNCH_TCP_NAT_INFO, subject_key, key_len, &subject->tcp_punch_endpoint,
+		    subject->tcp_punch_nat_type, subject->tcp_punch_min_port, subject->tcp_punch_max_port, 0,
+		    FASTD_PUNCH_NAT_INFO_RELAYED, 0))
+		sent++;
+
+	size_t i;
+	for (i = 0; sent < limit && i < subject->n_tcp_punch_endpoints; i++) {
+		const fastd_peer_address_t *endpoint = &subject->tcp_punch_endpoints[i];
+		if (fastd_peer_address_equal(endpoint, &subject->tcp_punch_endpoint))
+			continue;
+
 		if (send_endpoint_message(
-			    dest, FASTD_PUNCH_TCP_NAT_INFO, subject_key, key_len, &subject->tcp_punch_endpoint,
-			    subject->tcp_punch_nat_type, subject->tcp_punch_min_port, subject->tcp_punch_max_port,
-			    0, FASTD_PUNCH_NAT_INFO_RELAYED, 0))
+			    dest, FASTD_PUNCH_TCP_NAT_INFO_EXTRA, subject_key, key_len, endpoint,
+			    subject->tcp_punch_nat_type, subject->tcp_punch_min_port, subject->tcp_punch_max_port, 0,
+			    FASTD_PUNCH_NAT_INFO_RELAYED, 0))
 			sent++;
+	}
 
-		size_t i;
-		for (i = 0; sent < limit && i < subject->n_tcp_punch_endpoints; i++) {
-			const fastd_peer_address_t *endpoint = &subject->tcp_punch_endpoints[i];
-			if (fastd_peer_address_equal(endpoint, &subject->tcp_punch_endpoint))
-				continue;
+	return sent;
+}
 
-			if (send_endpoint_message(
-				    dest, FASTD_PUNCH_TCP_NAT_INFO_EXTRA, subject_key, key_len, endpoint,
-				    subject->tcp_punch_nat_type, subject->tcp_punch_min_port,
-				    subject->tcp_punch_max_port, 0, FASTD_PUNCH_NAT_INFO_RELAYED, 0))
-				sent++;
-		}
+/** Relays one peer's current UDP/TCP NAT metadata to another established peer */
+static size_t relay_nat_metadata_to_peer(fastd_peer_t *dest, const fastd_peer_t *subject, size_t limit) {
+	size_t sent = relay_udp_nat_metadata_to_peer(dest, subject, limit);
+	if (sent < limit)
+		sent += relay_tcp_nat_metadata_to_peer(dest, subject, limit - sent);
+
+	return sent;
+}
+
+/** Propagates newly learned NAT metadata to established peers before a pair task needs it */
+static size_t relay_nat_metadata_to_route_peers(
+	const fastd_peer_t *origin, const fastd_peer_t *subject, size_t limit, unsigned families) {
+	if (!limit || !conf.punch_control_relay || !punch_control_supported() || !subject)
+		return 0;
+	if (!fastd_peer_is_established(subject) || !fastd_peer_get_nat_traversal(subject))
+		return 0;
+
+	size_t sent = 0;
+	size_t i;
+	for (i = 0; i < VECTOR_LEN(ctx.peers) && sent < limit; i++) {
+		fastd_peer_t *dest = VECTOR_INDEX(ctx.peers, i);
+		if (dest == origin || dest == subject)
+			continue;
+
+		if (families & PUNCH_METADATA_RELAY_UDP)
+			sent += relay_udp_nat_metadata_to_peer(dest, subject, limit - sent);
+		if (sent < limit && (families & PUNCH_METADATA_RELAY_TCP))
+			sent += relay_tcp_nat_metadata_to_peer(dest, subject, limit - sent);
 	}
 
 	return sent;
@@ -3474,7 +3528,8 @@ static void handle_nat_info(fastd_peer_t *sender, const fastd_punch_endpoint_t *
 
 	const uint8_t *key = endpoint_message_key(FASTD_PUNCH_NAT_INFO, payload);
 	fastd_peer_t *subject = find_peer_by_key(key, key_len);
-	if (!nat_info_sender_allowed(sender, subject, (payload->reserved & FASTD_PUNCH_NAT_INFO_RELAYED) != 0))
+	bool relayed = (payload->reserved & FASTD_PUNCH_NAT_INFO_RELAYED) != 0;
+	if (!nat_info_sender_allowed(sender, subject, relayed))
 		return;
 
 	fastd_peer_address_t endpoint;
@@ -3509,6 +3564,8 @@ static void handle_nat_info(fastd_peer_t *sender, const fastd_punch_endpoint_t *
 			       old_endpoints, old_n_endpoints, subject->punch_endpoints, subject->n_punch_endpoints);
 	if (changed && udp_metadata_update_should_wake(subject, was_fresh, old_nat_type, subject->punch_nat_type))
 		wake_punch_task_manager_for_peer_metadata(subject);
+	if (changed && !relayed)
+		relay_nat_metadata_to_route_peers(sender, subject, conf.punch_max_packets, PUNCH_METADATA_RELAY_UDP);
 
 	pr_debug(
 		"received punch NAT info from %P: %s %I", subject, fastd_nat_type_name(subject->punch_nat_type),
@@ -3523,7 +3580,8 @@ static void handle_tcp_nat_info(fastd_peer_t *sender, const fastd_punch_endpoint
 
 	const uint8_t *key = endpoint_message_key(FASTD_PUNCH_TCP_NAT_INFO, payload);
 	fastd_peer_t *subject = find_peer_by_key(key, key_len);
-	if (!nat_info_sender_allowed(sender, subject, (payload->reserved & FASTD_PUNCH_NAT_INFO_RELAYED) != 0))
+	bool relayed = (payload->reserved & FASTD_PUNCH_NAT_INFO_RELAYED) != 0;
+	if (!nat_info_sender_allowed(sender, subject, relayed))
 		return;
 
 	fastd_peer_address_t endpoint;
@@ -3558,6 +3616,8 @@ static void handle_tcp_nat_info(fastd_peer_t *sender, const fastd_punch_endpoint
 			       subject->n_tcp_punch_endpoints);
 	if (changed)
 		wake_punch_task_manager_for_peer_metadata(subject);
+	if (changed && !relayed)
+		relay_nat_metadata_to_route_peers(sender, subject, conf.punch_max_packets, PUNCH_METADATA_RELAY_TCP);
 
 	pr_debug(
 		"received TCP punch NAT info from %P: %s %I", subject, fastd_nat_type_name(subject->tcp_punch_nat_type),
@@ -3653,6 +3713,8 @@ static void handle_listener_info(fastd_peer_t *sender, const fastd_punch_endpoin
 			       old_endpoints, old_n_endpoints, sender->punch_endpoints, sender->n_punch_endpoints);
 	if (changed && udp_metadata_update_should_wake(sender, was_fresh, old_nat_type, sender->punch_nat_type))
 		wake_punch_task_manager_for_peer_metadata(sender);
+	if (changed)
+		relay_nat_metadata_to_route_peers(sender, sender, conf.punch_max_packets, PUNCH_METADATA_RELAY_UDP);
 
 	pr_debug("received punch listener info from %P: listener %u %I", sender, (unsigned)listener_id, &endpoint);
 }
