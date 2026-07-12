@@ -3955,6 +3955,8 @@ static void test_status_punch_exposes_udp_socket_pool(void **state UNUSED) {
 	assert_int_equal(json_get_int_required(runtime_state, "peer_b_id"), 78);
 	assert_string_equal(json_get_string_required(runtime_state, "peer_a"), "peer-a");
 	assert_string_equal(json_get_string_required(runtime_state, "peer_b"), "peer-b");
+	assert_string_equal(json_get_string_required(runtime_state, "state"), "in-flight");
+	assert_string_equal(json_get_string_required(runtime_state, "reason"), "waiting-for-result");
 	assert_int_equal(json_get_int_required(runtime_state, "updated_age"), 250);
 	assert_true(json_get_bool_required(runtime_state, "in_flight"));
 	assert_true(json_get_bool_required(runtime_state, "backoff"));

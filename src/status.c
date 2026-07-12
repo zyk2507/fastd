@@ -506,6 +506,57 @@ static void print_punch_table(json_object *punch) {
 	print_status_table("Punch", table);
 }
 
+/** Prints current peer-pair punch task runtime states */
+static void print_p2p_pair_table(json_object *punch) {
+	json_object *task_manager = get_object_member(punch, "task_manager");
+	json_object *runtime_states = get_array_member(task_manager, "runtime_state_list");
+	size_t len = runtime_states ? json_object_array_length(runtime_states) : 0;
+	if (!len)
+		return;
+
+	ft_table_t *table = create_status_table();
+	size_t row = ft_cur_row(table);
+	ft_write_ln(table, "Peer A", "Peer B", "State", "Reason", "Demand", "Next", "Attempts", "Results");
+	mark_header_row(table, row);
+	ft_set_cell_prop(table, FT_ANY_ROW, 6, FT_CPROP_TEXT_ALIGN, FT_ALIGNED_RIGHT);
+	ft_set_cell_prop(table, FT_ANY_ROW, 7, FT_CPROP_TEXT_ALIGN, FT_ALIGNED_RIGHT);
+
+	for (size_t i = 0; i < len; i++) {
+		json_object *state = json_object_array_get_idx(runtime_states, i);
+		if (!state || json_object_get_type(state) != json_type_object)
+			continue;
+
+		char next[64] = "-";
+		int64_t next_ms = get_int_member(state, "in_flight_ms");
+		if (!next_ms)
+			next_ms = get_int_member(state, "backoff_ms");
+		if (next_ms)
+			format_duration(next, next_ms);
+
+		const char *demand = "-";
+		if (get_bool_member(state, "pending_demand"))
+			demand = "pending";
+		else if (get_bool_member(state, "recent_demand"))
+			demand = "recent";
+
+		char attempts[64], results[64];
+		snprintf(
+			attempts, sizeof(attempts), "%lld/%lld", (long long)get_int_member(state, "launch_count"),
+			(long long)get_int_member(state, "abort_count"));
+		snprintf(
+			results, sizeof(results), "%lld/%lld", (long long)get_int_member(state, "result_count"),
+			(long long)get_int_member(state, "busy_count"));
+
+		ft_write_ln(
+			table, value_or_dash(get_string_member(state, "peer_a")),
+			value_or_dash(get_string_member(state, "peer_b")),
+			value_or_dash(get_string_member(state, "state")),
+			value_or_dash(get_string_member(state, "reason")), demand, next, attempts, results);
+	}
+
+	print_status_table("P2P Pairs", table);
+}
+
 /** Adds one traffic statistics row */
 static void add_traffic_row(ft_table_t *table, const char *label, json_object *stats, const char *name) {
 	char bytes[32], packets[32];
@@ -673,6 +724,7 @@ static void print_status_human(json_object *json) {
 	print_peer_list_table(peers);
 	print_connection_table(peers);
 	print_hole_punch_table(peers);
+	print_p2p_pair_table(get_object_member(json, "punch"));
 }
 
 /** Queries a status socket and prints its result */
@@ -1655,12 +1707,39 @@ static json_object *dump_punch_pair_runtime(const fastd_punch_pair_runtime_t *ru
 	bool backoff = punch_runtime_timeout_active(runtime->backoff_until);
 	bool recent_demand = punch_runtime_timeout_active(runtime->recent_demand_until);
 	bool pending_demand = recent_demand && runtime->demand_seq != runtime->served_demand_seq;
+	const char *state = "idle";
+	const char *reason = "no-active-demand";
+
+	if (in_flight) {
+		state = "in-flight";
+		reason = "waiting-for-result";
+	} else if (backoff) {
+		state = "backoff";
+		reason = runtime->abort_count ? "attempt-timeout" : "remote-backoff";
+	} else if (pending_demand) {
+		state = "pending";
+		reason = "traffic-demand";
+	} else if (recent_demand) {
+		state = "recent";
+		reason = "demand-served";
+	} else if (runtime->busy_count) {
+		state = "backoff-expired";
+		reason = "remote-busy";
+	} else if (runtime->result_count) {
+		state = "attempted";
+		reason = "result-observed";
+	} else if (runtime->launch_count) {
+		state = "attempted";
+		reason = "launched";
+	}
 
 	struct json_object *ret = json_object_new_object();
 	json_object_object_add(ret, "peer_a_id", json_object_new_int64(runtime->peer_a_id));
 	json_object_object_add(ret, "peer_b_id", json_object_new_int64(runtime->peer_b_id));
 	json_object_object_add(ret, "peer_a", wrap_peer_name_by_id(runtime->peer_a_id));
 	json_object_object_add(ret, "peer_b", wrap_peer_name_by_id(runtime->peer_b_id));
+	json_object_object_add(ret, "state", json_object_new_string(state));
+	json_object_object_add(ret, "reason", json_object_new_string(reason));
 	json_object_object_add(ret, "updated_age", json_object_new_int64(timeout_age(runtime->updated)));
 	json_object_object_add(ret, "in_flight", json_object_new_boolean(in_flight));
 	json_object_object_add(ret, "backoff", json_object_new_boolean(backoff));
