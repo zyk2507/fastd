@@ -2437,7 +2437,11 @@ bool fastd_peer_add(fastd_peer_t *peer) {
 		}
 	}
 
+	if (!ctx.next_peer_id)
+		ctx.next_peer_id++;
 	peer->id = ctx.next_peer_id++;
+	if (!ctx.next_peer_id)
+		ctx.next_peer_id++;
 
 	VECTOR_ADD(ctx.peers, peer);
 

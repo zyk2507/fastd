@@ -38,6 +38,10 @@ fail() {
 				tail -80 "$WORK/$name.log" | sed 's/^/# /'
 			fi
 		done
+		if [[ -f "$WORK/hard-fail.reason" ]]; then
+			printf '# --- hard-fail reason ---\n'
+			cat "$WORK/hard-fail.reason" | sed 's/^/# /'
+		fi
 	fi
 	exit 1
 }
@@ -48,6 +52,7 @@ done
 
 IPERF_MODE=${FASTD_NAT_PUNCH_IPERF:-0}
 TCP_MODE=${FASTD_NAT_PUNCH_TCP:-0}
+HARD_FAIL_MODE=${FASTD_NAT_PUNCH_HARD_FAIL:-0}
 if [[ "$IPERF_MODE" == 1 ]]; then
 	command -v iperf3 >/dev/null 2>&1 || skip 'iperf3 not available'
 fi
@@ -81,6 +86,7 @@ PING_WAIT_SLEEP=0.1
 PING_TIMEOUT=0.4
 FAILOVER_WAIT_ATTEMPTS=18
 FAILOVER_WAIT_SLEEP=0.2
+HARD_FAIL_WAIT_ATTEMPTS=40
 TEST_PUNCH_KEEPALIVE=2
 IPERF_DURATION=${FASTD_IPERF_DURATION:-9}
 IPERF_ACTIVE_CUT_DURATION=${FASTD_IPERF_ACTIVE_CUT_DURATION:-9}
@@ -555,6 +561,18 @@ clear_blocked_direct_path() {
 	ip netns exec "$NS_RB" nft delete table ip failover >/dev/null 2>&1 || true
 }
 
+block_direct_udp_between_nat_peers() {
+	run ip netns exec "$NS_RA" nft add table ip hardfail
+	run ip netns exec "$NS_RA" nft 'add chain ip hardfail forward { type filter hook forward priority -150; policy accept; }'
+	run ip netns exec "$NS_RA" nft add rule ip hardfail forward ip daddr 10.52.0.3 meta l4proto udp drop
+	run ip netns exec "$NS_RA" nft add rule ip hardfail forward ip saddr 10.52.0.3 meta l4proto udp drop
+
+	run ip netns exec "$NS_RB" nft add table ip hardfail
+	run ip netns exec "$NS_RB" nft 'add chain ip hardfail forward { type filter hook forward priority -150; policy accept; }'
+	run ip netns exec "$NS_RB" nft add rule ip hardfail forward ip daddr 10.52.0.2 meta l4proto udp drop
+	run ip netns exec "$NS_RB" nft add rule ip hardfail forward ip saddr 10.52.0.2 meta l4proto udp drop
+}
+
 direct_active_ports_changed() {
 	local a_local=$1 a_remote=$2 b_local=$3 b_remote=$4
 
@@ -672,6 +690,101 @@ if (a.get("nat") or {}).get("type") != "symmetric":
     sys.exit(1)
 if (b.get("nat") or {}).get("type") != "symmetric":
     sys.exit(1)
+
+sys.exit(0)
+PY
+}
+
+hard_symmetric_failure_bounded() {
+	python3 - "$WORK/a.json" "$WORK/b.json" "$WORK/c.json" "$WORK/hard-fail.reason" <<'PY'
+import json
+import sys
+
+reason_path = sys.argv[4]
+
+def reject(reason):
+    with open(reason_path, "w") as f:
+        f.write(reason + "\n")
+    sys.exit(1)
+
+try:
+	a = json.load(open(sys.argv[1]))
+	b = json.load(open(sys.argv[2]))
+	c = json.load(open(sys.argv[3]))
+except Exception:
+	reject("status-json-unavailable")
+
+def find_peer(doc, name):
+    for peer in doc.get("peers", {}).values():
+        if peer.get("name") == name:
+            return peer
+    return {}
+
+def direct_established(doc, name):
+    peer = find_peer(doc, name)
+    connection = peer.get("connection") or {}
+    hole_punch = peer.get("hole_punch") or {}
+    return "established" in connection and bool(hole_punch.get("established"))
+
+def pool_bounded(doc):
+    punch = doc.get("punch") or {}
+    pool = punch.get("udp_punch_socket_pool") or {}
+    limit = pool.get("limit")
+    public_limit = pool.get("public_listener_limit", 0)
+    active = pool.get("active", 0)
+    public = pool.get("public_listeners", 0)
+    allocated = pool.get("allocated", 0)
+    if not isinstance(limit, int) or limit <= 0:
+        return False
+    return active <= limit and public <= public_limit and allocated <= limit + public_limit
+
+def peer_udp_symmetric(doc, name):
+	peer = find_peer(doc, name)
+	hole_punch = peer.get("hole_punch") or {}
+	metadata = hole_punch.get("udp_metadata") or {}
+	return (
+		metadata.get("type") == "symmetric"
+		and isinstance(hole_punch.get("hard_symmetric_port_index"), int)
+		and isinstance(hole_punch.get("hard_symmetric_round"), int)
+	)
+
+def pair_runtime_converged(doc):
+	punch = doc.get("punch") or {}
+	manager = punch.get("task_manager") or {}
+	for state in manager.get("runtime_state_list") or []:
+		if {state.get("peer_a"), state.get("peer_b")} != {"a", "b"}:
+			continue
+		return (
+			state.get("backoff") is True
+			and state.get("in_flight") is False
+			and state.get("abort_count", 0) >= 1
+			and state.get("launch_count", 0) <= 2
+			and state.get("result_count", 0) >= 2
+		)
+	return False
+
+if direct_established(a, "b") or direct_established(b, "a"):
+	reject("direct-established")
+
+if not (pool_bounded(a) and pool_bounded(b) and pool_bounded(c)):
+	reject("pool-unbounded")
+
+if not (peer_udp_symmetric(c, "a") and peer_udp_symmetric(c, "b")):
+	reject("relay-metadata-not-symmetric")
+
+if not pair_runtime_converged(c):
+	reject("pair-runtime-not-converged")
+
+punch = c.get("punch") or {}
+counters = punch.get("counters") or {}
+manager = punch.get("task_manager") or {}
+
+if counters.get("result_rx", 0) < 2:
+	reject("result-rx-too-low")
+if manager.get("runs", 0) < 1 or manager.get("pairs", 0) < 1 or manager.get("history_count", 0) < 1:
+	reject("manager-not-active")
+if manager.get("budget_exhausted", 0) != 0:
+	reject("budget-exhausted")
 
 sys.exit(0)
 PY
@@ -1677,6 +1790,42 @@ run_tcp_iperf_tests() {
 
 	printf 'ok 1 - TCP direct punch path recovers and carries bidirectional iperf3 traffic after active cut\n'
 }
+
+run_hard_symmetric_failure_tests() {
+	printf '1..1\n'
+	CURRENT_TEST=1
+
+	start_fake_stun hard_both
+	block_direct_udp_between_nat_peers
+	write_hard_symmetric_confs
+	start_fastds
+
+	ok=false
+	for _ in $(seq 1 "$HARD_FAIL_WAIT_ATTEMPTS"); do
+		sleep "$FAST_WAIT_SLEEP"
+		check_fastds_alive
+		dump_statuses
+
+		if [[ -f "$WORK/a.json" && -f "$WORK/b.json" ]] && direct_peer_connected; then
+			fail 'hard-symmetric direct path established even though A/B UDP was blocked'
+		fi
+
+		if [[ -f "$WORK/a.json" && -f "$WORK/b.json" && -f "$WORK/c.json" ]] &&
+			hard_symmetric_nat_types_seen && hard_symmetric_failure_bounded; then
+			ok=true
+			break
+		fi
+	done
+
+	[[ "$ok" == true ]] || fail 'hard-symmetric failure did not converge within bounded socket/task limits'
+
+	printf 'ok 1 - hard-symmetric failure remains bounded when direct UDP is unreachable\n'
+}
+
+if [[ "$HARD_FAIL_MODE" == 1 ]]; then
+	run_hard_symmetric_failure_tests
+	exit 0
+fi
 
 if [[ "$IPERF_MODE" == 1 && "$TCP_MODE" == 1 ]]; then
 	run_tcp_iperf_tests

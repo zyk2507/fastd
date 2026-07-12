@@ -719,6 +719,18 @@ static bool task_timeout_active(fastd_timeout_t timeout) {
 	return timeout != FASTD_TIMEOUT_INV && !fastd_timed_out(timeout);
 }
 
+/** Returns true if a remote result means the launched punch is still inside its outcome window */
+static bool punch_result_keeps_pair_in_flight(fastd_punch_result_t result) {
+	switch (result) {
+	case FASTD_PUNCH_RESULT_ACCEPTED:
+	case FASTD_PUNCH_RESULT_HANDSHAKE:
+		return true;
+
+	default:
+		return false;
+	}
+}
+
 static bool punch_result_causes_relay_backoff(fastd_punch_result_t result);
 
 /** Returns true if a peer-pair runtime entry still carries useful scheduling state */
@@ -761,6 +773,8 @@ static void task_manager_compact_pair_states(void) {
 
 		if (aborted) {
 			runtime->in_flight_until = FASTD_TIMEOUT_INV;
+			if (!task_timeout_active(runtime->backoff_until))
+				runtime->backoff_until = ctx.now + FASTD_PUNCH_SUPPRESSION_TIME;
 			runtime->abort_count++;
 			runtime->updated = ctx.now;
 			ctx.punch_task_manager_aborted++;
@@ -826,11 +840,28 @@ static void wake_punch_task_manager_now(void) {
 	fastd_task_schedule(&ctx.next_maintenance, TASK_TYPE_MAINTENANCE, ctx.now);
 }
 
+/** Invalidates pair-level punch attempts that used stale metadata for one peer */
+static void reset_pair_runtime_for_peer_metadata(const fastd_peer_t *peer) {
+	size_t i;
+	for (i = 0; i < VECTOR_LEN(ctx.punch_pair_states); i++) {
+		fastd_punch_pair_runtime_t *runtime = &VECTOR_INDEX(ctx.punch_pair_states, i);
+		if (runtime->peer_a_id != peer->id && runtime->peer_b_id != peer->id)
+			continue;
+
+		runtime->in_flight_until = FASTD_TIMEOUT_INV;
+		runtime->backoff_until = FASTD_TIMEOUT_INV;
+		if (task_timeout_active(runtime->recent_demand_until) && runtime->demand_seq)
+			runtime->served_demand_seq = runtime->demand_seq - 1;
+		runtime->updated = ctx.now;
+	}
+}
+
 /** Wakes relay collection after fresh peer NAT metadata arrives */
 static void wake_punch_task_manager_for_peer_metadata(const fastd_peer_t *peer) {
 	if (!peer || !fastd_peer_is_established(peer) || !fastd_peer_get_nat_traversal(peer))
 		return;
 
+	reset_pair_runtime_for_peer_metadata(peer);
 	wake_punch_task_manager_now();
 }
 
@@ -868,18 +899,28 @@ static void pair_runtime_mark_result(
 		return;
 
 	fastd_punch_pair_runtime_t *runtime = get_pair_runtime(sender, subject);
-	runtime->in_flight_until = FASTD_TIMEOUT_INV;
 	runtime->updated = ctx.now;
 	if (runtime->result_count < UINT16_MAX)
 		runtime->result_count++;
 
-	if (punch_result_causes_relay_backoff(result)) {
+	if (punch_result_keeps_pair_in_flight(result)) {
+		fastd_timeout_t wait_until =
+			backoff_timeout != FASTD_TIMEOUT_INV ? backoff_timeout : ctx.now + FASTD_HOLE_PUNCH_TIMEOUT;
+		if (task_timeout_active(runtime->in_flight_until))
+			fastd_timeout_advance(&runtime->in_flight_until, wait_until);
+		else
+			runtime->in_flight_until = wait_until;
+		runtime->backoff_until = FASTD_TIMEOUT_INV;
+	}
+	else if (punch_result_causes_relay_backoff(result)) {
+		runtime->in_flight_until = FASTD_TIMEOUT_INV;
 		if (runtime->busy_count < UINT16_MAX)
 			runtime->busy_count++;
 		runtime->backoff_until = backoff_timeout != FASTD_TIMEOUT_INV ? backoff_timeout :
-								     ctx.now + FASTD_PUNCH_SUPPRESSION_TIME;
+									     ctx.now + FASTD_PUNCH_SUPPRESSION_TIME;
 	}
 	else {
+		runtime->in_flight_until = FASTD_TIMEOUT_INV;
 		runtime->backoff_until = FASTD_TIMEOUT_INV;
 	}
 }
@@ -1360,7 +1401,10 @@ static void task_manager_record_pair_result(
 
 	fastd_timeout_t next_retry = FASTD_TIMEOUT_INV;
 	size_t backoff_recorded = 0;
-	if (endpoint && punch_result_causes_relay_backoff(result)) {
+	if (punch_result_keeps_pair_in_flight(result)) {
+		next_retry = ctx.now + FASTD_HOLE_PUNCH_TIMEOUT;
+	}
+	else if (endpoint && punch_result_causes_relay_backoff(result)) {
 		next_retry = fastd_peer_punch_relay_backoff_timeout(sender, endpoint);
 		if (next_retry != FASTD_TIMEOUT_INV)
 			backoff_recorded = 1;

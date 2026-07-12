@@ -8,6 +8,7 @@
 #include "method.h"
 #include "peer.h"
 #include "peer_hashtable.h"
+#include "hole_punch.h"
 #include "punch_rpc.h"
 
 #include <setjmp.h>
@@ -1915,12 +1916,16 @@ static void test_punch_pair_runtime_tracks_inflight_backoff_and_demand(void **st
 	assert_false(pair_state.pending_demand);
 	assert_false(pair_state.collected);
 	assert_true(pair_state.waiting);
+	assert_true(pair_state.in_flight);
+	assert_int_equal(pair_state.next_retry, ctx.now + FASTD_HOLE_PUNCH_TIMEOUT);
 
 	fastd_punch_note_peer_pair_demand(&a, &b);
 	pair_state = fastd_punch_test_pair_state(&a, &b);
 	assert_true(pair_state.recent_demand);
 	assert_true(pair_state.pending_demand);
-	assert_true(pair_state.collected);
+	assert_false(pair_state.collected);
+	assert_true(pair_state.in_flight);
+	assert_int_equal(pair_state.next_retry, ctx.now + FASTD_HOLE_PUNCH_TIMEOUT);
 	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).demand_seq, 2);
 	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).served_demand_seq, 1);
 
@@ -1954,6 +1959,11 @@ static void test_punch_pair_runtime_tracks_inflight_backoff_and_demand(void **st
 	assert_int_equal(ctx.punch_pair_tasks[latest_pos].stage, PUNCH_PAIR_TASK_STAGE_ABORTED);
 	assert_int_equal(ctx.punch_pair_tasks[latest_pos].peer_a_id, 20);
 	assert_int_equal(ctx.punch_pair_tasks[latest_pos].peer_b_id, 30);
+	assert_int_equal(ctx.punch_pair_tasks[latest_pos].next_retry, ctx.now + FASTD_PUNCH_SUPPRESSION_TIME);
+	pair_state = fastd_punch_test_pair_state(&a, &b);
+	assert_true(pair_state.backoff);
+	assert_false(pair_state.in_flight);
+	assert_int_equal(pair_state.next_retry, ctx.now + FASTD_PUNCH_SUPPRESSION_TIME);
 
 	fastd_task_unschedule(&ctx.next_maintenance);
 	fastd_task_schedule(&ctx.next_maintenance, TASK_TYPE_MAINTENANCE, ctx.now - 1);
@@ -3104,6 +3114,7 @@ static void test_punch_metadata_updates_wake_task_manager(void **state UNUSED) {
 	bool old_control_relay = conf.punch_control_relay;
 	fastd_task_t old_next_maintenance = ctx.next_maintenance;
 	fastd_pqueue_t *old_task_queue = ctx.task_queue;
+	__typeof__(ctx.punch_pair_states) old_pair_states = ctx.punch_pair_states;
 	size_t old_encrypt_headroom = conf.encrypt_headroom;
 	size_t old_max_buffer = ctx.max_buffer;
 	uint64_t old_rx = ctx.punch_control_rx;
@@ -3111,6 +3122,7 @@ static void test_punch_metadata_updates_wake_task_manager(void **state UNUSED) {
 
 	ctx.next_maintenance = (fastd_task_t){};
 	ctx.task_queue = NULL;
+	ctx.punch_pair_states = (__typeof__(ctx.punch_pair_states)){};
 	ctx.now = 1000;
 	conf.protocol = &test_protocol;
 	conf.punch_control_relay = true;
@@ -3134,13 +3146,34 @@ static void test_punch_metadata_updates_wake_task_manager(void **state UNUSED) {
 	};
 	test_lookup_peer = &peer;
 
+	fastd_peer_t other = {
+		.id = 30,
+		.group = &group,
+		.config_state = CONFIG_STATIC,
+		.name = "peer-c",
+		.state = STATE_ESTABLISHED,
+	};
+
+	fastd_punch_note_peer_pair_demand(&peer, &other);
+	fastd_punch_test_pair_runtime_mark_launched(&peer, &other);
+	VECTOR_INDEX(ctx.punch_pair_states, 0).backoff_until = ctx.now + FASTD_PUNCH_SUPPRESSION_TIME;
+	fastd_punch_test_pair_state_t pair_state = fastd_punch_test_pair_state(&peer, &other);
+	assert_true(pair_state.in_flight);
+	assert_true(pair_state.backoff);
+	assert_false(pair_state.pending_demand);
+
 	fastd_peer_address_t udp_endpoint = addr4(0xc6336408, 52000);
+	fastd_task_unschedule(&ctx.next_maintenance);
 	fastd_task_schedule(&ctx.next_maintenance, TASK_TYPE_MAINTENANCE, ctx.now + 10000);
 	assert_true(fastd_punch_handle_control(
 		&peer,
 		make_punch_control_buffer(
 			TEST_PUNCH_NAT_INFO, &udp_endpoint, FASTD_NAT_FULL_CONE, test_key_b, sizeof(test_key_b))));
 	assert_int_equal(fastd_task_timeout(&ctx.next_maintenance), ctx.now);
+	pair_state = fastd_punch_test_pair_state(&peer, &other);
+	assert_false(pair_state.in_flight);
+	assert_false(pair_state.backoff);
+	assert_true(pair_state.pending_demand);
 
 	fastd_task_unschedule(&ctx.next_maintenance);
 	fastd_task_schedule(&ctx.next_maintenance, TASK_TYPE_MAINTENANCE, ctx.now + 10000);
@@ -3186,9 +3219,11 @@ static void test_punch_metadata_updates_wake_task_manager(void **state UNUSED) {
 	assert_int_equal(fastd_task_timeout(&ctx.next_maintenance), ctx.now);
 
 	fastd_task_unschedule(&ctx.next_maintenance);
+	VECTOR_FREE(ctx.punch_pair_states);
 	test_lookup_peer = old_lookup_peer;
 	ctx.next_maintenance = old_next_maintenance;
 	ctx.task_queue = old_task_queue;
+	ctx.punch_pair_states = old_pair_states;
 	conf.protocol = old_protocol;
 	conf.peer_group = old_peer_group;
 	conf.punch_control_relay = old_control_relay;
@@ -3368,7 +3403,7 @@ static void test_punch_pair_task_history_records_remote_results(void **state UNU
 	assert_int_equal(latest->subject_id, 30);
 	assert_int_equal(latest->destination_id, 40);
 	assert_int_equal(latest->backoff_skipped, 0);
-	assert_int_equal(latest->next_retry, FASTD_TIMEOUT_INV);
+	assert_int_equal(latest->next_retry, ctx.now + FASTD_HOLE_PUNCH_TIMEOUT);
 
 	fastd_peer_add_punch_relay_backoff(&sender, &endpoint);
 	fastd_punch_test_task_manager_record_pair_result(
@@ -3434,7 +3469,7 @@ static void test_punch_remote_result_ext_drives_state_and_legacy_is_deduped(void
 		&sender, &subject, TEST_PUNCH_RESULT_HANDSHAKE, TEST_PUNCH_SEND_HARD_SYM, &endpoint));
 	assert_int_equal(ctx.punch_result_rx, 1);
 	assert_int_equal(ctx.punch_task_manager_outcome_handshake, 1);
-	assert_false(fastd_punch_test_pair_state(&sender, &subject).in_flight);
+	assert_true(fastd_punch_test_pair_state(&sender, &subject).in_flight);
 	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).result_count, 1);
 	assert_int_equal(ctx.punch_pair_task_count, 1);
 
