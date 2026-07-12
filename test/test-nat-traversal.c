@@ -3528,6 +3528,21 @@ static void test_punch_send_tcp_preserves_multiple_received_endpoints(void **sta
 	assert_int_equal(test_control_send_types[2], TEST_PUNCH_RESULT);
 	assert_int_equal(test_control_send_types[3], TEST_PUNCH_RESULT_EXT);
 
+	fastd_peer_address_t endpoint2 = addr4(0xc6336408, 52002);
+	assert_true(fastd_punch_handle_control(
+		&sender,
+		make_punch_control_buffer(
+			TEST_PUNCH_SEND_TCP, &endpoint2, FASTD_NAT_SYMMETRIC, test_key_b, sizeof(test_key_b))));
+	assert_int_equal(peer.tcp_punch_nat_type, FASTD_NAT_FULL_CONE);
+	assert_int_equal(peer.n_tcp_punch_endpoints, 2);
+	assert_int_equal(port4(&peer.tcp_punch_endpoint), 52000);
+	assert_false(fastd_peer_is_punch_control_candidate_transport(&peer, &endpoint2, TRANSPORT_TCP, NULL, NULL));
+	assert_int_equal(fastd_peer_direct_candidate_count_by_source(&peer, DIRECT_CANDIDATE_PUNCH_CONTROL), 2);
+	assert_int_equal(test_handshake_count, 1);
+	assert_int_equal(test_control_send_count, 6);
+	assert_int_equal(test_control_send_types[4], TEST_PUNCH_RESULT);
+	assert_int_equal(test_control_send_types[5], TEST_PUNCH_RESULT_EXT);
+
 	fastd_tcp_cleanup();
 	fastd_poll_free();
 	VECTOR_FREE(peer.direct_candidates);
