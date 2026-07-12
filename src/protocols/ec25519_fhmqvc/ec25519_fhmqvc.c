@@ -225,10 +225,20 @@ static bool should_send_inactive_candidate_payloads(const fastd_peer_t *peer, si
 	return true;
 }
 
+/** Checks whether an authenticated backup probe is enough to promote a backup path */
+static bool backup_probe_promotable(bool backup_probe_verified, bool endpoint_dependent_nat, bool active_unusable) {
+	return backup_probe_verified && (!endpoint_dependent_nat || active_unusable);
+}
+
 #ifdef WITH_TESTS
 bool fastd_protocol_ec25519_fhmqvc_test_should_send_inactive_candidate_payloads(
 	const fastd_peer_t *peer, size_t payload_len) {
 	return should_send_inactive_candidate_payloads(peer, payload_len);
+}
+
+bool fastd_protocol_ec25519_fhmqvc_test_backup_probe_promotable(
+	bool backup_probe_verified, bool endpoint_dependent_nat, bool active_unusable) {
+	return backup_probe_promotable(backup_probe_verified, endpoint_dependent_nat, active_unusable);
 }
 #endif
 
@@ -370,8 +380,6 @@ bool fastd_protocol_ec25519_fhmqvc_promote_backup_path(fastd_peer_t *peer) {
 	bool old_active_direct = peer->direct_established;
 	bool endpoint_dependent_nat = peer_has_endpoint_dependent_nat(peer);
 	bool backup_probe_verified = backup_verified && peer->backup_probe_proven;
-	bool backup_probe_promotable = backup_probe_verified && !endpoint_dependent_nat;
-	bool backup_promotable = backup_payload_candidate || backup_probe_promotable;
 	bool backup_suppressed = fastd_peer_punch_candidate_suppressed(peer, &peer->backup_address);
 	bool old_active_timed_out =
 		peer->active_path_timeout != FASTD_TIMEOUT_INV && fastd_timed_out(peer->active_path_timeout);
@@ -382,6 +390,9 @@ bool fastd_protocol_ec25519_fhmqvc_promote_backup_path(fastd_peer_t *peer) {
 	bool old_active_unknown =
 		peer->active_path_timeout == FASTD_TIMEOUT_INV && !active_path_initial_grace(peer);
 	bool active_unusable = old_active_failed || old_active_timed_out || old_active_unknown;
+	bool backup_probe_promotable_path =
+		backup_probe_promotable(backup_probe_verified, endpoint_dependent_nat, active_unusable);
+	bool backup_promotable = backup_payload_candidate || backup_probe_promotable_path;
 	bool keep_direct_backup_for_failover =
 		old_active_direct && peer->backup_direct_established && backup_verified && fastd_peer_get_nat_traversal(peer);
 	bool suppressed_backup_recovered = backup_suppressed && backup_verified && backup_payload_candidate && active_unusable;
@@ -392,7 +403,7 @@ bool fastd_protocol_ec25519_fhmqvc_promote_backup_path(fastd_peer_t *peer) {
 	if (fastd_peer_is_established(peer) && old_active_unknown && !old_active_failed && !backup_promotable)
 		return false;
 	if (fastd_peer_is_established(peer) && endpoint_dependent_nat && old_active_backup_usable && !old_active_failed &&
-	    !backup_payload_candidate)
+	    !backup_payload_candidate && !backup_probe_promotable_path)
 		return false;
 
 	bool was_established = fastd_peer_is_established(peer);

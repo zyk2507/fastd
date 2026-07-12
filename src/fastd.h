@@ -801,6 +801,8 @@ bool fastd_protocol_ec25519_fhmqvc_test_accept_same_active_simultaneous_responde
 	bool active_path_proven, bool initiator, uint64_t serial, uint64_t last_serial);
 bool fastd_protocol_ec25519_fhmqvc_test_should_send_inactive_candidate_payloads(
 	const fastd_peer_t *peer, size_t payload_len);
+bool fastd_protocol_ec25519_fhmqvc_test_backup_probe_promotable(
+	bool backup_probe_verified, bool endpoint_dependent_nat, bool active_unusable);
 #endif
 
 bool fastd_realm_check(void);

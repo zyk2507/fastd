@@ -1909,6 +1909,13 @@ static void test_ec25519_endpoint_dependent_payload_probes_wait_for_payload_prov
 	ctx.now = old_now;
 }
 
+static void test_ec25519_endpoint_dependent_probe_backup_promotes_after_active_loss(void **state UNUSED) {
+	assert_false(fastd_protocol_ec25519_fhmqvc_test_backup_probe_promotable(false, false, true));
+	assert_true(fastd_protocol_ec25519_fhmqvc_test_backup_probe_promotable(true, false, false));
+	assert_false(fastd_protocol_ec25519_fhmqvc_test_backup_probe_promotable(true, true, false));
+	assert_true(fastd_protocol_ec25519_fhmqvc_test_backup_probe_promotable(true, true, true));
+}
+
 static void test_punch_data_relay_effective_setting(void **state UNUSED) {
 	fastd_tristate_t old_data_relay = conf.punch_data_relay;
 	bool old_control_relay = conf.punch_control_relay;
@@ -2505,6 +2512,53 @@ static void test_punch_nat_refresh_policy(void **state UNUSED) {
 	assert_false(fastd_punch_test_nat_status_needs_refresh(&status));
 }
 
+static void test_punch_tcp_metadata_wake_policy_ignores_unpunchable_churn(void **state UNUSED) {
+	__typeof__(ctx.punch_pair_states) old_pair_states = ctx.punch_pair_states;
+	fastd_task_t old_next_maintenance = ctx.next_maintenance;
+	fastd_pqueue_t *old_task_queue = ctx.task_queue;
+	const fastd_protocol_t *old_protocol = conf.protocol;
+	bool old_control_relay = conf.punch_control_relay;
+	int64_t old_now = ctx.now;
+
+	ctx.punch_pair_states = (__typeof__(ctx.punch_pair_states)){};
+	ctx.next_maintenance = (fastd_task_t){};
+	ctx.task_queue = NULL;
+	ctx.now = 1000;
+	conf.protocol = &test_protocol;
+	conf.punch_control_relay = true;
+
+	fastd_peer_t peer = {
+		.id = 1,
+	};
+	fastd_peer_t other = {
+		.id = 2,
+	};
+
+	assert_false(fastd_punch_test_tcp_metadata_update_should_wake(
+		&peer, false, FASTD_NAT_UNKNOWN, FASTD_NAT_SYMMETRIC));
+	assert_false(fastd_punch_test_tcp_metadata_update_should_wake(
+		&peer, true, FASTD_NAT_SYMMETRIC, FASTD_NAT_SYMMETRIC));
+	assert_true(fastd_punch_test_tcp_metadata_update_should_wake(
+		&peer, false, FASTD_NAT_UNKNOWN, FASTD_NAT_FULL_CONE));
+	assert_true(fastd_punch_test_tcp_metadata_update_should_wake(
+		&peer, true, FASTD_NAT_FULL_CONE, FASTD_NAT_SYMMETRIC));
+	assert_false(fastd_punch_test_tcp_metadata_update_should_wake(
+		&peer, true, FASTD_NAT_FULL_CONE, FASTD_NAT_FULL_CONE));
+
+	fastd_punch_note_peer_pair_demand(&peer, &other);
+	assert_true(fastd_punch_test_tcp_metadata_update_should_wake(
+		&peer, true, FASTD_NAT_FULL_CONE, FASTD_NAT_FULL_CONE));
+
+	fastd_task_unschedule(&ctx.next_maintenance);
+	VECTOR_FREE(ctx.punch_pair_states);
+	ctx.punch_pair_states = old_pair_states;
+	ctx.next_maintenance = old_next_maintenance;
+	ctx.task_queue = old_task_queue;
+	conf.protocol = old_protocol;
+	conf.punch_control_relay = old_control_relay;
+	ctx.now = old_now;
+}
+
 static void test_punch_observed_udp_metadata_fills_without_stun(void **state UNUSED) {
 	fastd_timeout_t old_now = ctx.now;
 	ctx.now = 1000;
@@ -2723,6 +2777,8 @@ static void test_punch_pair_runtime_tracks_inflight_backoff_and_demand(void **st
 	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).served_demand_seq, 1);
 
 	fastd_peer_address_t endpoint = addr4(0xcb007105, 41001);
+	fastd_timeout_t launch_deadline = pair_state.next_retry;
+	ctx.now += 3000;
 	fastd_punch_test_task_manager_record_pair_result(&a, &b, TEST_PUNCH_RESULT_ACCEPTED, &endpoint);
 	pair_state = fastd_punch_test_pair_state(&a, &b);
 	assert_true(pair_state.recent_demand);
@@ -2730,7 +2786,7 @@ static void test_punch_pair_runtime_tracks_inflight_backoff_and_demand(void **st
 	assert_false(pair_state.collected);
 	assert_true(pair_state.waiting);
 	assert_true(pair_state.in_flight);
-	assert_int_equal(pair_state.next_retry, ctx.now + FASTD_HOLE_PUNCH_TIMEOUT);
+	assert_int_equal(pair_state.next_retry, launch_deadline);
 	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).success_count, 0);
 
 	fastd_punch_test_task_manager_record_pair_result(&a, &b, TEST_PUNCH_RESULT_BUSY, &endpoint);
@@ -2804,6 +2860,14 @@ static void test_punch_pair_runtime_tracks_inflight_backoff_and_demand(void **st
 	assert_true(pair_state.backoff);
 	assert_false(pair_state.in_flight);
 	assert_int_equal(pair_state.next_retry, ctx.now + FASTD_PUNCH_SUPPRESSION_TIME);
+	fastd_timeout_t backoff_deadline = pair_state.next_retry;
+
+	ctx.now += 1000;
+	fastd_punch_test_task_manager_record_pair_result(&a, &b, TEST_PUNCH_RESULT_ACCEPTED, &endpoint);
+	pair_state = fastd_punch_test_pair_state(&a, &b);
+	assert_true(pair_state.backoff);
+	assert_false(pair_state.in_flight);
+	assert_int_equal(pair_state.next_retry, backoff_deadline);
 
 	fastd_task_unschedule(&ctx.next_maintenance);
 	fastd_task_schedule(&ctx.next_maintenance, TASK_TYPE_MAINTENANCE, ctx.now - 1);
@@ -6820,12 +6884,14 @@ int main(void) {
 		cmocka_unit_test(test_ec25519_simultaneous_responder_yield_is_deterministic),
 		cmocka_unit_test(test_ec25519_same_active_simultaneous_responder_requires_unproven_path),
 		cmocka_unit_test(test_ec25519_endpoint_dependent_payload_probes_wait_for_payload_proven_backup),
+		cmocka_unit_test(test_ec25519_endpoint_dependent_probe_backup_promotes_after_active_loss),
 		cmocka_unit_test(test_punch_data_relay_effective_setting),
 		cmocka_unit_test(test_punch_data_relay_only_for_learned_nat_unicast),
 		cmocka_unit_test(test_punch_data_relay_bootstraps_address_resolution),
 		cmocka_unit_test(test_punch_data_relay_receive_path_bypasses_local_iface),
 		cmocka_unit_test(test_punch_udp_command_suppressed_for_tcp_only_peer),
 		cmocka_unit_test(test_punch_nat_refresh_policy),
+		cmocka_unit_test(test_punch_tcp_metadata_wake_policy_ignores_unpunchable_churn),
 		cmocka_unit_test(test_punch_observed_udp_metadata_fills_without_stun),
 		cmocka_unit_test(test_punch_task_pair_state_requires_established_metadata_and_due),
 		cmocka_unit_test(test_punch_task_manager_launch_lifecycle_accounting),

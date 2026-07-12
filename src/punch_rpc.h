@@ -96,6 +96,8 @@ uint8_t
 fastd_punch_test_endpoint_command_type(fastd_peer_t *dest, fastd_peer_t *subject, fastd_nat_type_t subject_nat_type);
 bool fastd_punch_test_is_endpoint_command_type(uint8_t type);
 bool fastd_punch_test_nat_status_needs_refresh(const fastd_nat_status_t *status);
+bool fastd_punch_test_tcp_metadata_update_should_wake(
+	const fastd_peer_t *peer, bool was_fresh, fastd_nat_type_t old_nat_type, fastd_nat_type_t new_nat_type);
 fastd_punch_test_pair_state_t fastd_punch_test_pair_state(const fastd_peer_t *a, const fastd_peer_t *b);
 void fastd_punch_test_pair_runtime_mark_launched(const fastd_peer_t *a, const fastd_peer_t *b);
 void fastd_punch_test_relay_peer_endpoints(void);

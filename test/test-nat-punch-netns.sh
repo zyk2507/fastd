@@ -14,6 +14,9 @@ skip() {
 
 fail() {
 	printf 'not ok %s - %s\n' "${CURRENT_TEST:-1}" "$1"
+	if [[ "${KEEP_WORK:-0}" == 1 && -n "${WORK:-}" ]]; then
+		printf '# work directory retained: %s\n' "$WORK"
+	fi
 	if [[ -n "${WORK:-}" && -d "$WORK" ]]; then
 		for name in a b c; do
 			if [[ -f "$WORK/$name.ip" ]]; then
@@ -66,6 +69,7 @@ fi
 ip netns del "$PROBE_NS" >/dev/null 2>&1 || true
 
 WORK=$(mktemp -d)
+KEEP_WORK=${FASTD_TEST_KEEP_WORK:-0}
 PREFIX="f$$"
 NS_A="${PREFIX}a"
 NS_B="${PREFIX}b"
@@ -86,7 +90,7 @@ PING_WAIT_SLEEP=0.1
 PING_TIMEOUT=0.4
 FAILOVER_WAIT_ATTEMPTS=18
 FAILOVER_WAIT_SLEEP=0.2
-HARD_FAIL_WAIT_ATTEMPTS=40
+HARD_FAIL_WAIT_ATTEMPTS=${FASTD_HARD_FAIL_WAIT_ATTEMPTS:-80}
 TEST_PUNCH_KEEPALIVE=2
 IPERF_DURATION=${FASTD_IPERF_DURATION:-9}
 IPERF_ACTIVE_CUT_DURATION=${FASTD_IPERF_ACTIVE_CUT_DURATION:-9}
@@ -159,7 +163,9 @@ cleanup() {
 		ip netns del "$ns" >/dev/null 2>&1 || true
 	done
 
-	rm -rf "$WORK"
+	if [[ "$KEEP_WORK" != 1 ]]; then
+		rm -rf "$WORK"
+	fi
 }
 trap cleanup EXIT
 

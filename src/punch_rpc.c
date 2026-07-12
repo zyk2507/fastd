@@ -829,6 +829,21 @@ static bool peer_has_pending_pair_demand(const fastd_peer_t *peer) {
 	return false;
 }
 
+/** Returns true if a TCP NAT metadata update should wake route-style punch collection */
+static bool tcp_metadata_update_should_wake(
+	const fastd_peer_t *peer, bool was_fresh, fastd_nat_type_t old_nat_type, fastd_nat_type_t new_nat_type) {
+	bool old_punchable = was_fresh && tcp_nat_type_punchable(old_nat_type);
+	bool new_punchable = tcp_nat_type_punchable(new_nat_type);
+
+	if (old_punchable != new_punchable)
+		return true;
+
+	if (!new_punchable)
+		return false;
+
+	return peer_has_pending_pair_demand(peer);
+}
+
 /** Returns true if a remote result means the launched punch is still inside its outcome window */
 static bool punch_result_keeps_pair_in_flight(fastd_punch_result_t result) {
 	switch (result) {
@@ -1057,13 +1072,14 @@ static void pair_runtime_mark_result(
 		runtime->result_count++;
 
 	if (punch_result_keeps_pair_in_flight(result)) {
-		fastd_timeout_t wait_until =
-			backoff_timeout != FASTD_TIMEOUT_INV ? backoff_timeout : ctx.now + FASTD_HOLE_PUNCH_TIMEOUT;
-		if (task_timeout_active(runtime->in_flight_until))
-			fastd_timeout_advance(&runtime->in_flight_until, wait_until);
-		else
+		if (task_timeout_active(runtime->backoff_until))
+			return;
+
+		if (!task_timeout_active(runtime->in_flight_until)) {
+			fastd_timeout_t wait_until =
+				backoff_timeout != FASTD_TIMEOUT_INV ? backoff_timeout : ctx.now + FASTD_HOLE_PUNCH_TIMEOUT;
 			runtime->in_flight_until = wait_until;
-		runtime->backoff_until = FASTD_TIMEOUT_INV;
+		}
 	}
 	else if (result == FASTD_PUNCH_RESULT_BUSY) {
 		runtime->in_flight_until = FASTD_TIMEOUT_INV;
@@ -2969,6 +2985,12 @@ bool fastd_punch_test_nat_status_needs_refresh(const fastd_nat_status_t *status)
 	return punch_nat_status_needs_refresh(status);
 }
 
+/** Test wrapper for TCP NAT metadata wake policy */
+bool fastd_punch_test_tcp_metadata_update_should_wake(
+	const fastd_peer_t *peer, bool was_fresh, fastd_nat_type_t old_nat_type, fastd_nat_type_t new_nat_type) {
+	return tcp_metadata_update_should_wake(peer, was_fresh, old_nat_type, new_nat_type);
+}
+
 /** Test wrapper for punch task-manager pair collection state */
 fastd_punch_test_pair_state_t fastd_punch_test_pair_state(const fastd_peer_t *a, const fastd_peer_t *b) {
 	fastd_punch_pair_state_t state = punch_pair_state(a, b);
@@ -3744,7 +3766,7 @@ static void handle_tcp_nat_info(fastd_peer_t *sender, const fastd_punch_endpoint
 		       !punch_tcp_endpoint_list_equal(
 			       old_endpoints, old_n_endpoints, subject->tcp_punch_endpoints,
 			       subject->n_tcp_punch_endpoints);
-	if (changed)
+	if (changed && tcp_metadata_update_should_wake(subject, was_fresh, old_nat_type, subject->tcp_punch_nat_type))
 		wake_punch_task_manager_for_peer_metadata(subject);
 	if (changed && !relayed)
 		relay_nat_metadata_to_route_peers(sender, subject, conf.punch_max_packets, PUNCH_METADATA_RELAY_TCP);
