@@ -1972,6 +1972,94 @@ static void test_punch_data_relay_only_for_learned_nat_unicast(void **state UNUS
 	ctx.punch_data_relay_bytes = old_data_relay_bytes;
 }
 
+static void test_punch_data_relay_receive_path_records_demand(void **state UNUSED) {
+	__typeof__(ctx.eth_addrs) old_eth_addrs = ctx.eth_addrs;
+	__typeof__(ctx.punch_pair_states) old_pair_states = ctx.punch_pair_states;
+	const fastd_protocol_t *old_protocol = conf.protocol;
+	fastd_tristate_t old_data_relay = conf.punch_data_relay;
+	fastd_mode_t old_mode = conf.mode;
+	bool old_forward = conf.forward;
+	size_t old_encrypt_headroom = conf.encrypt_headroom;
+	size_t old_max_buffer = ctx.max_buffer;
+	fastd_timeout_t old_now = ctx.now;
+	uint64_t old_data_relay_packets = ctx.punch_data_relay_packets;
+	uint64_t old_data_relay_bytes = ctx.punch_data_relay_bytes;
+
+	int pipefd[2];
+	assert_int_equal(pipe(pipefd), 0);
+
+	ctx.eth_addrs = (__typeof__(ctx.eth_addrs)){};
+	ctx.punch_pair_states = (__typeof__(ctx.punch_pair_states)){};
+	conf.protocol = &test_protocol;
+	conf.punch_data_relay = FASTD_TRISTATE_TRUE;
+	conf.mode = MODE_TAP;
+	conf.forward = false;
+	conf.encrypt_headroom = 0;
+	ctx.max_buffer = 2048;
+	ctx.now = 1000;
+	ctx.punch_data_relay_packets = 0;
+	ctx.punch_data_relay_bytes = 0;
+	fastd_init_buffers();
+
+	fastd_peer_group_t group = {
+		.nat_traversal = FASTD_TRISTATE_TRUE,
+	};
+	fastd_iface_t iface = {
+		.fd = FASTD_POLL_FD(POLL_TYPE_IFACE, pipefd[1]),
+	};
+	fastd_peer_t source = {
+		.id = 10,
+		.name = "source",
+		.group = &group,
+		.iface = &iface,
+		.state = STATE_ESTABLISHED,
+	};
+	fastd_peer_t dest = {
+		.id = 20,
+		.name = "dest",
+		.group = &group,
+		.state = STATE_ESTABLISHED,
+	};
+
+	fastd_eth_addr_t source_mac = { .data = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 } };
+	fastd_eth_addr_t dest_mac = { .data = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x02 } };
+	fastd_peer_eth_addr_add(&dest, dest_mac);
+
+	test_send_peer = NULL;
+	test_send_count = 0;
+	fastd_handle_receive(&source, test_eth_frame(dest_mac, source_mac), false);
+
+	fastd_eth_header_t written = {};
+	assert_int_equal(read(pipefd[0], &written, sizeof(written)), (ssize_t)sizeof(written));
+	assert_memory_equal(&written.dest, &dest_mac, sizeof(dest_mac));
+	assert_memory_equal(&written.source, &source_mac, sizeof(source_mac));
+	assert_ptr_equal(test_send_peer, &dest);
+	assert_int_equal(test_send_count, 1);
+	assert_int_equal(ctx.punch_data_relay_packets, 1);
+	assert_int_equal(ctx.punch_data_relay_bytes, sizeof(fastd_eth_header_t));
+	assert_int_equal(VECTOR_LEN(ctx.punch_pair_states), 1);
+	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).demand_seq, 1);
+
+	fastd_cleanup_buffers();
+	VECTOR_FREE(ctx.eth_addrs);
+	VECTOR_FREE(ctx.punch_pair_states);
+	ctx.eth_addrs = old_eth_addrs;
+	ctx.punch_pair_states = old_pair_states;
+	conf.protocol = old_protocol;
+	conf.punch_data_relay = old_data_relay;
+	conf.mode = old_mode;
+	conf.forward = old_forward;
+	conf.encrypt_headroom = old_encrypt_headroom;
+	ctx.max_buffer = old_max_buffer;
+	ctx.now = old_now;
+	ctx.punch_data_relay_packets = old_data_relay_packets;
+	ctx.punch_data_relay_bytes = old_data_relay_bytes;
+	test_send_peer = NULL;
+	test_send_count = 0;
+	assert_int_equal(close(pipefd[0]), 0);
+	assert_int_equal(close(pipefd[1]), 0);
+}
+
 static void test_punch_udp_command_suppressed_for_tcp_only_peer(void **state UNUSED) {
 	const fastd_protocol_t *old_protocol = conf.protocol;
 	fastd_peer_t *old_lookup_peer = test_lookup_peer;
@@ -5452,6 +5540,7 @@ int main(void) {
 		cmocka_unit_test(test_ec25519_same_active_simultaneous_responder_requires_unproven_path),
 		cmocka_unit_test(test_punch_data_relay_effective_setting),
 		cmocka_unit_test(test_punch_data_relay_only_for_learned_nat_unicast),
+		cmocka_unit_test(test_punch_data_relay_receive_path_records_demand),
 		cmocka_unit_test(test_punch_udp_command_suppressed_for_tcp_only_peer),
 		cmocka_unit_test(test_punch_nat_refresh_policy),
 		cmocka_unit_test(test_punch_observed_udp_metadata_fills_without_stun),
