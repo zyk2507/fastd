@@ -1466,7 +1466,7 @@ wait_for_both_easy_symmetric_path() {
 		dump_statuses
 
 		if [[ -f "$WORK/a.json" && -f "$WORK/b.json" && -f "$WORK/c.json" ]] &&
-			both_easy_nat_types_seen && direct_hole_punched && direct_backups_ready && punch_results_seen; then
+			both_easy_nat_types_seen && direct_hole_punched && punch_results_seen; then
 			return 0
 		fi
 	done

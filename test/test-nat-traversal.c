@@ -513,6 +513,11 @@ static const char *json_get_string_required(struct json_object *object, const ch
 	return json_object_get_string(ret);
 }
 
+static void json_get_null_required(struct json_object *object, const char *key) {
+	struct json_object *ret = json_get_required(object, key);
+	assert_int_equal(json_object_get_type(ret), json_type_null);
+}
+
 #endif
 
 static test_punch_message_t make_punch_message(void) {
@@ -4046,7 +4051,12 @@ static void test_punch_remote_result_ext_drives_state_and_legacy_is_deduped(void
 #ifdef WITH_STATUS_SOCKET
 
 static void test_status_hole_punch_exposes_peer_nat_metadata(void **state UNUSED) {
+	fastd_timeout_t old_now = ctx.now;
+	bool old_punch_symmetric = conf.punch_symmetric;
+	fastd_tristate_t old_data_relay = conf.punch_data_relay;
+	fastd_mode_t old_mode = conf.mode;
 	fastd_peer_t peer = {
+		.name = "status-peer",
 		.hole_punch = HOLE_PUNCH_AUTO,
 		.nat_traversal = FASTD_TRISTATE_TRUE,
 		.punch_nat_type = FASTD_NAT_SYMMETRIC_EASY_INC,
@@ -4066,6 +4076,7 @@ static void test_status_hole_punch_exposes_peer_nat_metadata(void **state UNUSED
 
 	ctx.now = 1000;
 	conf.punch_symmetric = true;
+	conf.punch_data_relay = FASTD_TRISTATE_FALSE;
 	peer.punch_endpoint = addr4(0xcb007105, 41000);
 	peer.punch_endpoints[0] = (fastd_peer_punch_endpoint_t){
 		.address = peer.punch_endpoint,
@@ -4141,6 +4152,10 @@ static void test_status_hole_punch_exposes_peer_nat_metadata(void **state UNUSED
 	assert_true(json_get_bool_required(hole_punch, "symmetric"));
 	assert_string_equal(json_get_string_required(hole_punch, "path_state"), "not-direct");
 	assert_string_equal(json_get_string_required(hole_punch, "reason"), "relay-backoff-active");
+	assert_string_equal(json_get_string_required(hole_punch, "data_path"), "unavailable");
+	assert_string_equal(json_get_string_required(hole_punch, "fallback_path"), "none");
+	json_get_null_required(hole_punch, "fallback_peer");
+	assert_false(json_get_bool_required(hole_punch, "data_relay_available"));
 	assert_int_equal(json_get_int_required(hole_punch, "direct_candidates"), 1);
 	assert_int_equal(json_get_int_required(hole_punch, "punch_control_candidates"), 1);
 	assert_int_equal(json_get_int_required(hole_punch, "relay_backoffs"), 1);
@@ -4283,6 +4298,10 @@ static void test_status_hole_punch_exposes_peer_nat_metadata(void **state UNUSED
 	hole_punch = fastd_status_test_dump_hole_punch(&peer);
 	assert_string_equal(json_get_string_required(hole_punch, "path_state"), "direct-with-payload-backup");
 	assert_string_equal(json_get_string_required(hole_punch, "reason"), "active-and-backup-payload-ready");
+	assert_string_equal(json_get_string_required(hole_punch, "data_path"), "direct");
+	assert_string_equal(json_get_string_required(hole_punch, "fallback_path"), "backup");
+	json_get_null_required(hole_punch, "fallback_peer");
+	assert_false(json_get_bool_required(hole_punch, "data_relay_available"));
 	assert_true(json_get_bool_required(hole_punch, "established"));
 	assert_true(json_get_bool_required(hole_punch, "verified"));
 	assert_true(json_get_bool_required(hole_punch, "proven"));
@@ -4291,9 +4310,53 @@ static void test_status_hole_punch_exposes_peer_nat_metadata(void **state UNUSED
 	assert_true(json_get_bool_required(hole_punch, "backup_payload_proven"));
 	json_object_put(hole_punch);
 
+	fastd_socket_t regular_sock = {
+		.fd.fd = 3,
+		.type = SOCKET_TYPE_UDP,
+		.bound_addr = &active_local,
+	};
+	peer.sock = &regular_sock;
+	peer.direct_established = false;
+	peer.active_path_timeout = FASTD_TIMEOUT_INV;
+	peer.active_path_proven_timeout = FASTD_TIMEOUT_INV;
+	peer.backup_sock = NULL;
+	peer.backup_direct_established = false;
+	peer.backup_path_verified = false;
+	peer.backup_payload_proven = false;
+	peer.backup_probe_proven = false;
+	conf.mode = MODE_MULTITAP;
+	conf.punch_data_relay = FASTD_TRISTATE_TRUE;
+
+	hole_punch = fastd_status_test_dump_hole_punch(&peer);
+	assert_string_equal(json_get_string_required(hole_punch, "data_path"), "data-relay");
+	assert_string_equal(json_get_string_required(hole_punch, "fallback_path"), "data-relay");
+	json_get_null_required(hole_punch, "fallback_peer");
+	assert_true(json_get_bool_required(hole_punch, "data_relay_available"));
+	json_object_put(hole_punch);
+
+	fastd_peer_t relay_peer = {
+		.name = "relay-peer",
+		.state = STATE_ESTABLISHED,
+	};
+	peer.state = STATE_INACTIVE;
+	peer.sock = NULL;
+	peer.direct_relay = &relay_peer;
+	conf.punch_data_relay = FASTD_TRISTATE_FALSE;
+
+	hole_punch = fastd_status_test_dump_hole_punch(&peer);
+	assert_string_equal(json_get_string_required(hole_punch, "data_path"), "discovery-relay");
+	assert_string_equal(json_get_string_required(hole_punch, "fallback_path"), "discovery-relay");
+	assert_string_equal(json_get_string_required(hole_punch, "fallback_peer"), "relay-peer");
+	assert_false(json_get_bool_required(hole_punch, "data_relay_available"));
+	json_object_put(hole_punch);
+
 	VECTOR_FREE(peer.direct_candidates);
 	VECTOR_FREE(peer.punch_suppressions);
 	VECTOR_FREE(peer.punch_relay_backoffs);
+	ctx.now = old_now;
+	conf.punch_symmetric = old_punch_symmetric;
+	conf.punch_data_relay = old_data_relay;
+	conf.mode = old_mode;
 }
 
 static void test_status_punch_exposes_udp_socket_pool(void **state UNUSED) {

@@ -497,10 +497,11 @@ static void print_punch_table(json_object *punch) {
 	if (counters) {
 		static const char *const names[] = {
 			"control_tx",        "control_rx",        "direct_handshakes", "direct_success",
-			"direct_failures",   "direct_suppressed", "udp_exact_tx",      "probe_tx",
-			"probe_rx",          "probe_response_tx", "probe_matched",     "probe_handshakes",
-			"result_tx",         "result_rx",         "result_accepted",   "result_handshake",
-			"result_duplicates", "result_suppressed", "result_no_peer",    "result_busy",
+			"direct_failures",   "direct_suppressed", "data_relay_packets", "data_relay_bytes",
+			"udp_exact_tx",      "probe_tx",          "probe_rx",           "probe_response_tx",
+			"probe_matched",     "probe_handshakes",  "result_tx",          "result_rx",
+			"result_accepted",   "result_handshake",  "result_duplicates", "result_suppressed",
+			"result_no_peer",    "result_busy",
 		};
 
 		size_t i;
@@ -667,14 +668,14 @@ static void print_hole_punch_table(json_object *peers) {
 	ft_table_t *table = create_status_table();
 	size_t row = ft_cur_row(table);
 	ft_write_ln(
-		table, "Peer", "State", "Reason", "Mode", "Transport", "Local port", "Remote port",
-		"Direct candidates", "Punch candidates", "Backup", "Symmetric");
+		table, "Peer", "State", "Data path", "Fallback", "Reason", "Mode", "Transport", "Local port",
+		"Remote port", "Direct candidates", "Punch candidates", "Backup", "Symmetric");
 	mark_header_row(table, row);
-	ft_set_cell_prop(table, FT_ANY_ROW, 5, FT_CPROP_TEXT_ALIGN, FT_ALIGNED_RIGHT);
-	ft_set_cell_prop(table, FT_ANY_ROW, 6, FT_CPROP_TEXT_ALIGN, FT_ALIGNED_RIGHT);
 	ft_set_cell_prop(table, FT_ANY_ROW, 7, FT_CPROP_TEXT_ALIGN, FT_ALIGNED_RIGHT);
 	ft_set_cell_prop(table, FT_ANY_ROW, 8, FT_CPROP_TEXT_ALIGN, FT_ALIGNED_RIGHT);
 	ft_set_cell_prop(table, FT_ANY_ROW, 9, FT_CPROP_TEXT_ALIGN, FT_ALIGNED_RIGHT);
+	ft_set_cell_prop(table, FT_ANY_ROW, 10, FT_CPROP_TEXT_ALIGN, FT_ALIGNED_RIGHT);
+	ft_set_cell_prop(table, FT_ANY_ROW, 11, FT_CPROP_TEXT_ALIGN, FT_ALIGNED_RIGHT);
 
 	json_object_object_foreach(peers, key, peer) {
 		json_object *hole_punch = get_object_member(peer, "hole_punch");
@@ -698,6 +699,8 @@ static void print_hole_punch_table(json_object *peers) {
 
 		ft_write_ln(
 			table, peer_display_name(key, peer), value_or_dash(get_string_member(hole_punch, "path_state")),
+			value_or_dash(get_string_member(hole_punch, "data_path")),
+			value_or_dash(get_string_member(hole_punch, "fallback_path")),
 			value_or_dash(get_string_member(hole_punch, "reason")),
 			value_or_dash(get_string_member(hole_punch, "mode")),
 			value_or_dash(get_string_member(hole_punch, "transport")), local_port, remote_port,
@@ -1130,6 +1133,54 @@ static const char *hole_punch_reason(
 	return "missing-nat-metadata";
 }
 
+/** Returns true if relay-assisted discovery can currently carry data while a direct peer is unavailable */
+static bool peer_discovery_relay_ready(const fastd_peer_t *peer) {
+	return peer->direct_relay && fastd_peer_is_established(peer->direct_relay);
+}
+
+/** Returns true if the controlled NAT traversal data relay may carry learned unicast TAP payloads for this peer */
+static bool peer_data_relay_ready(const fastd_peer_t *peer) {
+	bool ethernet_mode = conf.mode == MODE_TAP || conf.mode == MODE_MULTITAP;
+	return fastd_peer_get_punch_data_relay() && ethernet_mode && fastd_peer_get_nat_traversal(peer) &&
+	       fastd_peer_is_established(peer);
+}
+
+/** Returns the currently expected data-plane path for this peer */
+static const char *hole_punch_data_path(
+	const fastd_peer_t *peer, bool established, bool proven, bool backup_established, bool backup_payload_proven) {
+	if (established)
+		return proven ? "direct" : "direct-unverified";
+
+	if (backup_established)
+		return backup_payload_proven ? "backup" : "backup-unverified";
+
+	if (peer_discovery_relay_ready(peer))
+		return "discovery-relay";
+
+	if (peer_data_relay_ready(peer))
+		return "data-relay";
+
+	if (fastd_peer_is_established(peer))
+		return "peer-session";
+
+	return "unavailable";
+}
+
+/** Returns the fallback data-plane path available behind the current primary path */
+static const char *
+hole_punch_fallback_path(const fastd_peer_t *peer, bool established, bool backup_established, bool backup_payload_proven) {
+	if (established && backup_established)
+		return backup_payload_proven ? "backup" : "backup-unverified";
+
+	if (peer_discovery_relay_ready(peer))
+		return "discovery-relay";
+
+	if (peer_data_relay_ready(peer))
+		return "data-relay";
+
+	return "none";
+}
+
 /** Dumps UDP punch metadata learned from a peer */
 static json_object *dump_udp_punch_metadata(const fastd_peer_t *peer) {
 	bool available = peer_address_available(&peer->punch_endpoint) && peer->punch_timeout != FASTD_TIMEOUT_INV &&
@@ -1342,6 +1393,18 @@ static json_object *dump_hole_punch(const fastd_peer_t *peer) {
 		json_object_new_string(hole_punch_reason(
 			peer, mode != HOLE_PUNCH_OFF, established, verified, proven, backup_established,
 			backup_verified, peer->backup_payload_proven)));
+	json_object_object_add(
+		ret, "data_path",
+		json_object_new_string(hole_punch_data_path(
+			peer, established, proven, backup_established, peer->backup_payload_proven)));
+	json_object_object_add(
+		ret, "fallback_path",
+		json_object_new_string(hole_punch_fallback_path(
+			peer, established, backup_established, peer->backup_payload_proven)));
+	json_object_object_add(
+		ret, "fallback_peer",
+		peer_discovery_relay_ready(peer) ? wrap_string_or_null(peer->direct_relay->name) : NULL);
+	json_object_object_add(ret, "data_relay_available", json_object_new_boolean(peer_data_relay_ready(peer)));
 	json_object_object_add(ret, "symmetric", json_object_new_boolean(fastd_peer_get_punch_symmetric(peer)));
 	json_object_object_add(
 		ret, "direct_candidates", json_object_new_int64(fastd_peer_direct_candidate_count(peer)));
