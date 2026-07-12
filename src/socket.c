@@ -1467,7 +1467,7 @@ static bool udp_punch_exact_family_supported(sa_family_t family) {
 
 /** Returns true if deterministic UDP punch port buckets support an address family */
 static bool udp_punch_deterministic_family_supported(sa_family_t family) {
-	return family == AF_INET;
+	return family == AF_INET || family == AF_INET6;
 }
 
 /** Sends an initial handshake on deterministic UDP hole punching candidates */

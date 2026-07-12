@@ -4208,13 +4208,13 @@ static void test_direct_candidate_transport_scope(void **state UNUSED) {
 	VECTOR_FREE(peer.direct_candidates);
 }
 
-static void test_udp_punch_family_policy_allows_ipv6_exact_only(void **state UNUSED) {
+static void test_udp_punch_family_policy_allows_ipv6_deterministic(void **state UNUSED) {
 	assert_true(fastd_socket_test_udp_punch_exact_family_supported(AF_INET));
 	assert_true(fastd_socket_test_udp_punch_exact_family_supported(AF_INET6));
 	assert_false(fastd_socket_test_udp_punch_exact_family_supported(AF_UNSPEC));
 
 	assert_true(fastd_socket_test_udp_punch_deterministic_family_supported(AF_INET));
-	assert_false(fastd_socket_test_udp_punch_deterministic_family_supported(AF_INET6));
+	assert_true(fastd_socket_test_udp_punch_deterministic_family_supported(AF_INET6));
 	assert_false(fastd_socket_test_udp_punch_deterministic_family_supported(AF_UNSPEC));
 }
 
@@ -4681,7 +4681,7 @@ int main(void) {
 		cmocka_unit_test(test_punch_detects_noncurrent_exact_candidate),
 		cmocka_unit_test(test_endpoint_dependent_candidate_matches_same_ip),
 		cmocka_unit_test(test_direct_candidate_transport_scope),
-		cmocka_unit_test(test_udp_punch_family_policy_allows_ipv6_exact_only),
+		cmocka_unit_test(test_udp_punch_family_policy_allows_ipv6_deterministic),
 		cmocka_unit_test(test_udp_punch_socket_counts_public_listeners_separately),
 		cmocka_unit_test(test_udp_punch_public_listener_selection_policy),
 		cmocka_unit_test(test_public_listener_port_mapping_lifecycle),
