@@ -2055,6 +2055,18 @@ static void test_punch_data_relay_only_for_learned_nat_unicast(void **state UNUS
 	assert_int_equal(ctx.punch_data_relay_bytes, sizeof(fastd_eth_header_t));
 	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).demand_seq, 1);
 
+	source.state = STATE_PASSIVE;
+	blocked = test_eth_frame(dest_mac, source_mac);
+	assert_false(fastd_send_data_relay(blocked, &source));
+	fastd_buffer_free(blocked);
+	assert_int_equal(test_send_count, 1);
+	assert_int_equal(ctx.punch_data_relay_attempts, 1);
+	assert_int_equal(ctx.punch_data_relay_unavailable, 0);
+	assert_int_equal(ctx.punch_data_relay_packets, 1);
+	assert_int_equal(ctx.punch_data_relay_bytes, sizeof(fastd_eth_header_t));
+	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).demand_seq, 1);
+	source.state = STATE_ESTABLISHED;
+
 	dest.state = STATE_PASSIVE;
 	blocked = test_eth_frame(dest_mac, source_mac);
 	assert_true(fastd_send_data_relay(blocked, &source));

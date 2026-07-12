@@ -355,7 +355,8 @@ static inline bool send_data_tap_single(fastd_buffer_t *buffer, fastd_peer_t *so
 /** Handles controlled NAT traversal data relay of a learned unicast TAP packet */
 bool fastd_send_data_relay(fastd_buffer_t *buffer, fastd_peer_t *source) {
 	if (!fastd_peer_get_punch_data_relay() || !ethernet_mode() || !source ||
-	    !fastd_peer_get_nat_traversal(source) || buffer->len < sizeof(fastd_eth_header_t))
+	    !fastd_peer_is_established(source) || !fastd_peer_get_nat_traversal(source) ||
+	    buffer->len < sizeof(fastd_eth_header_t))
 		return false;
 
 	fastd_eth_addr_t dest_addr = fastd_buffer_dest_address(buffer);
