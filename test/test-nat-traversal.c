@@ -2126,6 +2126,7 @@ static void test_punch_data_relay_bootstraps_address_resolution(void **state UNU
 	uint64_t old_address_resolution_attempts = ctx.punch_data_relay_address_resolution_attempts;
 	uint64_t old_address_resolution_packets = ctx.punch_data_relay_address_resolution_packets;
 	uint64_t old_address_resolution_bytes = ctx.punch_data_relay_address_resolution_bytes;
+	size_t old_address_resolution_cursor = ctx.punch_data_relay_address_resolution_cursor;
 
 	ctx.peers = (__typeof__(ctx.peers)){};
 	ctx.punch_pair_states = (__typeof__(ctx.punch_pair_states)){};
@@ -2143,6 +2144,7 @@ static void test_punch_data_relay_bootstraps_address_resolution(void **state UNU
 	ctx.punch_data_relay_address_resolution_attempts = 0;
 	ctx.punch_data_relay_address_resolution_packets = 0;
 	ctx.punch_data_relay_address_resolution_bytes = 0;
+	ctx.punch_data_relay_address_resolution_cursor = 0;
 	memset(test_send_peers, 0, sizeof(test_send_peers));
 	fastd_init_buffers();
 
@@ -2170,6 +2172,12 @@ static void test_punch_data_relay_bootstraps_address_resolution(void **state UNU
 		.group = &group,
 		.state = STATE_ESTABLISHED,
 	};
+	fastd_peer_t dest_c = {
+		.id = 35,
+		.name = "dest-c",
+		.group = &group,
+		.state = STATE_ESTABLISHED,
+	};
 	fastd_peer_t no_nat = {
 		.id = 40,
 		.name = "no-nat",
@@ -2185,6 +2193,7 @@ static void test_punch_data_relay_bootstraps_address_resolution(void **state UNU
 	VECTOR_ADD(ctx.peers, &source);
 	VECTOR_ADD(ctx.peers, &dest_a);
 	VECTOR_ADD(ctx.peers, &dest_b);
+	VECTOR_ADD(ctx.peers, &dest_c);
 	VECTOR_ADD(ctx.peers, &no_nat);
 	VECTOR_ADD(ctx.peers, &down);
 
@@ -2202,6 +2211,7 @@ static void test_punch_data_relay_bootstraps_address_resolution(void **state UNU
 	assert_ptr_equal(test_send_peers[0], &dest_a);
 	assert_ptr_equal(test_send_peers[1], &dest_b);
 	assert_ptr_equal(test_send_peer, &dest_b);
+	assert_int_equal(ctx.punch_data_relay_address_resolution_cursor, 3);
 	assert_int_equal(VECTOR_LEN(ctx.punch_pair_states), 2);
 	assert_int_equal(ctx.punch_data_relay_attempts, 1);
 	assert_int_equal(ctx.punch_data_relay_unavailable, 0);
@@ -2218,8 +2228,10 @@ static void test_punch_data_relay_bootstraps_address_resolution(void **state UNU
 	assert_true(fastd_send_data_relay(
 		test_ipv6_frame(ipv6_nd_multicast, source_mac, 58, 135), &source));
 	assert_int_equal(test_send_count, 2);
-	assert_ptr_equal(test_send_peers[0], &dest_a);
-	assert_ptr_equal(test_send_peers[1], &dest_b);
+	assert_ptr_equal(test_send_peers[0], &dest_c);
+	assert_ptr_equal(test_send_peers[1], &dest_a);
+	assert_int_equal(ctx.punch_data_relay_address_resolution_cursor, 2);
+	assert_int_equal(VECTOR_LEN(ctx.punch_pair_states), 3);
 	assert_int_equal(ctx.punch_data_relay_attempts, 2);
 	assert_int_equal(ctx.punch_data_relay_packets, 4);
 	assert_int_equal(ctx.punch_data_relay_bytes, 2 * arp_len + 2 * nd_len);
@@ -2233,8 +2245,9 @@ static void test_punch_data_relay_bootstraps_address_resolution(void **state UNU
 	memset(test_send_peers, 0, sizeof(test_send_peers));
 	assert_true(fastd_send_data_relay(test_eth_frame_proto_len(arp_broadcast, source_mac, 0x0806, arp_len), &source));
 	assert_int_equal(test_send_count, 1);
-	assert_ptr_equal(test_send_peers[0], &dest_a);
-	assert_ptr_equal(test_send_peer, &dest_a);
+	assert_ptr_equal(test_send_peers[0], &dest_b);
+	assert_ptr_equal(test_send_peer, &dest_b);
+	assert_int_equal(ctx.punch_data_relay_address_resolution_cursor, 3);
 	assert_int_equal(ctx.punch_data_relay_attempts, 3);
 	assert_int_equal(ctx.punch_data_relay_packets, 5);
 	assert_int_equal(ctx.punch_data_relay_bytes, 3 * arp_len + 2 * nd_len);
@@ -2289,6 +2302,7 @@ static void test_punch_data_relay_bootstraps_address_resolution(void **state UNU
 	ctx.punch_data_relay_address_resolution_attempts = old_address_resolution_attempts;
 	ctx.punch_data_relay_address_resolution_packets = old_address_resolution_packets;
 	ctx.punch_data_relay_address_resolution_bytes = old_address_resolution_bytes;
+	ctx.punch_data_relay_address_resolution_cursor = old_address_resolution_cursor;
 	test_send_peer = NULL;
 	test_send_count = 0;
 	memset(test_send_peers, 0, sizeof(test_send_peers));

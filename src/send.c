@@ -265,28 +265,37 @@ static bool relay_address_resolution(fastd_buffer_t *buffer, fastd_peer_t *sourc
 	if (!is_address_resolution_frame(buffer))
 		return false;
 
+	size_t n_peers = VECTOR_LEN(ctx.peers);
 	fastd_peer_t *last = NULL;
 	size_t limit = conf.punch_max_packets;
+	if (!n_peers || !limit)
+		return false;
+
+	size_t start = ctx.punch_data_relay_address_resolution_cursor % n_peers;
+	size_t last_index = start;
 	size_t selected = 0;
 	size_t i;
-	for (i = 0; i < VECTOR_LEN(ctx.peers); i++) {
-		fastd_peer_t *dest = VECTOR_INDEX(ctx.peers, i);
+	for (i = 0; i < n_peers && selected < limit; i++) {
+		size_t index = (start + i) % n_peers;
+		fastd_peer_t *dest = VECTOR_INDEX(ctx.peers, index);
 		if (!peer_may_receive_data_relay(source, dest))
 			continue;
 
 		last = dest;
-		if (++selected >= limit)
-			break;
+		last_index = index;
+		selected++;
 	}
 
 	if (!last)
 		return false;
 
+	ctx.punch_data_relay_address_resolution_cursor = (last_index + 1) % n_peers;
 	ctx.punch_data_relay_attempts++;
 	ctx.punch_data_relay_address_resolution_attempts++;
 	selected = 0;
-	for (i = 0; i < VECTOR_LEN(ctx.peers); i++) {
-		fastd_peer_t *dest = VECTOR_INDEX(ctx.peers, i);
+	for (i = 0; i < n_peers; i++) {
+		size_t index = (start + i) % n_peers;
+		fastd_peer_t *dest = VECTOR_INDEX(ctx.peers, index);
 		if (!peer_may_receive_data_relay(source, dest))
 			continue;
 
