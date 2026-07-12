@@ -158,8 +158,9 @@ Example config:
 
   Controls NAT traversal data fallback on trusted TAP coordinators. The default is ``auto``: data relay becomes active
   when ``nat traversal yes`` or ``punch control relay yes`` is enabled on the root configuration. Set it to ``no`` to
-  force it off. Unlike ``forward yes``, this fallback only relays learned unicast TAP payloads between established peers
-  that both have NAT traversal enabled; unknown destination MACs, broadcast and multicast frames are not flooded.
+  force it off. Unlike ``forward yes``, this fallback relays learned unicast TAP payloads between established peers
+  that both have NAT traversal enabled, and relays only ARP and IPv6 Neighbor Discovery frames to bootstrap MAC
+  learning. Other unknown destination MACs, broadcast and multicast frames are not flooded.
 
 | ``punch symmetric yes|no;``
 
@@ -204,7 +205,7 @@ Example config:
   ``punch max sockets`` or ``punch max packets``.
   ``punch max packet`` and ``punch max packets`` are equivalent aliases that limit the number of punch control packets a
   relay sends during one maintenance interval; the default is 800. Hard-symmetric relay scans use this packet budget as
-  their bounded remote port probe count.
+  their bounded remote port probe count. The ARP/IPv6 ND bootstrap relay also uses this budget to bound its send fan-out.
 
 | ``turn relay yes|no;``
 | ``turn server "<address>" port <port> [user "<username>" password "<password>"];``

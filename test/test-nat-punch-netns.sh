@@ -175,10 +175,6 @@ ping_data_relay() {
 	ip netns exec "$NS_A" ping -I fda-c -n -c 1 -W "$PING_TIMEOUT" 10.52.30.2 >> "$WORK/a.ping" 2>&1
 }
 
-seed_data_relay_mac() {
-	ip netns exec "$NS_B" ping -I fdb-c -n -c 1 -W "$PING_TIMEOUT" 10.52.30.1 >> "$WORK/b.ping" 2>&1 || true
-}
-
 ping_public_nat() {
 	ip netns exec "$NS_C" ping -I fdc-a -n -c 1 -W "$PING_TIMEOUT" 10.52.20.2 >> "$WORK/c.ping" 2>&1
 }
@@ -1382,10 +1378,6 @@ wait_for_iface() {
 	fail "interface $iface did not become available"
 }
 
-iface_mac() {
-	ip netns exec "$1" cat "/sys/class/net/$2/address"
-}
-
 setup_data_relay_interfaces() {
 	wait_for_iface "$NS_A" fda-c
 	wait_for_iface "$NS_B" fdb-c
@@ -1394,13 +1386,6 @@ setup_data_relay_interfaces() {
 	run ip -n "$NS_B" addr replace 10.52.30.2/30 dev fdb-c
 	run ip -n "$NS_A" link set fda-c up
 	run ip -n "$NS_B" link set fdb-c up
-
-	local mac_a mac_b
-	mac_a=$(iface_mac "$NS_A" fda-c) || fail 'failed to read A relay MAC'
-	mac_b=$(iface_mac "$NS_B" fdb-c) || fail 'failed to read B relay MAC'
-
-	run ip -n "$NS_A" neigh replace 10.52.30.2 lladdr "$mac_b" nud permanent dev fda-c
-	run ip -n "$NS_B" neigh replace 10.52.30.1 lladdr "$mac_a" nud permanent dev fdb-c
 
 	ip -n "$NS_A" addr show dev fda-c > "$WORK/a.ip" 2>&1 || true
 	ip -n "$NS_B" addr show dev fdb-c > "$WORK/b.ip" 2>&1 || true
@@ -1413,7 +1398,6 @@ wait_for_data_relay_without_direct() {
 		check_fastds_alive
 		dump_statuses
 
-		seed_data_relay_mac
 		if [[ -f "$WORK/c.json" ]] && punch_data_relay_enabled && ping_data_relay; then
 			ok=true
 			break

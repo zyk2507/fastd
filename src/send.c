@@ -21,6 +21,17 @@
 
 #include <sys/uio.h>
 
+#define FASTD_ETHERTYPE_ARP 0x0806
+#define FASTD_ETHERTYPE_IPV6 0x86dd
+#define FASTD_ARP_PACKET_MIN_LEN 28
+#define FASTD_IPV6_HEADER_LEN 40
+#define FASTD_IPV6_NEXT_HEADER_OFFSET 6
+#define FASTD_IPV6_PAYLOAD_OFFSET FASTD_IPV6_HEADER_LEN
+#define FASTD_IPPROTO_ICMPV6 58
+#define FASTD_ICMPV6_ND_MIN_LEN 24
+#define FASTD_ICMPV6_NEIGHBOR_SOLICITATION 135
+#define FASTD_ICMPV6_NEIGHBOR_ADVERTISEMENT 136
+
 
 /** Adds packet info to ancillary control messages */
 static inline void add_pktinfo(struct msghdr *msg, const fastd_peer_address_t *local_addr) {
@@ -208,6 +219,94 @@ static inline bool ethernet_mode(void) {
 	return conf.mode == MODE_TAP || conf.mode == MODE_MULTITAP;
 }
 
+/** Returns the Ethernet type carried by a TAP frame */
+static uint16_t ethertype(const fastd_buffer_t *buffer) {
+	uint16_t proto;
+	memcpy(&proto, buffer->data + offsetof(fastd_eth_header_t, proto), sizeof(proto));
+	return ntohs(proto);
+}
+
+/** Returns true if a frame is safe to relay for address-resolution bootstrap */
+static bool is_address_resolution_frame(const fastd_buffer_t *buffer) {
+	switch (ethertype(buffer)) {
+	case FASTD_ETHERTYPE_ARP:
+		return buffer->len >= sizeof(fastd_eth_header_t) + FASTD_ARP_PACKET_MIN_LEN;
+
+	case FASTD_ETHERTYPE_IPV6: {
+		if (buffer->len < sizeof(fastd_eth_header_t) + FASTD_IPV6_HEADER_LEN + FASTD_ICMPV6_ND_MIN_LEN)
+			return false;
+
+		const uint8_t *ipv6 = (const uint8_t *)buffer->data + sizeof(fastd_eth_header_t);
+		if (ipv6[FASTD_IPV6_NEXT_HEADER_OFFSET] != FASTD_IPPROTO_ICMPV6)
+			return false;
+
+		uint8_t icmpv6_type = ipv6[FASTD_IPV6_PAYLOAD_OFFSET];
+		return icmpv6_type == FASTD_ICMPV6_NEIGHBOR_SOLICITATION ||
+		       icmpv6_type == FASTD_ICMPV6_NEIGHBOR_ADVERTISEMENT;
+	}
+
+	default:
+		return false;
+	}
+}
+
+/** Returns true if a peer may receive a controlled NAT traversal data relay packet */
+static bool peer_may_receive_data_relay(const fastd_peer_t *source, const fastd_peer_t *dest) {
+	return dest != source && fastd_peer_is_established(dest) && fastd_peer_get_nat_traversal(dest);
+}
+
+/** Relays address-resolution frames to established NAT traversal peers */
+static bool relay_address_resolution(fastd_buffer_t *buffer, fastd_peer_t *source) {
+	fastd_eth_addr_t dest_addr = fastd_buffer_dest_address(buffer);
+
+	if (!(dest_addr.data[0] & 1))
+		return false;
+
+	if (!is_address_resolution_frame(buffer))
+		return false;
+
+	fastd_peer_t *last = NULL;
+	size_t limit = conf.punch_max_packets;
+	size_t selected = 0;
+	size_t i;
+	for (i = 0; i < VECTOR_LEN(ctx.peers); i++) {
+		fastd_peer_t *dest = VECTOR_INDEX(ctx.peers, i);
+		if (!peer_may_receive_data_relay(source, dest))
+			continue;
+
+		last = dest;
+		if (++selected >= limit)
+			break;
+	}
+
+	if (!last)
+		return false;
+
+	ctx.punch_data_relay_attempts++;
+	selected = 0;
+	for (i = 0; i < VECTOR_LEN(ctx.peers); i++) {
+		fastd_peer_t *dest = VECTOR_INDEX(ctx.peers, i);
+		if (!peer_may_receive_data_relay(source, dest))
+			continue;
+
+		selected++;
+		fastd_punch_note_peer_pair_demand(source, dest);
+		ctx.punch_data_relay_packets++;
+		ctx.punch_data_relay_bytes += buffer->len;
+
+		if (dest == last) {
+			conf.protocol->send(dest, buffer);
+			return true;
+		}
+
+		conf.protocol->send(dest, fastd_buffer_dup(buffer, conf.encrypt_headroom));
+		if (selected >= limit)
+			exit_bug("address-resolution relay exceeded selected destination");
+	}
+
+	exit_bug("address-resolution relay lost selected destination");
+}
+
 /** Handles sending of a payload packet to a single peer in TAP mode */
 static inline bool send_data_tap_single(fastd_buffer_t *buffer, fastd_peer_t *source) {
 	if (conf.mode != MODE_TAP)
@@ -258,7 +357,7 @@ bool fastd_send_data_relay(fastd_buffer_t *buffer, fastd_peer_t *source) {
 
 	fastd_eth_addr_t dest_addr = fastd_buffer_dest_address(buffer);
 	if (!fastd_eth_addr_is_unicast(dest_addr))
-		return false;
+		return relay_address_resolution(buffer, source);
 
 	fastd_peer_t *dest;
 	if (!fastd_peer_find_by_eth_addr(dest_addr, &dest) || !dest || dest == source ||

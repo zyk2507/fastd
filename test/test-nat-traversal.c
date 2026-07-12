@@ -172,9 +172,11 @@ enum {
 };
 
 #define TEST_CONTROL_HISTORY 32
+#define TEST_SEND_HISTORY 32
 
 static fastd_peer_t *test_send_peer;
 static size_t test_send_count;
+static fastd_peer_t *test_send_peers[TEST_SEND_HISTORY];
 static size_t test_handshake_count;
 static fastd_peer_t *test_handshake_peer;
 static fastd_peer_transport_t test_handshake_transport;
@@ -208,6 +210,8 @@ static void test_reset_control_sends(void) {
 
 static void test_protocol_send(fastd_peer_t *peer, fastd_buffer_t *buffer) {
 	test_send_peer = peer;
+	if (test_send_count < TEST_SEND_HISTORY)
+		test_send_peers[test_send_count] = peer;
 	test_send_count++;
 	fastd_buffer_free(buffer);
 }
@@ -1944,6 +1948,30 @@ static fastd_buffer_t *test_eth_frame(fastd_eth_addr_t dest, fastd_eth_addr_t so
 	return buffer;
 }
 
+static fastd_buffer_t *test_eth_frame_proto_len(
+	fastd_eth_addr_t dest, fastd_eth_addr_t source, uint16_t proto, size_t len) {
+	fastd_buffer_t *buffer = fastd_buffer_alloc(len, conf.encrypt_headroom);
+	fastd_eth_header_t header = {
+		.dest = dest,
+		.source = source,
+		.proto = htons(proto),
+	};
+	memset(buffer->data, 0, len);
+	memcpy(buffer->data, &header, sizeof(header));
+	return buffer;
+}
+
+static fastd_buffer_t *test_ipv6_frame(
+	fastd_eth_addr_t dest, fastd_eth_addr_t source, uint8_t next_header, uint8_t payload_type) {
+	size_t len = sizeof(fastd_eth_header_t) + 40 + 24;
+	fastd_buffer_t *buffer = test_eth_frame_proto_len(dest, source, 0x86dd, len);
+	uint8_t *ipv6 = (uint8_t *)buffer->data + sizeof(fastd_eth_header_t);
+	ipv6[0] = 0x60;
+	ipv6[6] = next_header;
+	ipv6[40] = payload_type;
+	return buffer;
+}
+
 static void test_punch_data_relay_only_for_learned_nat_unicast(void **state UNUSED) {
 	__typeof__(ctx.eth_addrs) old_eth_addrs = ctx.eth_addrs;
 	__typeof__(ctx.punch_pair_states) old_pair_states = ctx.punch_pair_states;
@@ -2052,6 +2080,170 @@ static void test_punch_data_relay_only_for_learned_nat_unicast(void **state UNUS
 	ctx.punch_data_relay_unavailable = old_data_relay_unavailable;
 	ctx.punch_data_relay_packets = old_data_relay_packets;
 	ctx.punch_data_relay_bytes = old_data_relay_bytes;
+}
+
+static void test_punch_data_relay_bootstraps_address_resolution(void **state UNUSED) {
+	__typeof__(ctx.peers) old_peers = ctx.peers;
+	__typeof__(ctx.punch_pair_states) old_pair_states = ctx.punch_pair_states;
+	const fastd_protocol_t *old_protocol = conf.protocol;
+	fastd_tristate_t old_data_relay = conf.punch_data_relay;
+	fastd_mode_t old_mode = conf.mode;
+	unsigned old_punch_max_packets = conf.punch_max_packets;
+	size_t old_encrypt_headroom = conf.encrypt_headroom;
+	size_t old_max_buffer = ctx.max_buffer;
+	fastd_timeout_t old_now = ctx.now;
+	uint64_t old_data_relay_attempts = ctx.punch_data_relay_attempts;
+	uint64_t old_data_relay_unavailable = ctx.punch_data_relay_unavailable;
+	uint64_t old_data_relay_packets = ctx.punch_data_relay_packets;
+	uint64_t old_data_relay_bytes = ctx.punch_data_relay_bytes;
+
+	ctx.peers = (__typeof__(ctx.peers)){};
+	ctx.punch_pair_states = (__typeof__(ctx.punch_pair_states)){};
+	conf.protocol = &test_protocol;
+	conf.punch_data_relay = FASTD_TRISTATE_TRUE;
+	conf.mode = MODE_MULTITAP;
+	conf.punch_max_packets = 2;
+	conf.encrypt_headroom = 0;
+	ctx.max_buffer = 2048;
+	ctx.now = 1000;
+	ctx.punch_data_relay_attempts = 0;
+	ctx.punch_data_relay_unavailable = 0;
+	ctx.punch_data_relay_packets = 0;
+	ctx.punch_data_relay_bytes = 0;
+	memset(test_send_peers, 0, sizeof(test_send_peers));
+	fastd_init_buffers();
+
+	fastd_peer_group_t group = {
+		.nat_traversal = FASTD_TRISTATE_TRUE,
+	};
+	fastd_peer_group_t blocked_group = {
+		.nat_traversal = FASTD_TRISTATE_FALSE,
+	};
+	fastd_peer_t source = {
+		.id = 10,
+		.name = "source",
+		.group = &group,
+		.state = STATE_ESTABLISHED,
+	};
+	fastd_peer_t dest_a = {
+		.id = 20,
+		.name = "dest-a",
+		.group = &group,
+		.state = STATE_ESTABLISHED,
+	};
+	fastd_peer_t dest_b = {
+		.id = 30,
+		.name = "dest-b",
+		.group = &group,
+		.state = STATE_ESTABLISHED,
+	};
+	fastd_peer_t no_nat = {
+		.id = 40,
+		.name = "no-nat",
+		.group = &blocked_group,
+		.state = STATE_ESTABLISHED,
+	};
+	fastd_peer_t down = {
+		.id = 50,
+		.name = "down",
+		.group = &group,
+		.state = STATE_PASSIVE,
+	};
+	VECTOR_ADD(ctx.peers, &source);
+	VECTOR_ADD(ctx.peers, &dest_a);
+	VECTOR_ADD(ctx.peers, &dest_b);
+	VECTOR_ADD(ctx.peers, &no_nat);
+	VECTOR_ADD(ctx.peers, &down);
+
+	fastd_eth_addr_t source_mac = { .data = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 } };
+	fastd_eth_addr_t arp_broadcast = { .data = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff } };
+	fastd_eth_addr_t ipv6_nd_multicast = { .data = { 0x33, 0x33, 0xff, 0x00, 0x00, 0x02 } };
+	fastd_eth_addr_t other_multicast = { .data = { 0x01, 0x00, 0x5e, 0x00, 0x00, 0xfb } };
+
+	test_send_peer = NULL;
+	test_send_count = 0;
+	memset(test_send_peers, 0, sizeof(test_send_peers));
+	size_t arp_len = sizeof(fastd_eth_header_t) + 28;
+	assert_true(fastd_send_data_relay(test_eth_frame_proto_len(arp_broadcast, source_mac, 0x0806, arp_len), &source));
+	assert_int_equal(test_send_count, 2);
+	assert_ptr_equal(test_send_peers[0], &dest_a);
+	assert_ptr_equal(test_send_peers[1], &dest_b);
+	assert_ptr_equal(test_send_peer, &dest_b);
+	assert_int_equal(VECTOR_LEN(ctx.punch_pair_states), 2);
+	assert_int_equal(ctx.punch_data_relay_attempts, 1);
+	assert_int_equal(ctx.punch_data_relay_unavailable, 0);
+	assert_int_equal(ctx.punch_data_relay_packets, 2);
+	assert_int_equal(ctx.punch_data_relay_bytes, 2 * arp_len);
+
+	test_send_peer = NULL;
+	test_send_count = 0;
+	memset(test_send_peers, 0, sizeof(test_send_peers));
+	size_t nd_len = sizeof(fastd_eth_header_t) + 64;
+	assert_true(fastd_send_data_relay(
+		test_ipv6_frame(ipv6_nd_multicast, source_mac, 58, 135), &source));
+	assert_int_equal(test_send_count, 2);
+	assert_ptr_equal(test_send_peers[0], &dest_a);
+	assert_ptr_equal(test_send_peers[1], &dest_b);
+	assert_int_equal(ctx.punch_data_relay_attempts, 2);
+	assert_int_equal(ctx.punch_data_relay_packets, 4);
+	assert_int_equal(ctx.punch_data_relay_bytes, 2 * arp_len + 2 * nd_len);
+
+	conf.punch_max_packets = 1;
+	test_send_peer = NULL;
+	test_send_count = 0;
+	memset(test_send_peers, 0, sizeof(test_send_peers));
+	assert_true(fastd_send_data_relay(test_eth_frame_proto_len(arp_broadcast, source_mac, 0x0806, arp_len), &source));
+	assert_int_equal(test_send_count, 1);
+	assert_ptr_equal(test_send_peers[0], &dest_a);
+	assert_ptr_equal(test_send_peer, &dest_a);
+	assert_int_equal(ctx.punch_data_relay_attempts, 3);
+	assert_int_equal(ctx.punch_data_relay_packets, 5);
+	assert_int_equal(ctx.punch_data_relay_bytes, 3 * arp_len + 2 * nd_len);
+
+	fastd_buffer_t *blocked = test_ipv6_frame(other_multicast, source_mac, 17, 0);
+	assert_false(fastd_send_data_relay(blocked, &source));
+	fastd_buffer_free(blocked);
+	assert_int_equal(test_send_count, 1);
+	assert_int_equal(ctx.punch_data_relay_attempts, 3);
+	assert_int_equal(ctx.punch_data_relay_packets, 5);
+	assert_int_equal(ctx.punch_data_relay_bytes, 3 * arp_len + 2 * nd_len);
+
+	blocked = test_eth_frame_proto_len(arp_broadcast, source_mac, 0x0806, sizeof(fastd_eth_header_t));
+	assert_false(fastd_send_data_relay(blocked, &source));
+	fastd_buffer_free(blocked);
+
+	blocked = test_eth_frame_proto_len(
+		ipv6_nd_multicast, source_mac, 0x86dd, sizeof(fastd_eth_header_t) + 40 + 1);
+	uint8_t *short_ipv6 = (uint8_t *)blocked->data + sizeof(fastd_eth_header_t);
+	short_ipv6[6] = 58;
+	short_ipv6[40] = 135;
+	assert_false(fastd_send_data_relay(blocked, &source));
+	fastd_buffer_free(blocked);
+
+	assert_int_equal(test_send_count, 1);
+	assert_int_equal(ctx.punch_data_relay_attempts, 3);
+	assert_int_equal(ctx.punch_data_relay_packets, 5);
+	assert_int_equal(ctx.punch_data_relay_bytes, 3 * arp_len + 2 * nd_len);
+
+	fastd_cleanup_buffers();
+	VECTOR_FREE(ctx.peers);
+	VECTOR_FREE(ctx.punch_pair_states);
+	ctx.peers = old_peers;
+	ctx.punch_pair_states = old_pair_states;
+	conf.protocol = old_protocol;
+	conf.punch_data_relay = old_data_relay;
+	conf.mode = old_mode;
+	conf.punch_max_packets = old_punch_max_packets;
+	conf.encrypt_headroom = old_encrypt_headroom;
+	ctx.max_buffer = old_max_buffer;
+	ctx.now = old_now;
+	ctx.punch_data_relay_attempts = old_data_relay_attempts;
+	ctx.punch_data_relay_unavailable = old_data_relay_unavailable;
+	ctx.punch_data_relay_packets = old_data_relay_packets;
+	ctx.punch_data_relay_bytes = old_data_relay_bytes;
+	test_send_peer = NULL;
+	test_send_count = 0;
+	memset(test_send_peers, 0, sizeof(test_send_peers));
 }
 
 static void test_punch_data_relay_receive_path_bypasses_local_iface(void **state UNUSED) {
@@ -5905,6 +6097,7 @@ int main(void) {
 		cmocka_unit_test(test_ec25519_endpoint_dependent_payload_probes_wait_for_payload_proven_backup),
 		cmocka_unit_test(test_punch_data_relay_effective_setting),
 		cmocka_unit_test(test_punch_data_relay_only_for_learned_nat_unicast),
+		cmocka_unit_test(test_punch_data_relay_bootstraps_address_resolution),
 		cmocka_unit_test(test_punch_data_relay_receive_path_bypasses_local_iface),
 		cmocka_unit_test(test_punch_udp_command_suppressed_for_tcp_only_peer),
 		cmocka_unit_test(test_punch_nat_refresh_policy),
