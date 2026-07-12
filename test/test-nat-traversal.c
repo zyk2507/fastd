@@ -187,6 +187,7 @@ static uint8_t test_control_last_type;
 static fastd_peer_t *test_control_send_peers[TEST_CONTROL_HISTORY];
 static uint8_t test_control_send_types[TEST_CONTROL_HISTORY];
 static uint8_t test_control_send_reserved[TEST_CONTROL_HISTORY];
+static uint8_t test_control_send_nat_types[TEST_CONTROL_HISTORY];
 static uint16_t test_control_send_ports[TEST_CONTROL_HISTORY];
 static fastd_peer_t *test_lookup_peer;
 static const uint8_t test_key_self[32] = { 9 };
@@ -205,6 +206,7 @@ static void test_reset_control_sends(void) {
 	memset(test_control_send_peers, 0, sizeof(test_control_send_peers));
 	memset(test_control_send_types, 0, sizeof(test_control_send_types));
 	memset(test_control_send_reserved, 0, sizeof(test_control_send_reserved));
+	memset(test_control_send_nat_types, 0, sizeof(test_control_send_nat_types));
 	memset(test_control_send_ports, 0, sizeof(test_control_send_ports));
 }
 
@@ -240,6 +242,7 @@ static void test_protocol_send_control(fastd_peer_t *peer, fastd_buffer_t *buffe
 				if (buffer->len >= sizeof(test_punch_header_t) + sizeof(test_punch_endpoint_t)) {
 					const test_punch_endpoint_t *endpoint = (const test_punch_endpoint_t *)(header + 1);
 					test_control_send_reserved[pos] = endpoint->reserved;
+					test_control_send_nat_types[pos] = endpoint->nat_type;
 					test_control_send_ports[pos] = be16toh(endpoint->port);
 				}
 			}
@@ -4454,6 +4457,114 @@ static void test_tcp_punch_candidate_binds_nat_source_port(void **state UNUSED) 
 	test_handshake_remote = (fastd_peer_address_t){};
 }
 
+static void test_punch_maintenance_announces_unpunchable_tcp_nat_metadata(void **state UNUSED) {
+	__typeof__(ctx.peers) old_peers = ctx.peers;
+	__typeof__(ctx.punch_pair_states) old_pair_states = ctx.punch_pair_states;
+	__typeof__(ctx.udp_punch_socks) old_udp_punch_socks = ctx.udp_punch_socks;
+	const fastd_protocol_t *old_protocol = conf.protocol;
+	fastd_peer_group_t *old_peer_group = conf.peer_group;
+	fastd_nat_detect_t *old_nat_detect = ctx.nat_detect;
+	bool old_control_relay = conf.punch_control_relay;
+	unsigned old_announce_interval = conf.punch_announce_interval;
+	size_t old_encrypt_headroom = conf.encrypt_headroom;
+	size_t old_max_buffer = ctx.max_buffer;
+	uint64_t old_tx = ctx.punch_control_tx;
+	int64_t old_now = ctx.now;
+
+	ctx.peers = (__typeof__(ctx.peers)){};
+	ctx.punch_pair_states = (__typeof__(ctx.punch_pair_states)){};
+	ctx.udp_punch_socks = (__typeof__(ctx.udp_punch_socks)){};
+	ctx.nat_detect = NULL;
+	ctx.now = 1000;
+	conf.protocol = &test_protocol;
+	conf.punch_control_relay = false;
+	conf.punch_announce_interval = 15000;
+	conf.encrypt_headroom = 0;
+	ctx.max_buffer = 2048;
+	test_reset_control_sends();
+	fastd_init_buffers();
+
+	fastd_nat_status_t status = {
+		.enabled = true,
+		.available = true,
+		.type = FASTD_NAT_FULL_CONE,
+		.reflexive = addr4(0xc6336401, 61000),
+		.min_port = 61000,
+		.max_port = 61000,
+		.tcp_available = true,
+		.tcp_type = FASTD_NAT_SYMMETRIC,
+		.tcp_reflexive = addr4(0xc6336401, 62000),
+		.tcp_min_port = 62000,
+		.tcp_max_port = 62000,
+		.tcp_responses = 2,
+		.servers = 2,
+		.last_update = ctx.now,
+	};
+	assert_true(fastd_nat_test_set_status(&status));
+
+	fastd_socket_t public_listener = {
+		.type = SOCKET_TYPE_UDP,
+		.hole_punch = true,
+		.punch_public_listener = true,
+		.punch_listener_port_mapped = true,
+		.punch_listener_id = 77,
+		.hole_punch_timeout = ctx.now + 10000,
+		.punch_listener_selected = ctx.now,
+		.punch_listener_public_addr = addr4(0xc6336401, 61005),
+	};
+	VECTOR_ADD(ctx.udp_punch_socks, &public_listener);
+
+	fastd_peer_group_t group = {
+		.transport = TRANSPORT_TCP,
+		.hole_punch = HOLE_PUNCH_TCP,
+		.nat_traversal = FASTD_TRISTATE_TRUE,
+	};
+	conf.peer_group = &group;
+
+	fastd_peer_t peer = {
+		.id = 20,
+		.group = &group,
+		.config_state = CONFIG_STATIC,
+		.name = "peer-b",
+		.state = STATE_ESTABLISHED,
+		.transport = TRANSPORT_TCP,
+		.hole_punch = HOLE_PUNCH_TCP,
+		.nat_traversal = FASTD_TRISTATE_TRUE,
+	};
+	VECTOR_ADD(ctx.peers, &peer);
+
+	fastd_punch_maintenance();
+
+	assert_int_equal(test_control_send_count, 2);
+	assert_ptr_equal(test_control_send_peers[0], &peer);
+	assert_ptr_equal(test_control_send_peers[1], &peer);
+	assert_int_equal(test_control_send_types[0], TEST_PUNCH_NAT_INFO);
+	assert_int_equal(test_control_send_types[1], TEST_PUNCH_TCP_NAT_INFO);
+	assert_int_equal(test_control_send_nat_types[0], FASTD_NAT_FULL_CONE);
+	assert_int_equal(test_control_send_nat_types[1], FASTD_NAT_SYMMETRIC);
+	assert_int_equal(test_control_send_ports[0], 61005);
+	assert_int_equal(test_control_send_ports[1], 62000);
+
+	fastd_nat_test_clear_status();
+	VECTOR_FREE(ctx.peers);
+	VECTOR_FREE(ctx.punch_pair_states);
+	VECTOR_FREE(ctx.udp_punch_socks);
+	ctx.peers = old_peers;
+	ctx.punch_pair_states = old_pair_states;
+	ctx.udp_punch_socks = old_udp_punch_socks;
+	ctx.nat_detect = old_nat_detect;
+	conf.protocol = old_protocol;
+	conf.peer_group = old_peer_group;
+	conf.punch_control_relay = old_control_relay;
+	conf.punch_announce_interval = old_announce_interval;
+	conf.encrypt_headroom = old_encrypt_headroom;
+	ctx.max_buffer = old_max_buffer;
+	ctx.punch_control_tx = old_tx;
+	ctx.now = old_now;
+	test_reset_control_sends();
+	fastd_cleanup_buffers();
+}
+
 static void test_punch_accepts_relayed_nat_metadata(void **state UNUSED) {
 	const fastd_protocol_t *old_protocol = conf.protocol;
 	fastd_peer_group_t *old_peer_group = conf.peer_group;
@@ -4522,6 +4633,18 @@ static void test_punch_accepts_relayed_nat_metadata(void **state UNUSED) {
 	assert_int_equal(port4(&subject.tcp_punch_endpoint), 53000);
 	assert_int_equal(subject.tcp_punch_min_port, 53000);
 	assert_int_equal(subject.tcp_punch_max_port, 53000);
+	assert_int_equal(subject.n_tcp_punch_endpoints, 1);
+
+	fastd_peer_address_t tcp_symmetric_endpoint = addr4(0xc6336408, 53010);
+	assert_true(fastd_punch_handle_control(
+		&relay,
+		make_punch_control_buffer_extra(
+			TEST_PUNCH_TCP_NAT_INFO, &tcp_symmetric_endpoint, FASTD_NAT_SYMMETRIC, test_key_b,
+			sizeof(test_key_b), TEST_PUNCH_NAT_INFO_RELAYED)));
+	assert_int_equal(subject.tcp_punch_nat_type, FASTD_NAT_SYMMETRIC);
+	assert_int_equal(port4(&subject.tcp_punch_endpoint), 53010);
+	assert_int_equal(subject.tcp_punch_min_port, 53010);
+	assert_int_equal(subject.tcp_punch_max_port, 53010);
 	assert_int_equal(subject.n_tcp_punch_endpoints, 1);
 
 	test_lookup_peer = old_lookup_peer;
@@ -4636,12 +4759,37 @@ static void test_punch_route_relays_fresh_nat_metadata(void **state UNUSED) {
 	assert_ptr_equal(test_control_send_peers[1], &d);
 	assert_int_equal(test_control_send_types[0], TEST_PUNCH_TCP_NAT_INFO);
 	assert_int_equal(test_control_send_types[1], TEST_PUNCH_TCP_NAT_INFO);
+	assert_int_equal(test_control_send_nat_types[0], FASTD_NAT_FULL_CONE);
+	assert_int_equal(test_control_send_nat_types[1], FASTD_NAT_FULL_CONE);
 	assert_int_equal(test_control_send_ports[0], 53000);
 	assert_int_equal(test_control_send_ports[1], 53000);
 	assert_int_equal(test_control_send_reserved[0] & TEST_PUNCH_NAT_INFO_RELAYED, TEST_PUNCH_NAT_INFO_RELAYED);
 	assert_int_equal(test_control_send_reserved[1] & TEST_PUNCH_NAT_INFO_RELAYED, TEST_PUNCH_NAT_INFO_RELAYED);
 	assert_int_equal(ctx.punch_route_metadata_updates, 2);
 	assert_int_equal(ctx.punch_route_metadata_relays, 3);
+	assert_int_equal(ctx.punch_route_metadata_budget_exhausted, 1);
+
+	test_reset_control_sends();
+	fastd_peer_address_t tcp_symmetric_endpoint = addr4(0xc6336407, 53010);
+	assert_true(fastd_punch_handle_control(
+		&a,
+		make_punch_control_buffer(
+			TEST_PUNCH_TCP_NAT_INFO, &tcp_symmetric_endpoint, FASTD_NAT_SYMMETRIC, test_key_a,
+			sizeof(test_key_a))));
+	assert_int_equal(test_control_send_count, 2);
+	assert_ptr_equal(test_control_send_peers[0], &b);
+	assert_ptr_equal(test_control_send_peers[1], &d);
+	assert_int_equal(test_control_send_types[0], TEST_PUNCH_TCP_NAT_INFO);
+	assert_int_equal(test_control_send_types[1], TEST_PUNCH_TCP_NAT_INFO);
+	assert_int_equal(test_control_send_nat_types[0], FASTD_NAT_SYMMETRIC);
+	assert_int_equal(test_control_send_nat_types[1], FASTD_NAT_SYMMETRIC);
+	assert_int_equal(test_control_send_ports[0], 53010);
+	assert_int_equal(test_control_send_ports[1], 53010);
+	assert_int_equal(test_control_send_reserved[0] & TEST_PUNCH_NAT_INFO_RELAYED, TEST_PUNCH_NAT_INFO_RELAYED);
+	assert_int_equal(test_control_send_reserved[1] & TEST_PUNCH_NAT_INFO_RELAYED, TEST_PUNCH_NAT_INFO_RELAYED);
+	assert_int_equal(a.tcp_punch_nat_type, FASTD_NAT_SYMMETRIC);
+	assert_int_equal(ctx.punch_route_metadata_updates, 3);
+	assert_int_equal(ctx.punch_route_metadata_relays, 5);
 	assert_int_equal(ctx.punch_route_metadata_budget_exhausted, 1);
 
 	test_reset_control_sends();
@@ -4653,8 +4801,8 @@ static void test_punch_route_relays_fresh_nat_metadata(void **state UNUSED) {
 			sizeof(test_key_a), TEST_PUNCH_NAT_INFO_RELAYED)));
 	assert_int_equal(test_control_send_count, 0);
 	assert_int_equal(port4(&a.punch_endpoint), 51010);
-	assert_int_equal(ctx.punch_route_metadata_updates, 2);
-	assert_int_equal(ctx.punch_route_metadata_relays, 3);
+	assert_int_equal(ctx.punch_route_metadata_updates, 3);
+	assert_int_equal(ctx.punch_route_metadata_relays, 5);
 	assert_int_equal(ctx.punch_route_metadata_budget_exhausted, 1);
 
 	fastd_task_unschedule(&ctx.next_maintenance);
@@ -6473,6 +6621,7 @@ int main(void) {
 		cmocka_unit_test(test_punch_send_tcp_preserves_multiple_received_endpoints),
 		cmocka_unit_test(test_tcp_direct_handshake_reuses_unestablished_candidate_socket),
 		cmocka_unit_test(test_tcp_punch_candidate_binds_nat_source_port),
+		cmocka_unit_test(test_punch_maintenance_announces_unpunchable_tcp_nat_metadata),
 		cmocka_unit_test(test_punch_accepts_relayed_nat_metadata),
 		cmocka_unit_test(test_punch_route_relays_fresh_nat_metadata),
 		cmocka_unit_test(test_punch_control_preserves_scoped_ipv6_metadata_and_candidate),

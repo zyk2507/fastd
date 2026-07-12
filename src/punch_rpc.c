@@ -1985,7 +1985,7 @@ static size_t relay_udp_nat_metadata_to_peer(fastd_peer_t *dest, const fastd_pee
 static size_t relay_tcp_nat_metadata_to_peer(fastd_peer_t *dest, const fastd_peer_t *subject, size_t limit) {
 	if (!nat_metadata_relay_allowed(dest, subject, limit))
 		return 0;
-	if (!peer_has_fresh_tcp_punch_nat_info(subject) || !tcp_nat_type_punchable(subject->tcp_punch_nat_type))
+	if (!peer_has_fresh_tcp_punch_nat_info(subject))
 		return 0;
 
 	const void *subject_key = conf.protocol->get_peer_key(subject);
@@ -2150,30 +2150,30 @@ static void send_local_nat_info(fastd_peer_t *dest) {
 	if (get_local_udp_nat_info_endpoint(
 		    dest, &status, &udp_endpoint, &udp_nat_type, &udp_min_port, &udp_max_port, &udp_port_delta, NULL,
 		    NULL, AF_UNSPEC, false, true)) {
-			send_endpoint_message(
-				dest, FASTD_PUNCH_NAT_INFO, conf.protocol->get_own_key(), conf.protocol->key_length(),
-				&udp_endpoint, udp_nat_type, udp_min_port, udp_max_port, udp_port_delta, 0, 0);
-			if (status.available && status.n_reflexive_addrs)
-				send_nat_info_extra_endpoints(
-					dest, FASTD_PUNCH_NAT_INFO_EXTRA, &udp_endpoint, status.reflexive_addrs,
-					status.n_reflexive_addrs, status.type, status.min_port, status.max_port,
-					status.port_delta);
-			if (fastd_peer_hole_punch_allows(dest, TRANSPORT_UDP) &&
-			    fastd_peer_transport_allows(fastd_peer_get_transport(dest), TRANSPORT_UDP))
-				send_select_listener_request(dest, &udp_endpoint, false, true);
-		}
-
-		if (status.tcp_available && tcp_nat_type_punchable(status.tcp_type)) {
-			send_endpoint_message(
-				dest, FASTD_PUNCH_TCP_NAT_INFO, conf.protocol->get_own_key(), conf.protocol->key_length(),
-				&status.tcp_reflexive, status.tcp_type, status.tcp_min_port, status.tcp_max_port, 0, 0, 0);
-			if (status.n_tcp_reflexive_addrs)
-				send_nat_info_extra_endpoints(
-					dest, FASTD_PUNCH_TCP_NAT_INFO_EXTRA, &status.tcp_reflexive,
-					status.tcp_reflexive_addrs, status.n_tcp_reflexive_addrs, status.tcp_type,
-					status.tcp_min_port, status.tcp_max_port, 0);
-		}
+		send_endpoint_message(
+			dest, FASTD_PUNCH_NAT_INFO, conf.protocol->get_own_key(), conf.protocol->key_length(),
+			&udp_endpoint, udp_nat_type, udp_min_port, udp_max_port, udp_port_delta, 0, 0);
+		if (status.available && status.n_reflexive_addrs)
+			send_nat_info_extra_endpoints(
+				dest, FASTD_PUNCH_NAT_INFO_EXTRA, &udp_endpoint, status.reflexive_addrs,
+				status.n_reflexive_addrs, status.type, status.min_port, status.max_port,
+				status.port_delta);
+		if (fastd_peer_hole_punch_allows(dest, TRANSPORT_UDP) &&
+		    fastd_peer_transport_allows(fastd_peer_get_transport(dest), TRANSPORT_UDP))
+			send_select_listener_request(dest, &udp_endpoint, false, true);
 	}
+
+	if (status.tcp_available) {
+		send_endpoint_message(
+			dest, FASTD_PUNCH_TCP_NAT_INFO, conf.protocol->get_own_key(), conf.protocol->key_length(),
+			&status.tcp_reflexive, status.tcp_type, status.tcp_min_port, status.tcp_max_port, 0, 0, 0);
+		if (status.n_tcp_reflexive_addrs)
+			send_nat_info_extra_endpoints(
+				dest, FASTD_PUNCH_TCP_NAT_INFO_EXTRA, &status.tcp_reflexive,
+				status.tcp_reflexive_addrs, status.n_tcp_reflexive_addrs, status.tcp_type,
+				status.tcp_min_port, status.tcp_max_port, 0);
+	}
+}
 
 /** Selects this instance's current base mapped UDP listener endpoint for a punch result */
 static bool get_local_base_mapped_endpoint(
@@ -3659,8 +3659,6 @@ static void handle_tcp_nat_info(fastd_peer_t *sender, const fastd_punch_endpoint
 		return;
 
 	fastd_nat_type_t nat_type = payload->nat_type;
-	if (!tcp_nat_type_punchable(nat_type))
-		return;
 
 	bool was_fresh = peer_has_fresh_tcp_punch_nat_info(subject);
 	fastd_peer_address_t old_endpoint = subject->tcp_punch_endpoint;
