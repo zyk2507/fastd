@@ -509,6 +509,9 @@ static void print_punch_table(json_object *punch) {
 			"data_relay_unavailable",
 			"data_relay_packets",
 			"data_relay_bytes",
+			"data_relay_address_resolution_attempts",
+			"data_relay_address_resolution_packets",
+			"data_relay_address_resolution_bytes",
 			"udp_exact_tx",
 			"probe_tx",
 			"probe_rx",
@@ -1979,6 +1982,15 @@ static json_object *dump_punch(void) {
 		counters, "data_relay_unavailable", json_object_new_int64(ctx.punch_data_relay_unavailable));
 	json_object_object_add(counters, "data_relay_packets", json_object_new_int64(ctx.punch_data_relay_packets));
 	json_object_object_add(counters, "data_relay_bytes", json_object_new_int64(ctx.punch_data_relay_bytes));
+	json_object_object_add(
+		counters, "data_relay_address_resolution_attempts",
+		json_object_new_int64(ctx.punch_data_relay_address_resolution_attempts));
+	json_object_object_add(
+		counters, "data_relay_address_resolution_packets",
+		json_object_new_int64(ctx.punch_data_relay_address_resolution_packets));
+	json_object_object_add(
+		counters, "data_relay_address_resolution_bytes",
+		json_object_new_int64(ctx.punch_data_relay_address_resolution_bytes));
 	json_object_object_add(counters, "udp_exact_tx", json_object_new_int64(ctx.punch_udp_exact_tx));
 	json_object_object_add(counters, "probe_tx", json_object_new_int64(ctx.punch_probe_tx));
 	json_object_object_add(counters, "probe_rx", json_object_new_int64(ctx.punch_probe_rx));

@@ -571,6 +571,9 @@ struct fastd_context {
 	uint64_t punch_data_relay_unavailable; /**< Number of data relay payloads consumed while destination was down */
 	uint64_t punch_data_relay_packets; /**< Number of packets forwarded by NAT traversal data relay */
 	uint64_t punch_data_relay_bytes;  /**< Number of payload bytes forwarded by NAT traversal data relay */
+	uint64_t punch_data_relay_address_resolution_attempts; /**< Number of ARP/ND bootstrap frames relayed */
+	uint64_t punch_data_relay_address_resolution_packets; /**< Number of ARP/ND bootstrap packets forwarded */
+	uint64_t punch_data_relay_address_resolution_bytes; /**< Number of ARP/ND bootstrap payload bytes forwarded */
 	uint64_t punch_udp_exact_tx;      /**< Number of exact-endpoint UDP punch packets sent */
 	uint64_t punch_probe_tx;          /**< Number of UDP punch probe requests sent */
 	uint64_t punch_probe_rx;          /**< Number of UDP punch probe packets received */

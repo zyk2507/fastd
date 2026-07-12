@@ -283,6 +283,7 @@ static bool relay_address_resolution(fastd_buffer_t *buffer, fastd_peer_t *sourc
 		return false;
 
 	ctx.punch_data_relay_attempts++;
+	ctx.punch_data_relay_address_resolution_attempts++;
 	selected = 0;
 	for (i = 0; i < VECTOR_LEN(ctx.peers); i++) {
 		fastd_peer_t *dest = VECTOR_INDEX(ctx.peers, i);
@@ -293,6 +294,8 @@ static bool relay_address_resolution(fastd_buffer_t *buffer, fastd_peer_t *sourc
 		fastd_punch_note_peer_pair_demand(source, dest);
 		ctx.punch_data_relay_packets++;
 		ctx.punch_data_relay_bytes += buffer->len;
+		ctx.punch_data_relay_address_resolution_packets++;
+		ctx.punch_data_relay_address_resolution_bytes += buffer->len;
 
 		if (dest == last) {
 			conf.protocol->send(dest, buffer);

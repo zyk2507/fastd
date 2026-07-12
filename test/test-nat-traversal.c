@@ -1985,6 +1985,9 @@ static void test_punch_data_relay_only_for_learned_nat_unicast(void **state UNUS
 	uint64_t old_data_relay_unavailable = ctx.punch_data_relay_unavailable;
 	uint64_t old_data_relay_packets = ctx.punch_data_relay_packets;
 	uint64_t old_data_relay_bytes = ctx.punch_data_relay_bytes;
+	uint64_t old_address_resolution_attempts = ctx.punch_data_relay_address_resolution_attempts;
+	uint64_t old_address_resolution_packets = ctx.punch_data_relay_address_resolution_packets;
+	uint64_t old_address_resolution_bytes = ctx.punch_data_relay_address_resolution_bytes;
 
 	ctx.eth_addrs = (__typeof__(ctx.eth_addrs)){};
 	ctx.punch_pair_states = (__typeof__(ctx.punch_pair_states)){};
@@ -1998,6 +2001,9 @@ static void test_punch_data_relay_only_for_learned_nat_unicast(void **state UNUS
 	ctx.punch_data_relay_unavailable = 0;
 	ctx.punch_data_relay_packets = 0;
 	ctx.punch_data_relay_bytes = 0;
+	ctx.punch_data_relay_address_resolution_attempts = 0;
+	ctx.punch_data_relay_address_resolution_packets = 0;
+	ctx.punch_data_relay_address_resolution_bytes = 0;
 	fastd_init_buffers();
 
 	fastd_peer_group_t group = {
@@ -2032,6 +2038,9 @@ static void test_punch_data_relay_only_for_learned_nat_unicast(void **state UNUS
 	assert_int_equal(ctx.punch_data_relay_unavailable, 0);
 	assert_int_equal(ctx.punch_data_relay_packets, 1);
 	assert_int_equal(ctx.punch_data_relay_bytes, sizeof(fastd_eth_header_t));
+	assert_int_equal(ctx.punch_data_relay_address_resolution_attempts, 0);
+	assert_int_equal(ctx.punch_data_relay_address_resolution_packets, 0);
+	assert_int_equal(ctx.punch_data_relay_address_resolution_bytes, 0);
 
 	fastd_buffer_t *blocked = test_eth_frame(multicast_mac, source_mac);
 	assert_false(fastd_send_data_relay(blocked, &source));
@@ -2080,6 +2089,9 @@ static void test_punch_data_relay_only_for_learned_nat_unicast(void **state UNUS
 	ctx.punch_data_relay_unavailable = old_data_relay_unavailable;
 	ctx.punch_data_relay_packets = old_data_relay_packets;
 	ctx.punch_data_relay_bytes = old_data_relay_bytes;
+	ctx.punch_data_relay_address_resolution_attempts = old_address_resolution_attempts;
+	ctx.punch_data_relay_address_resolution_packets = old_address_resolution_packets;
+	ctx.punch_data_relay_address_resolution_bytes = old_address_resolution_bytes;
 }
 
 static void test_punch_data_relay_bootstraps_address_resolution(void **state UNUSED) {
@@ -2096,6 +2108,9 @@ static void test_punch_data_relay_bootstraps_address_resolution(void **state UNU
 	uint64_t old_data_relay_unavailable = ctx.punch_data_relay_unavailable;
 	uint64_t old_data_relay_packets = ctx.punch_data_relay_packets;
 	uint64_t old_data_relay_bytes = ctx.punch_data_relay_bytes;
+	uint64_t old_address_resolution_attempts = ctx.punch_data_relay_address_resolution_attempts;
+	uint64_t old_address_resolution_packets = ctx.punch_data_relay_address_resolution_packets;
+	uint64_t old_address_resolution_bytes = ctx.punch_data_relay_address_resolution_bytes;
 
 	ctx.peers = (__typeof__(ctx.peers)){};
 	ctx.punch_pair_states = (__typeof__(ctx.punch_pair_states)){};
@@ -2110,6 +2125,9 @@ static void test_punch_data_relay_bootstraps_address_resolution(void **state UNU
 	ctx.punch_data_relay_unavailable = 0;
 	ctx.punch_data_relay_packets = 0;
 	ctx.punch_data_relay_bytes = 0;
+	ctx.punch_data_relay_address_resolution_attempts = 0;
+	ctx.punch_data_relay_address_resolution_packets = 0;
+	ctx.punch_data_relay_address_resolution_bytes = 0;
 	memset(test_send_peers, 0, sizeof(test_send_peers));
 	fastd_init_buffers();
 
@@ -2174,6 +2192,9 @@ static void test_punch_data_relay_bootstraps_address_resolution(void **state UNU
 	assert_int_equal(ctx.punch_data_relay_unavailable, 0);
 	assert_int_equal(ctx.punch_data_relay_packets, 2);
 	assert_int_equal(ctx.punch_data_relay_bytes, 2 * arp_len);
+	assert_int_equal(ctx.punch_data_relay_address_resolution_attempts, 1);
+	assert_int_equal(ctx.punch_data_relay_address_resolution_packets, 2);
+	assert_int_equal(ctx.punch_data_relay_address_resolution_bytes, 2 * arp_len);
 
 	test_send_peer = NULL;
 	test_send_count = 0;
@@ -2187,6 +2208,9 @@ static void test_punch_data_relay_bootstraps_address_resolution(void **state UNU
 	assert_int_equal(ctx.punch_data_relay_attempts, 2);
 	assert_int_equal(ctx.punch_data_relay_packets, 4);
 	assert_int_equal(ctx.punch_data_relay_bytes, 2 * arp_len + 2 * nd_len);
+	assert_int_equal(ctx.punch_data_relay_address_resolution_attempts, 2);
+	assert_int_equal(ctx.punch_data_relay_address_resolution_packets, 4);
+	assert_int_equal(ctx.punch_data_relay_address_resolution_bytes, 2 * arp_len + 2 * nd_len);
 
 	conf.punch_max_packets = 1;
 	test_send_peer = NULL;
@@ -2199,6 +2223,9 @@ static void test_punch_data_relay_bootstraps_address_resolution(void **state UNU
 	assert_int_equal(ctx.punch_data_relay_attempts, 3);
 	assert_int_equal(ctx.punch_data_relay_packets, 5);
 	assert_int_equal(ctx.punch_data_relay_bytes, 3 * arp_len + 2 * nd_len);
+	assert_int_equal(ctx.punch_data_relay_address_resolution_attempts, 3);
+	assert_int_equal(ctx.punch_data_relay_address_resolution_packets, 5);
+	assert_int_equal(ctx.punch_data_relay_address_resolution_bytes, 3 * arp_len + 2 * nd_len);
 
 	fastd_buffer_t *blocked = test_ipv6_frame(other_multicast, source_mac, 17, 0);
 	assert_false(fastd_send_data_relay(blocked, &source));
@@ -2207,6 +2234,9 @@ static void test_punch_data_relay_bootstraps_address_resolution(void **state UNU
 	assert_int_equal(ctx.punch_data_relay_attempts, 3);
 	assert_int_equal(ctx.punch_data_relay_packets, 5);
 	assert_int_equal(ctx.punch_data_relay_bytes, 3 * arp_len + 2 * nd_len);
+	assert_int_equal(ctx.punch_data_relay_address_resolution_attempts, 3);
+	assert_int_equal(ctx.punch_data_relay_address_resolution_packets, 5);
+	assert_int_equal(ctx.punch_data_relay_address_resolution_bytes, 3 * arp_len + 2 * nd_len);
 
 	blocked = test_eth_frame_proto_len(arp_broadcast, source_mac, 0x0806, sizeof(fastd_eth_header_t));
 	assert_false(fastd_send_data_relay(blocked, &source));
@@ -2241,6 +2271,9 @@ static void test_punch_data_relay_bootstraps_address_resolution(void **state UNU
 	ctx.punch_data_relay_unavailable = old_data_relay_unavailable;
 	ctx.punch_data_relay_packets = old_data_relay_packets;
 	ctx.punch_data_relay_bytes = old_data_relay_bytes;
+	ctx.punch_data_relay_address_resolution_attempts = old_address_resolution_attempts;
+	ctx.punch_data_relay_address_resolution_packets = old_address_resolution_packets;
+	ctx.punch_data_relay_address_resolution_bytes = old_address_resolution_bytes;
 	test_send_peer = NULL;
 	test_send_count = 0;
 	memset(test_send_peers, 0, sizeof(test_send_peers));
@@ -5184,6 +5217,9 @@ static void test_status_punch_exposes_udp_socket_pool(void **state UNUSED) {
 	uint64_t old_data_relay_unavailable = ctx.punch_data_relay_unavailable;
 	uint64_t old_data_relay_packets = ctx.punch_data_relay_packets;
 	uint64_t old_data_relay_bytes = ctx.punch_data_relay_bytes;
+	uint64_t old_address_resolution_attempts = ctx.punch_data_relay_address_resolution_attempts;
+	uint64_t old_address_resolution_packets = ctx.punch_data_relay_address_resolution_packets;
+	uint64_t old_address_resolution_bytes = ctx.punch_data_relay_address_resolution_bytes;
 	fastd_punch_pair_task_t old_pair_tasks[FASTD_PUNCH_PAIR_TASK_HISTORY];
 	memcpy(old_pair_tasks, ctx.punch_pair_tasks, sizeof(old_pair_tasks));
 	uint64_t old_next_pair_task_id = ctx.next_punch_pair_task_id;
@@ -5272,6 +5308,9 @@ static void test_status_punch_exposes_udp_socket_pool(void **state UNUSED) {
 	ctx.punch_data_relay_unavailable = 24;
 	ctx.punch_data_relay_packets = 16;
 	ctx.punch_data_relay_bytes = 4096;
+	ctx.punch_data_relay_address_resolution_attempts = 25;
+	ctx.punch_data_relay_address_resolution_packets = 26;
+	ctx.punch_data_relay_address_resolution_bytes = 8192;
 	peer.last_punch_task = (fastd_peer_punch_task_t){
 		.id = 101,
 		.updated = ctx.now - 20,
@@ -5447,6 +5486,9 @@ static void test_status_punch_exposes_udp_socket_pool(void **state UNUSED) {
 	assert_int_equal(json_get_int_required(counters, "data_relay_unavailable"), 24);
 	assert_int_equal(json_get_int_required(counters, "data_relay_packets"), 16);
 	assert_int_equal(json_get_int_required(counters, "data_relay_bytes"), 4096);
+	assert_int_equal(json_get_int_required(counters, "data_relay_address_resolution_attempts"), 25);
+	assert_int_equal(json_get_int_required(counters, "data_relay_address_resolution_packets"), 26);
+	assert_int_equal(json_get_int_required(counters, "data_relay_address_resolution_bytes"), 8192);
 
 	struct json_object *sockets = json_get_array_required(pool, "sockets");
 	assert_int_equal(json_object_array_length(sockets), 2);
@@ -5512,6 +5554,9 @@ static void test_status_punch_exposes_udp_socket_pool(void **state UNUSED) {
 	ctx.punch_data_relay_unavailable = old_data_relay_unavailable;
 	ctx.punch_data_relay_packets = old_data_relay_packets;
 	ctx.punch_data_relay_bytes = old_data_relay_bytes;
+	ctx.punch_data_relay_address_resolution_attempts = old_address_resolution_attempts;
+	ctx.punch_data_relay_address_resolution_packets = old_address_resolution_packets;
+	ctx.punch_data_relay_address_resolution_bytes = old_address_resolution_bytes;
 	memcpy(ctx.punch_pair_tasks, old_pair_tasks, sizeof(old_pair_tasks));
 	ctx.next_punch_pair_task_id = old_next_pair_task_id;
 	ctx.punch_pair_task_pos = old_pair_task_pos;
