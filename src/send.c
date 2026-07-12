@@ -262,10 +262,13 @@ bool fastd_send_data_relay(fastd_buffer_t *buffer, fastd_peer_t *source) {
 
 	fastd_peer_t *dest;
 	if (!fastd_peer_find_by_eth_addr(dest_addr, &dest) || !dest || dest == source ||
-	    !fastd_peer_get_nat_traversal(dest) || !fastd_peer_is_established(dest))
+	    !fastd_peer_get_nat_traversal(dest))
 		return false;
 
 	fastd_punch_note_peer_pair_demand(source, dest);
+	if (!fastd_peer_is_established(dest))
+		return false;
+
 	ctx.punch_data_relay_packets++;
 	ctx.punch_data_relay_bytes += buffer->len;
 	conf.protocol->send(dest, buffer);

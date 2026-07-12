@@ -1941,6 +1941,7 @@ static void test_punch_data_relay_only_for_learned_nat_unicast(void **state UNUS
 	assert_ptr_equal(test_send_peer, &dest);
 	assert_int_equal(test_send_count, 1);
 	assert_int_equal(VECTOR_LEN(ctx.punch_pair_states), 1);
+	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).demand_seq, 1);
 	assert_int_equal(ctx.punch_data_relay_packets, 1);
 	assert_int_equal(ctx.punch_data_relay_bytes, sizeof(fastd_eth_header_t));
 
@@ -1950,6 +1951,17 @@ static void test_punch_data_relay_only_for_learned_nat_unicast(void **state UNUS
 	assert_int_equal(test_send_count, 1);
 	assert_int_equal(ctx.punch_data_relay_packets, 1);
 	assert_int_equal(ctx.punch_data_relay_bytes, sizeof(fastd_eth_header_t));
+	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).demand_seq, 1);
+
+	dest.state = STATE_PASSIVE;
+	blocked = test_eth_frame(dest_mac, source_mac);
+	assert_false(fastd_send_data_relay(blocked, &source));
+	fastd_buffer_free(blocked);
+	assert_int_equal(test_send_count, 1);
+	assert_int_equal(ctx.punch_data_relay_packets, 1);
+	assert_int_equal(ctx.punch_data_relay_bytes, sizeof(fastd_eth_header_t));
+	assert_int_equal(VECTOR_LEN(ctx.punch_pair_states), 1);
+	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).demand_seq, 2);
 
 	dest.nat_traversal = FASTD_TRISTATE_FALSE;
 	blocked = test_eth_frame(dest_mac, source_mac);
@@ -1958,6 +1970,7 @@ static void test_punch_data_relay_only_for_learned_nat_unicast(void **state UNUS
 	assert_int_equal(test_send_count, 1);
 	assert_int_equal(ctx.punch_data_relay_packets, 1);
 	assert_int_equal(ctx.punch_data_relay_bytes, sizeof(fastd_eth_header_t));
+	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).demand_seq, 2);
 
 	fastd_cleanup_buffers();
 	VECTOR_FREE(ctx.eth_addrs);
