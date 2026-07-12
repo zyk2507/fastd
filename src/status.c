@@ -552,8 +552,8 @@ static void print_p2p_pair_table(json_object *punch) {
 			attempts, sizeof(attempts), "%lld/%lld", (long long)get_int_member(state, "launch_count"),
 			(long long)get_int_member(state, "abort_count"));
 		snprintf(
-			results, sizeof(results), "%lld/%lld", (long long)get_int_member(state, "result_count"),
-			(long long)get_int_member(state, "busy_count"));
+			results, sizeof(results), "%lld/%lld/%lld", (long long)get_int_member(state, "result_count"),
+			(long long)get_int_member(state, "failure_count"), (long long)get_int_member(state, "busy_count"));
 
 		ft_write_ln(
 			table, value_or_dash(get_string_member(state, "peer_a")),
@@ -954,6 +954,9 @@ static const char *punch_pair_task_stage_name(fastd_punch_pair_task_stage_t stag
 
 	case PUNCH_PAIR_TASK_STAGE_WAITING:
 		return "waiting";
+
+	case PUNCH_PAIR_TASK_STAGE_WAITING_DEMAND:
+		return "waiting-demand";
 
 	case PUNCH_PAIR_TASK_STAGE_IN_FLIGHT:
 		return "in-flight";
@@ -1780,6 +1783,7 @@ static json_object *dump_punch_pair_runtime(const fastd_punch_pair_runtime_t *ru
 	bool backoff = punch_runtime_timeout_active(runtime->backoff_until);
 	bool recent_demand = punch_runtime_timeout_active(runtime->recent_demand_until);
 	bool pending_demand = recent_demand && runtime->demand_seq != runtime->served_demand_seq;
+	bool demand_waiting = !in_flight && !backoff && !pending_demand && (runtime->abort_count || runtime->failure_count);
 	const char *state = "idle";
 	const char *reason = "no-active-demand";
 
@@ -1792,9 +1796,15 @@ static json_object *dump_punch_pair_runtime(const fastd_punch_pair_runtime_t *ru
 	} else if (pending_demand) {
 		state = "pending";
 		reason = "traffic-demand";
+	} else if (demand_waiting) {
+		state = "demand-waiting";
+		reason = "waiting-for-new-demand";
 	} else if (recent_demand) {
 		state = "recent";
 		reason = "demand-served";
+	} else if (runtime->failure_count) {
+		state = "backoff-expired";
+		reason = "remote-failure";
 	} else if (runtime->busy_count) {
 		state = "backoff-expired";
 		reason = "remote-busy";
@@ -1816,6 +1826,7 @@ static json_object *dump_punch_pair_runtime(const fastd_punch_pair_runtime_t *ru
 	json_object_object_add(ret, "updated_age", json_object_new_int64(timeout_age(runtime->updated)));
 	json_object_object_add(ret, "in_flight", json_object_new_boolean(in_flight));
 	json_object_object_add(ret, "backoff", json_object_new_boolean(backoff));
+	json_object_object_add(ret, "demand_waiting", json_object_new_boolean(demand_waiting));
 	json_object_object_add(ret, "recent_demand", json_object_new_boolean(recent_demand));
 	json_object_object_add(ret, "pending_demand", json_object_new_boolean(pending_demand));
 	json_object_object_add(ret, "in_flight_ms", wrap_active_runtime_timeout(runtime->in_flight_until));
@@ -1826,6 +1837,7 @@ static json_object *dump_punch_pair_runtime(const fastd_punch_pair_runtime_t *ru
 	json_object_object_add(ret, "launch_count", json_object_new_int(runtime->launch_count));
 	json_object_object_add(ret, "abort_count", json_object_new_int(runtime->abort_count));
 	json_object_object_add(ret, "result_count", json_object_new_int(runtime->result_count));
+	json_object_object_add(ret, "failure_count", json_object_new_int(runtime->failure_count));
 	json_object_object_add(ret, "busy_count", json_object_new_int(runtime->busy_count));
 	return ret;
 }
@@ -1851,6 +1863,7 @@ static json_object *dump_punch_task_manager(void) {
 	json_object_object_add(ret, "collected", json_object_new_int64(ctx.punch_task_manager_collected));
 	json_object_object_add(ret, "launched", json_object_new_int64(ctx.punch_task_manager_launched));
 	json_object_object_add(ret, "waiting", json_object_new_int64(ctx.punch_task_manager_waiting));
+	json_object_object_add(ret, "demand_waiting", json_object_new_int64(ctx.punch_task_manager_demand_waiting));
 	json_object_object_add(ret, "in_flight", json_object_new_int64(ctx.punch_task_manager_in_flight));
 	json_object_object_add(ret, "missing_metadata", json_object_new_int64(ctx.punch_task_manager_missing_metadata));
 	json_object_object_add(ret, "metadata_requests", json_object_new_int64(ctx.punch_task_manager_metadata_requests));

@@ -2275,7 +2275,7 @@ static void test_punch_pair_runtime_tracks_inflight_backoff_and_demand(void **st
 	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).served_demand_seq, 1);
 
 	fastd_peer_add_punch_relay_backoff(&a, &endpoint);
-	fastd_punch_test_task_manager_record_pair_result(&a, &b, TEST_PUNCH_RESULT_BUSY, &endpoint);
+	fastd_punch_test_task_manager_record_pair_result(&a, &b, TEST_PUNCH_RESULT_SUPPRESSED, &endpoint);
 	pair_state = fastd_punch_test_pair_state(&a, &b);
 	assert_false(pair_state.collected);
 	assert_false(pair_state.waiting);
@@ -2283,7 +2283,8 @@ static void test_punch_pair_runtime_tracks_inflight_backoff_and_demand(void **st
 	assert_false(pair_state.in_flight);
 	assert_int_equal(pair_state.next_retry, ctx.now + FASTD_PUNCH_SUPPRESSION_TIME);
 	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).result_count, 2);
-	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).busy_count, 1);
+	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).failure_count, 1);
+	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).busy_count, 0);
 
 	ctx.now += FASTD_PUNCH_SUPPRESSION_TIME + 1;
 	a.next_punch_relay = ctx.now;
@@ -2291,8 +2292,17 @@ static void test_punch_pair_runtime_tracks_inflight_backoff_and_demand(void **st
 	a.punch_timeout = ctx.now + 10000;
 	b.punch_timeout = ctx.now + 10000;
 	pair_state = fastd_punch_test_pair_state(&a, &b);
-	assert_true(pair_state.collected);
+	assert_false(pair_state.collected);
+	assert_true(pair_state.waiting);
+	assert_true(pair_state.demand_waiting);
 	assert_false(pair_state.backoff);
+	assert_int_equal(pair_state.next_retry, FASTD_TIMEOUT_INV);
+
+	fastd_punch_note_peer_pair_demand(&a, &b);
+	pair_state = fastd_punch_test_pair_state(&a, &b);
+	assert_true(pair_state.collected);
+	assert_true(pair_state.pending_demand);
+	assert_false(pair_state.demand_waiting);
 
 	fastd_punch_test_pair_runtime_mark_launched(&a, &b);
 	ctx.now += 5001;
@@ -2335,6 +2345,164 @@ static void test_punch_pair_runtime_tracks_inflight_backoff_and_demand(void **st
 	ctx.punch_pair_task_count = old_pair_task_count;
 	ctx.punch_task_manager_aborted = old_aborted;
 	ctx.now = old_now;
+}
+
+static void test_punch_task_manager_waits_for_new_demand_after_failed_pair(void **state UNUSED) {
+	__typeof__(ctx.peers) old_peers = ctx.peers;
+	__typeof__(ctx.punch_pair_states) old_pair_states = ctx.punch_pair_states;
+	const fastd_protocol_t *old_protocol = conf.protocol;
+	fastd_peer_group_t *old_peer_group = conf.peer_group;
+	bool old_control_relay = conf.punch_control_relay;
+	unsigned old_relay_interval = conf.punch_relay_interval;
+	unsigned old_max_packets = conf.punch_max_packets;
+	size_t old_encrypt_headroom = conf.encrypt_headroom;
+	size_t old_max_buffer = ctx.max_buffer;
+	uint64_t old_runs = ctx.punch_task_manager_runs;
+	uint64_t old_pairs = ctx.punch_task_manager_pairs;
+	uint64_t old_collected = ctx.punch_task_manager_collected;
+	uint64_t old_launched = ctx.punch_task_manager_launched;
+	uint64_t old_waiting = ctx.punch_task_manager_waiting;
+	uint64_t old_demand_waiting = ctx.punch_task_manager_demand_waiting;
+	uint64_t old_in_flight = ctx.punch_task_manager_in_flight;
+	uint64_t old_missing_metadata = ctx.punch_task_manager_missing_metadata;
+	uint64_t old_metadata_requests = ctx.punch_task_manager_metadata_requests;
+	uint64_t old_metadata_relays = ctx.punch_task_manager_metadata_relays;
+	uint64_t old_blacklisted = ctx.punch_task_manager_blacklisted;
+	uint64_t old_suppressed = ctx.punch_task_manager_suppressed;
+	uint64_t old_aborted = ctx.punch_task_manager_aborted;
+	uint64_t old_recent_demand = ctx.punch_task_manager_recent_demand;
+	uint64_t old_budget_exhausted = ctx.punch_task_manager_budget_exhausted;
+	fastd_timeout_t old_next_retry = ctx.punch_task_manager_next_retry;
+	fastd_punch_pair_task_t old_pair_tasks[FASTD_PUNCH_PAIR_TASK_HISTORY];
+	memcpy(old_pair_tasks, ctx.punch_pair_tasks, sizeof(old_pair_tasks));
+	uint64_t old_next_pair_task_id = ctx.next_punch_pair_task_id;
+	size_t old_pair_task_pos = ctx.punch_pair_task_pos;
+	size_t old_pair_task_count = ctx.punch_pair_task_count;
+	int64_t old_now = ctx.now;
+
+	ctx.peers = (__typeof__(ctx.peers)){};
+	ctx.punch_pair_states = (__typeof__(ctx.punch_pair_states)){};
+	memset(ctx.punch_pair_tasks, 0, sizeof(ctx.punch_pair_tasks));
+	ctx.next_punch_pair_task_id = 0;
+	ctx.punch_pair_task_pos = 0;
+	ctx.punch_pair_task_count = 0;
+	ctx.now = 1000;
+	conf.protocol = &test_protocol;
+	conf.punch_control_relay = true;
+	conf.punch_relay_interval = 1000;
+	conf.punch_max_packets = 8;
+	conf.encrypt_headroom = 0;
+	ctx.max_buffer = 2048;
+	test_reset_control_sends();
+	fastd_init_buffers();
+
+	fastd_peer_group_t group = {
+		.transport = TRANSPORT_AUTO,
+		.hole_punch = HOLE_PUNCH_AUTO,
+		.nat_traversal = FASTD_TRISTATE_TRUE,
+	};
+	conf.peer_group = &group;
+
+	fastd_peer_t a = {
+		.id = 30,
+		.group = &group,
+		.name = "peer-a",
+		.state = STATE_ESTABLISHED,
+		.address = addr4(0xcb007105, 41000),
+		.punch_endpoint = addr4(0xc6336407, 51000),
+		.punch_nat_type = FASTD_NAT_FULL_CONE,
+		.punch_min_port = 51000,
+		.punch_max_port = 51000,
+		.punch_timeout = ctx.now + FASTD_PUNCH_SUPPRESSION_TIME + 10000,
+		.next_punch_relay = ctx.now,
+	};
+	fastd_peer_t b = {
+		.id = 20,
+		.group = &group,
+		.name = "peer-b",
+		.state = STATE_ESTABLISHED,
+		.address = addr4(0xcb007106, 42000),
+		.punch_endpoint = addr4(0xc6336408, 52000),
+		.punch_nat_type = FASTD_NAT_FULL_CONE,
+		.punch_min_port = 52000,
+		.punch_max_port = 52000,
+		.punch_timeout = ctx.now + FASTD_PUNCH_SUPPRESSION_TIME + 10000,
+		.next_punch_relay = ctx.now,
+	};
+	VECTOR_ADD(ctx.peers, &a);
+	VECTOR_ADD(ctx.peers, &b);
+
+	fastd_punch_test_relay_peer_endpoints();
+	assert_int_equal(ctx.punch_task_manager_pairs, 1);
+	assert_int_equal(ctx.punch_task_manager_collected, 1);
+	assert_int_equal(ctx.punch_task_manager_launched, 1);
+	assert_true(test_control_send_count > 0);
+	assert_int_equal(test_control_send_types[0], TEST_PUNCH_SEND_CONE);
+	assert_int_equal(VECTOR_LEN(ctx.punch_pair_states), 1);
+
+	fastd_peer_address_t failed_endpoint = addr4(0xcb007105, 41000);
+	fastd_punch_test_task_manager_record_pair_result(&a, &b, TEST_PUNCH_RESULT_SUPPRESSED, &failed_endpoint);
+	ctx.now += FASTD_PUNCH_SUPPRESSION_TIME + 1;
+	a.next_punch_relay = ctx.now;
+	b.next_punch_relay = ctx.now;
+	test_reset_control_sends();
+
+	fastd_punch_test_relay_peer_endpoints();
+	assert_int_equal(ctx.punch_task_manager_pairs, 1);
+	assert_int_equal(ctx.punch_task_manager_collected, 0);
+	assert_int_equal(ctx.punch_task_manager_launched, 0);
+	assert_int_equal(ctx.punch_task_manager_waiting, 0);
+	assert_int_equal(ctx.punch_task_manager_demand_waiting, 1);
+	assert_int_equal(ctx.punch_task_manager_next_retry, FASTD_TIMEOUT_INV);
+	assert_int_equal(test_control_send_count, 0);
+	size_t latest_pos =
+		(ctx.punch_pair_task_pos + FASTD_PUNCH_PAIR_TASK_HISTORY - 1) % FASTD_PUNCH_PAIR_TASK_HISTORY;
+	assert_int_equal(ctx.punch_pair_tasks[latest_pos].stage, PUNCH_PAIR_TASK_STAGE_WAITING_DEMAND);
+	assert_int_equal(ctx.punch_pair_tasks[latest_pos].next_retry, FASTD_TIMEOUT_INV);
+
+	fastd_punch_note_peer_pair_demand(&a, &b);
+	test_reset_control_sends();
+	fastd_punch_test_relay_peer_endpoints();
+	assert_int_equal(ctx.punch_task_manager_pairs, 1);
+	assert_int_equal(ctx.punch_task_manager_collected, 1);
+	assert_int_equal(ctx.punch_task_manager_launched, 1);
+	assert_int_equal(ctx.punch_task_manager_demand_waiting, 0);
+	assert_true(test_control_send_count > 0);
+
+	VECTOR_FREE(ctx.peers);
+	VECTOR_FREE(ctx.punch_pair_states);
+	ctx.peers = old_peers;
+	ctx.punch_pair_states = old_pair_states;
+	conf.protocol = old_protocol;
+	conf.peer_group = old_peer_group;
+	conf.punch_control_relay = old_control_relay;
+	conf.punch_relay_interval = old_relay_interval;
+	conf.punch_max_packets = old_max_packets;
+	conf.encrypt_headroom = old_encrypt_headroom;
+	ctx.max_buffer = old_max_buffer;
+	ctx.punch_task_manager_runs = old_runs;
+	ctx.punch_task_manager_pairs = old_pairs;
+	ctx.punch_task_manager_collected = old_collected;
+	ctx.punch_task_manager_launched = old_launched;
+	ctx.punch_task_manager_waiting = old_waiting;
+	ctx.punch_task_manager_demand_waiting = old_demand_waiting;
+	ctx.punch_task_manager_in_flight = old_in_flight;
+	ctx.punch_task_manager_missing_metadata = old_missing_metadata;
+	ctx.punch_task_manager_metadata_requests = old_metadata_requests;
+	ctx.punch_task_manager_metadata_relays = old_metadata_relays;
+	ctx.punch_task_manager_blacklisted = old_blacklisted;
+	ctx.punch_task_manager_suppressed = old_suppressed;
+	ctx.punch_task_manager_aborted = old_aborted;
+	ctx.punch_task_manager_recent_demand = old_recent_demand;
+	ctx.punch_task_manager_budget_exhausted = old_budget_exhausted;
+	ctx.punch_task_manager_next_retry = old_next_retry;
+	memcpy(ctx.punch_pair_tasks, old_pair_tasks, sizeof(ctx.punch_pair_tasks));
+	ctx.next_punch_pair_task_id = old_next_pair_task_id;
+	ctx.punch_pair_task_pos = old_pair_task_pos;
+	ctx.punch_pair_task_count = old_pair_task_count;
+	ctx.now = old_now;
+	test_reset_control_sends();
+	fastd_cleanup_buffers();
 }
 
 static void test_punch_task_manager_requests_missing_metadata_on_demand(void **state UNUSED) {
@@ -4368,6 +4536,7 @@ static void test_status_punch_exposes_udp_socket_pool(void **state UNUSED) {
 	uint64_t old_task_manager_collected = ctx.punch_task_manager_collected;
 	uint64_t old_task_manager_launched = ctx.punch_task_manager_launched;
 	uint64_t old_task_manager_waiting = ctx.punch_task_manager_waiting;
+	uint64_t old_task_manager_demand_waiting = ctx.punch_task_manager_demand_waiting;
 	uint64_t old_task_manager_in_flight = ctx.punch_task_manager_in_flight;
 	uint64_t old_task_manager_missing_metadata = ctx.punch_task_manager_missing_metadata;
 	uint64_t old_task_manager_metadata_requests = ctx.punch_task_manager_metadata_requests;
@@ -4450,6 +4619,7 @@ static void test_status_punch_exposes_udp_socket_pool(void **state UNUSED) {
 	ctx.punch_task_manager_collected = 3;
 	ctx.punch_task_manager_launched = 2;
 	ctx.punch_task_manager_waiting = 1;
+	ctx.punch_task_manager_demand_waiting = 18;
 	ctx.punch_task_manager_in_flight = 15;
 	ctx.punch_task_manager_missing_metadata = 5;
 	ctx.punch_task_manager_metadata_requests = 18;
@@ -4498,6 +4668,9 @@ static void test_status_punch_exposes_udp_socket_pool(void **state UNUSED) {
 		FASTD_TIMEOUT_INV, false);
 	fastd_punch_test_task_manager_record_pair_task(
 		&task_peer, &peer, NULL, NULL, PUNCH_PAIR_TASK_STAGE_WAITING, 0, 0, ctx.now + 6000, true);
+	fastd_punch_test_task_manager_record_pair_task(
+		&task_peer, &peer, NULL, NULL, PUNCH_PAIR_TASK_STAGE_WAITING_DEMAND, 0, 0,
+		FASTD_TIMEOUT_INV, false);
 	fastd_peer_address_t result_endpoint = addr4(0xcb007105, 43000);
 	fastd_peer_add_punch_relay_backoff(&task_peer, &result_endpoint);
 	fastd_punch_test_task_manager_record_pair_result(
@@ -4515,6 +4688,7 @@ static void test_status_punch_exposes_udp_socket_pool(void **state UNUSED) {
 		.launch_count = 4,
 		.abort_count = 1,
 		.result_count = 2,
+		.failure_count = 3,
 		.busy_count = 1,
 	};
 
@@ -4543,6 +4717,7 @@ static void test_status_punch_exposes_udp_socket_pool(void **state UNUSED) {
 	assert_int_equal(json_get_int_required(manager, "collected"), 3);
 	assert_int_equal(json_get_int_required(manager, "launched"), 2);
 	assert_int_equal(json_get_int_required(manager, "waiting"), 1);
+	assert_int_equal(json_get_int_required(manager, "demand_waiting"), 18);
 	assert_int_equal(json_get_int_required(manager, "in_flight"), 15);
 	assert_int_equal(json_get_int_required(manager, "missing_metadata"), 5);
 	assert_int_equal(json_get_int_required(manager, "metadata_requests"), 18);
@@ -4566,6 +4741,7 @@ static void test_status_punch_exposes_udp_socket_pool(void **state UNUSED) {
 	assert_int_equal(json_get_int_required(runtime_state, "updated_age"), 250);
 	assert_true(json_get_bool_required(runtime_state, "in_flight"));
 	assert_true(json_get_bool_required(runtime_state, "backoff"));
+	assert_false(json_get_bool_required(runtime_state, "demand_waiting"));
 	assert_true(json_get_bool_required(runtime_state, "recent_demand"));
 	assert_true(json_get_bool_required(runtime_state, "pending_demand"));
 	assert_int_equal(json_get_int_required(runtime_state, "in_flight_ms"), 5000);
@@ -4576,6 +4752,7 @@ static void test_status_punch_exposes_udp_socket_pool(void **state UNUSED) {
 	assert_int_equal(json_get_int_required(runtime_state, "launch_count"), 4);
 	assert_int_equal(json_get_int_required(runtime_state, "abort_count"), 1);
 	assert_int_equal(json_get_int_required(runtime_state, "result_count"), 2);
+	assert_int_equal(json_get_int_required(runtime_state, "failure_count"), 3);
 	assert_int_equal(json_get_int_required(runtime_state, "busy_count"), 1);
 	assert_int_equal(json_get_int_required(manager, "budget_exhausted"), 1);
 	assert_int_equal(json_get_int_required(manager, "next_retry_min_ms"), 12345);
@@ -4587,12 +4764,12 @@ static void test_status_punch_exposes_udp_socket_pool(void **state UNUSED) {
 	assert_int_equal(json_get_int_required(manager, "outcome_no_peer"), 13);
 	assert_int_equal(json_get_int_required(manager, "outcome_busy"), 14);
 	assert_int_equal(json_get_int_required(manager, "history_limit"), FASTD_PUNCH_PAIR_TASK_HISTORY);
-	assert_int_equal(json_get_int_required(manager, "history_count"), 3);
+	assert_int_equal(json_get_int_required(manager, "history_count"), 4);
 	struct json_object *history = json_get_array_required(manager, "history");
-	assert_int_equal(json_object_array_length(history), 3);
+	assert_int_equal(json_object_array_length(history), 4);
 	struct json_object *latest_task = json_object_array_get_idx(history, 0);
 	assert_string_equal(json_get_string_required(latest_task, "stage"), "result-busy");
-	assert_int_equal(json_get_int_required(latest_task, "id"), 203);
+	assert_int_equal(json_get_int_required(latest_task, "id"), 204);
 	assert_int_equal(json_get_int_required(latest_task, "peer_a_id"), 77);
 	assert_int_equal(json_get_int_required(latest_task, "peer_b_id"), 78);
 	assert_string_equal(json_get_string_required(latest_task, "subject"), "peer-a");
@@ -4600,7 +4777,14 @@ static void test_status_punch_exposes_udp_socket_pool(void **state UNUSED) {
 	assert_int_equal(json_get_int_required(latest_task, "backoff_skipped"), 1);
 	assert_int_equal(json_get_int_required(latest_task, "next_retry_ms"), FASTD_PUNCH_SUPPRESSION_TIME);
 	assert_false(json_get_bool_required(latest_task, "budget_exhausted"));
-	struct json_object *waiting_task = json_object_array_get_idx(history, 1);
+	struct json_object *demand_task = json_object_array_get_idx(history, 1);
+	assert_string_equal(json_get_string_required(demand_task, "stage"), "waiting-demand");
+	assert_int_equal(json_get_int_required(demand_task, "id"), 203);
+	assert_int_equal(json_get_int_required(demand_task, "peer_a_id"), 77);
+	assert_int_equal(json_get_int_required(demand_task, "peer_b_id"), 78);
+	json_get_null_required(demand_task, "next_retry_ms");
+	assert_false(json_get_bool_required(demand_task, "budget_exhausted"));
+	struct json_object *waiting_task = json_object_array_get_idx(history, 2);
 	assert_string_equal(json_get_string_required(waiting_task, "stage"), "waiting");
 	assert_int_equal(json_get_int_required(waiting_task, "id"), 202);
 	assert_int_equal(json_get_int_required(waiting_task, "peer_a_id"), 77);
@@ -4609,7 +4793,7 @@ static void test_status_punch_exposes_udp_socket_pool(void **state UNUSED) {
 	assert_string_equal(json_get_string_required(waiting_task, "peer_b"), "peer-b");
 	assert_int_equal(json_get_int_required(waiting_task, "next_retry_ms"), 6000);
 	assert_true(json_get_bool_required(waiting_task, "budget_exhausted"));
-	struct json_object *older_task = json_object_array_get_idx(history, 2);
+	struct json_object *older_task = json_object_array_get_idx(history, 3);
 	assert_string_equal(json_get_string_required(older_task, "stage"), "launched");
 	assert_int_equal(json_get_int_required(older_task, "id"), 201);
 	assert_int_equal(json_get_int_required(older_task, "subject_id"), 77);
@@ -4663,6 +4847,7 @@ static void test_status_punch_exposes_udp_socket_pool(void **state UNUSED) {
 	ctx.punch_task_manager_collected = old_task_manager_collected;
 	ctx.punch_task_manager_launched = old_task_manager_launched;
 	ctx.punch_task_manager_waiting = old_task_manager_waiting;
+	ctx.punch_task_manager_demand_waiting = old_task_manager_demand_waiting;
 	ctx.punch_task_manager_in_flight = old_task_manager_in_flight;
 	ctx.punch_task_manager_missing_metadata = old_task_manager_missing_metadata;
 	ctx.punch_task_manager_metadata_requests = old_task_manager_metadata_requests;
@@ -5273,6 +5458,7 @@ int main(void) {
 		cmocka_unit_test(test_punch_task_pair_state_requires_established_metadata_and_due),
 		cmocka_unit_test(test_punch_task_manager_launch_lifecycle_accounting),
 		cmocka_unit_test(test_punch_pair_runtime_tracks_inflight_backoff_and_demand),
+		cmocka_unit_test(test_punch_task_manager_waits_for_new_demand_after_failed_pair),
 		cmocka_unit_test(test_punch_task_manager_requests_missing_metadata_on_demand),
 		cmocka_unit_test(test_punch_task_manager_requests_partial_symmetric_metadata),
 		cmocka_unit_test(test_punch_task_manager_prewarms_relayed_nat_metadata),

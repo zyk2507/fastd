@@ -458,6 +458,7 @@ typedef enum fastd_punch_pair_task_stage {
 	PUNCH_PAIR_TASK_STAGE_COLLECTED,     /**< Pair was eligible for punch command generation */
 	PUNCH_PAIR_TASK_STAGE_LAUNCHED,      /**< Pair emitted at least one punch command */
 	PUNCH_PAIR_TASK_STAGE_WAITING,       /**< Pair has metadata, but is waiting for the relay interval */
+	PUNCH_PAIR_TASK_STAGE_WAITING_DEMAND, /**< Pair had a failed attempt and is waiting for new traffic demand */
 	PUNCH_PAIR_TASK_STAGE_IN_FLIGHT,     /**< Pair already has a punch task inside its outcome window */
 	PUNCH_PAIR_TASK_STAGE_BLACKLISTED,   /**< Pair was held by relay backoff */
 	PUNCH_PAIR_TASK_STAGE_SUPPRESSED,    /**< Pair was collected, but no command was emitted */
@@ -499,7 +500,8 @@ typedef struct fastd_punch_pair_runtime {
 	uint16_t launch_count;                 /**< Number of task launches tracked for this pair */
 	uint16_t abort_count;                  /**< Number of in-flight windows that expired */
 	uint16_t result_count;                 /**< Number of remote command results observed */
-	uint16_t busy_count;                   /**< Number of busy/suppressed/no-peer results observed */
+	uint16_t failure_count;                /**< Number of suppressed/no-peer relay failures observed */
+	uint16_t busy_count;                   /**< Number of remote-busy results observed */
 } fastd_punch_pair_runtime_t;
 
 /** Recently handled punch result key used to suppress legacy/extended duplicate result packets */
@@ -581,6 +583,7 @@ struct fastd_context {
 	uint64_t punch_task_manager_collected; /**< Last task-manager run: pairs with a launchable punch direction */
 	uint64_t punch_task_manager_launched; /**< Last task-manager run: pairs that emitted punch commands */
 	uint64_t punch_task_manager_waiting; /**< Last task-manager run: pairs waiting for relay interval */
+	uint64_t punch_task_manager_demand_waiting; /**< Last run: failed pairs waiting for fresh traffic demand */
 	uint64_t punch_task_manager_in_flight; /**< Last task-manager run: pairs waiting for an in-flight task */
 	uint64_t punch_task_manager_missing_metadata; /**< Last task-manager run: pairs missing useful NAT metadata */
 	uint64_t punch_task_manager_metadata_requests; /**< Last task-manager run: missing-metadata refresh requests */

@@ -812,7 +812,7 @@ static bool punch_result_causes_relay_backoff(fastd_punch_result_t result);
 /** Returns true if a peer-pair runtime entry still carries useful scheduling state */
 static bool pair_runtime_active(const fastd_punch_pair_runtime_t *runtime) {
 	return task_timeout_active(runtime->in_flight_until) || task_timeout_active(runtime->backoff_until) ||
-	       task_timeout_active(runtime->recent_demand_until);
+	       task_timeout_active(runtime->recent_demand_until) || runtime->abort_count || runtime->failure_count;
 }
 
 /** Finds the runtime state index for a peer pair */
@@ -990,10 +990,15 @@ static void pair_runtime_mark_result(
 	}
 	else if (punch_result_causes_relay_backoff(result)) {
 		runtime->in_flight_until = FASTD_TIMEOUT_INV;
-		if (runtime->busy_count < UINT16_MAX)
-			runtime->busy_count++;
+		if (result == FASTD_PUNCH_RESULT_BUSY) {
+			if (runtime->busy_count < UINT16_MAX)
+				runtime->busy_count++;
+		}
+		else if (runtime->failure_count < UINT16_MAX) {
+			runtime->failure_count++;
+		}
 		runtime->backoff_until = backoff_timeout != FASTD_TIMEOUT_INV ? backoff_timeout :
-									     ctx.now + FASTD_PUNCH_SUPPRESSION_TIME;
+										     ctx.now + FASTD_PUNCH_SUPPRESSION_TIME;
 	}
 	else {
 		runtime->in_flight_until = FASTD_TIMEOUT_INV;
@@ -1017,6 +1022,7 @@ typedef struct fastd_punch_pair_state {
 	bool due_b;
 	bool collected;
 	bool waiting;
+	bool demand_waiting;
 	bool in_flight;
 	bool backoff;
 	bool recent_demand;
@@ -1051,6 +1057,18 @@ static bool pair_missing_metadata_request_due(
 
 	return peer_direction_needs_missing_metadata(a, b, state->has_metadata_a && state->due_a) ||
 	       peer_direction_needs_missing_metadata(b, a, state->has_metadata_b && state->due_b);
+}
+
+/** Returns true if a failed pair should converge until fresh traffic demand arrives */
+static bool pair_failure_waits_for_demand(
+	const fastd_punch_pair_runtime_t *runtime, const fastd_punch_pair_state_t *state) {
+	if (!runtime)
+		return false;
+
+	if (state->pending_demand)
+		return false;
+
+	return runtime->abort_count || runtime->failure_count;
 }
 
 /** Requests missing pair metadata after traffic demand or a due punch direction exposed a useful direct path opportunity */
@@ -1134,16 +1152,22 @@ static fastd_punch_pair_state_t punch_pair_state(const fastd_peer_t *a, const fa
 	if (state.backoff)
 		return state;
 
-	if (!state.has_metadata_a && !state.has_metadata_b) {
-		state.missing_metadata = true;
-		return state;
-	}
-
 	bool want_a = state.has_metadata_a && (state.due_a || state.pending_demand);
 	bool want_b = state.has_metadata_b && (state.due_b || state.pending_demand);
 	state.missing_metadata =
+		(!state.has_metadata_a && !state.has_metadata_b) ||
 		peer_direction_needs_missing_metadata(a, b, want_a) ||
 		peer_direction_needs_missing_metadata(b, a, want_b);
+
+	if (pair_failure_waits_for_demand(runtime, &state)) {
+		state.waiting = true;
+		state.demand_waiting = true;
+		state.next_retry = FASTD_TIMEOUT_INV;
+		return state;
+	}
+
+	if (!state.has_metadata_a && !state.has_metadata_b)
+		return state;
 
 	state.collected = state.pending_demand ||
 			  (state.has_metadata_a && state.due_a) || (state.has_metadata_b && state.due_b);
@@ -2766,6 +2790,7 @@ fastd_punch_test_pair_state_t fastd_punch_test_pair_state(const fastd_peer_t *a,
 		.due_b = state.due_b,
 		.collected = state.collected,
 		.waiting = state.waiting,
+		.demand_waiting = state.demand_waiting,
 		.in_flight = state.in_flight,
 		.backoff = state.backoff,
 		.recent_demand = state.recent_demand,
@@ -3247,6 +3272,7 @@ static void relay_peer_endpoints(void) {
 	ctx.punch_task_manager_collected = 0;
 	ctx.punch_task_manager_launched = 0;
 	ctx.punch_task_manager_waiting = 0;
+	ctx.punch_task_manager_demand_waiting = 0;
 	ctx.punch_task_manager_in_flight = 0;
 	ctx.punch_task_manager_missing_metadata = 0;
 	ctx.punch_task_manager_metadata_requests = 0;
@@ -3313,6 +3339,14 @@ static void relay_peer_endpoints(void) {
 				continue;
 			}
 			if (state.waiting) {
+				if (state.demand_waiting) {
+					ctx.punch_task_manager_demand_waiting++;
+					task_manager_record_pair_task(
+						a, b, NULL, NULL, PUNCH_PAIR_TASK_STAGE_WAITING_DEMAND, 0, 0,
+						state.next_retry, false);
+					continue;
+				}
+
 				ctx.punch_task_manager_waiting++;
 				task_manager_note_next_retry(state.next_retry);
 				task_manager_record_pair_task(
