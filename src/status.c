@@ -505,6 +505,8 @@ static void print_punch_table(json_object *punch) {
 			"direct_success",
 			"direct_failures",
 			"direct_suppressed",
+			"data_relay_attempts",
+			"data_relay_unavailable",
 			"data_relay_packets",
 			"data_relay_bytes",
 			"udp_exact_tx",
@@ -1962,6 +1964,9 @@ static json_object *dump_punch(void) {
 	json_object_object_add(counters, "direct_success", json_object_new_int64(ctx.punch_direct_success));
 	json_object_object_add(counters, "direct_failures", json_object_new_int64(ctx.punch_direct_failures));
 	json_object_object_add(counters, "direct_suppressed", json_object_new_int64(ctx.punch_direct_suppressed));
+	json_object_object_add(counters, "data_relay_attempts", json_object_new_int64(ctx.punch_data_relay_attempts));
+	json_object_object_add(
+		counters, "data_relay_unavailable", json_object_new_int64(ctx.punch_data_relay_unavailable));
 	json_object_object_add(counters, "data_relay_packets", json_object_new_int64(ctx.punch_data_relay_packets));
 	json_object_object_add(counters, "data_relay_bytes", json_object_new_int64(ctx.punch_data_relay_bytes));
 	json_object_object_add(counters, "udp_exact_tx", json_object_new_int64(ctx.punch_udp_exact_tx));

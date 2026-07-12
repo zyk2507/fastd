@@ -265,8 +265,10 @@ bool fastd_send_data_relay(fastd_buffer_t *buffer, fastd_peer_t *source) {
 	    !fastd_peer_get_nat_traversal(dest))
 		return false;
 
+	ctx.punch_data_relay_attempts++;
 	fastd_punch_note_peer_pair_demand(source, dest);
 	if (!fastd_peer_is_established(dest)) {
+		ctx.punch_data_relay_unavailable++;
 		fastd_buffer_free(buffer);
 		return true;
 	}

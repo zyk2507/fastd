@@ -1953,6 +1953,8 @@ static void test_punch_data_relay_only_for_learned_nat_unicast(void **state UNUS
 	size_t old_encrypt_headroom = conf.encrypt_headroom;
 	size_t old_max_buffer = ctx.max_buffer;
 	fastd_timeout_t old_now = ctx.now;
+	uint64_t old_data_relay_attempts = ctx.punch_data_relay_attempts;
+	uint64_t old_data_relay_unavailable = ctx.punch_data_relay_unavailable;
 	uint64_t old_data_relay_packets = ctx.punch_data_relay_packets;
 	uint64_t old_data_relay_bytes = ctx.punch_data_relay_bytes;
 
@@ -1964,6 +1966,8 @@ static void test_punch_data_relay_only_for_learned_nat_unicast(void **state UNUS
 	conf.encrypt_headroom = 0;
 	ctx.max_buffer = 2048;
 	ctx.now = 1000;
+	ctx.punch_data_relay_attempts = 0;
+	ctx.punch_data_relay_unavailable = 0;
 	ctx.punch_data_relay_packets = 0;
 	ctx.punch_data_relay_bytes = 0;
 	fastd_init_buffers();
@@ -1996,6 +2000,8 @@ static void test_punch_data_relay_only_for_learned_nat_unicast(void **state UNUS
 	assert_int_equal(test_send_count, 1);
 	assert_int_equal(VECTOR_LEN(ctx.punch_pair_states), 1);
 	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).demand_seq, 1);
+	assert_int_equal(ctx.punch_data_relay_attempts, 1);
+	assert_int_equal(ctx.punch_data_relay_unavailable, 0);
 	assert_int_equal(ctx.punch_data_relay_packets, 1);
 	assert_int_equal(ctx.punch_data_relay_bytes, sizeof(fastd_eth_header_t));
 
@@ -2003,6 +2009,8 @@ static void test_punch_data_relay_only_for_learned_nat_unicast(void **state UNUS
 	assert_false(fastd_send_data_relay(blocked, &source));
 	fastd_buffer_free(blocked);
 	assert_int_equal(test_send_count, 1);
+	assert_int_equal(ctx.punch_data_relay_attempts, 1);
+	assert_int_equal(ctx.punch_data_relay_unavailable, 0);
 	assert_int_equal(ctx.punch_data_relay_packets, 1);
 	assert_int_equal(ctx.punch_data_relay_bytes, sizeof(fastd_eth_header_t));
 	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).demand_seq, 1);
@@ -2011,6 +2019,8 @@ static void test_punch_data_relay_only_for_learned_nat_unicast(void **state UNUS
 	blocked = test_eth_frame(dest_mac, source_mac);
 	assert_true(fastd_send_data_relay(blocked, &source));
 	assert_int_equal(test_send_count, 1);
+	assert_int_equal(ctx.punch_data_relay_attempts, 2);
+	assert_int_equal(ctx.punch_data_relay_unavailable, 1);
 	assert_int_equal(ctx.punch_data_relay_packets, 1);
 	assert_int_equal(ctx.punch_data_relay_bytes, sizeof(fastd_eth_header_t));
 	assert_int_equal(VECTOR_LEN(ctx.punch_pair_states), 1);
@@ -2021,6 +2031,8 @@ static void test_punch_data_relay_only_for_learned_nat_unicast(void **state UNUS
 	assert_false(fastd_send_data_relay(blocked, &source));
 	fastd_buffer_free(blocked);
 	assert_int_equal(test_send_count, 1);
+	assert_int_equal(ctx.punch_data_relay_attempts, 2);
+	assert_int_equal(ctx.punch_data_relay_unavailable, 1);
 	assert_int_equal(ctx.punch_data_relay_packets, 1);
 	assert_int_equal(ctx.punch_data_relay_bytes, sizeof(fastd_eth_header_t));
 	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).demand_seq, 2);
@@ -2036,6 +2048,8 @@ static void test_punch_data_relay_only_for_learned_nat_unicast(void **state UNUS
 	conf.encrypt_headroom = old_encrypt_headroom;
 	ctx.max_buffer = old_max_buffer;
 	ctx.now = old_now;
+	ctx.punch_data_relay_attempts = old_data_relay_attempts;
+	ctx.punch_data_relay_unavailable = old_data_relay_unavailable;
 	ctx.punch_data_relay_packets = old_data_relay_packets;
 	ctx.punch_data_relay_bytes = old_data_relay_bytes;
 }
@@ -2050,6 +2064,8 @@ static void test_punch_data_relay_receive_path_bypasses_local_iface(void **state
 	size_t old_encrypt_headroom = conf.encrypt_headroom;
 	size_t old_max_buffer = ctx.max_buffer;
 	fastd_timeout_t old_now = ctx.now;
+	uint64_t old_data_relay_attempts = ctx.punch_data_relay_attempts;
+	uint64_t old_data_relay_unavailable = ctx.punch_data_relay_unavailable;
 	uint64_t old_data_relay_packets = ctx.punch_data_relay_packets;
 	uint64_t old_data_relay_bytes = ctx.punch_data_relay_bytes;
 
@@ -2068,6 +2084,8 @@ static void test_punch_data_relay_receive_path_bypasses_local_iface(void **state
 	conf.encrypt_headroom = 0;
 	ctx.max_buffer = 2048;
 	ctx.now = 1000;
+	ctx.punch_data_relay_attempts = 0;
+	ctx.punch_data_relay_unavailable = 0;
 	ctx.punch_data_relay_packets = 0;
 	ctx.punch_data_relay_bytes = 0;
 	fastd_init_buffers();
@@ -2106,6 +2124,8 @@ static void test_punch_data_relay_receive_path_bypasses_local_iface(void **state
 	assert_int_equal(errno, EAGAIN);
 	assert_ptr_equal(test_send_peer, &dest);
 	assert_int_equal(test_send_count, 1);
+	assert_int_equal(ctx.punch_data_relay_attempts, 1);
+	assert_int_equal(ctx.punch_data_relay_unavailable, 0);
 	assert_int_equal(ctx.punch_data_relay_packets, 1);
 	assert_int_equal(ctx.punch_data_relay_bytes, sizeof(fastd_eth_header_t));
 	assert_int_equal(VECTOR_LEN(ctx.punch_pair_states), 1);
@@ -2116,6 +2136,8 @@ static void test_punch_data_relay_receive_path_bypasses_local_iface(void **state
 	assert_int_equal(read(pipefd[0], &written, sizeof(written)), -1);
 	assert_int_equal(errno, EAGAIN);
 	assert_int_equal(test_send_count, 1);
+	assert_int_equal(ctx.punch_data_relay_attempts, 2);
+	assert_int_equal(ctx.punch_data_relay_unavailable, 1);
 	assert_int_equal(ctx.punch_data_relay_packets, 1);
 	assert_int_equal(ctx.punch_data_relay_bytes, sizeof(fastd_eth_header_t));
 	assert_int_equal(VECTOR_LEN(ctx.punch_pair_states), 1);
@@ -2126,6 +2148,8 @@ static void test_punch_data_relay_receive_path_bypasses_local_iface(void **state
 	assert_memory_equal(&written.dest, &multicast_mac, sizeof(multicast_mac));
 	assert_memory_equal(&written.source, &source_mac, sizeof(source_mac));
 	assert_int_equal(test_send_count, 1);
+	assert_int_equal(ctx.punch_data_relay_attempts, 2);
+	assert_int_equal(ctx.punch_data_relay_unavailable, 1);
 	assert_int_equal(ctx.punch_data_relay_packets, 1);
 	assert_int_equal(ctx.punch_data_relay_bytes, sizeof(fastd_eth_header_t));
 
@@ -2141,6 +2165,8 @@ static void test_punch_data_relay_receive_path_bypasses_local_iface(void **state
 	conf.encrypt_headroom = old_encrypt_headroom;
 	ctx.max_buffer = old_max_buffer;
 	ctx.now = old_now;
+	ctx.punch_data_relay_attempts = old_data_relay_attempts;
+	ctx.punch_data_relay_unavailable = old_data_relay_unavailable;
 	ctx.punch_data_relay_packets = old_data_relay_packets;
 	ctx.punch_data_relay_bytes = old_data_relay_bytes;
 	test_send_peer = NULL;
@@ -4916,6 +4942,8 @@ static void test_status_punch_exposes_udp_socket_pool(void **state UNUSED) {
 	uint64_t old_route_metadata_updates = ctx.punch_route_metadata_updates;
 	uint64_t old_route_metadata_relays = ctx.punch_route_metadata_relays;
 	uint64_t old_route_metadata_budget_exhausted = ctx.punch_route_metadata_budget_exhausted;
+	uint64_t old_data_relay_attempts = ctx.punch_data_relay_attempts;
+	uint64_t old_data_relay_unavailable = ctx.punch_data_relay_unavailable;
 	uint64_t old_data_relay_packets = ctx.punch_data_relay_packets;
 	uint64_t old_data_relay_bytes = ctx.punch_data_relay_bytes;
 	fastd_punch_pair_task_t old_pair_tasks[FASTD_PUNCH_PAIR_TASK_HISTORY];
@@ -5002,6 +5030,8 @@ static void test_status_punch_exposes_udp_socket_pool(void **state UNUSED) {
 	ctx.punch_route_metadata_updates = 20;
 	ctx.punch_route_metadata_relays = 21;
 	ctx.punch_route_metadata_budget_exhausted = 22;
+	ctx.punch_data_relay_attempts = 23;
+	ctx.punch_data_relay_unavailable = 24;
 	ctx.punch_data_relay_packets = 16;
 	ctx.punch_data_relay_bytes = 4096;
 	peer.last_punch_task = (fastd_peer_punch_task_t){
@@ -5173,6 +5203,8 @@ static void test_status_punch_exposes_udp_socket_pool(void **state UNUSED) {
 	assert_int_equal(json_get_int_required(counters, "route_metadata_updates"), 20);
 	assert_int_equal(json_get_int_required(counters, "route_metadata_relays"), 21);
 	assert_int_equal(json_get_int_required(counters, "route_metadata_budget_exhausted"), 22);
+	assert_int_equal(json_get_int_required(counters, "data_relay_attempts"), 23);
+	assert_int_equal(json_get_int_required(counters, "data_relay_unavailable"), 24);
 	assert_int_equal(json_get_int_required(counters, "data_relay_packets"), 16);
 	assert_int_equal(json_get_int_required(counters, "data_relay_bytes"), 4096);
 
@@ -5236,6 +5268,8 @@ static void test_status_punch_exposes_udp_socket_pool(void **state UNUSED) {
 	ctx.punch_route_metadata_updates = old_route_metadata_updates;
 	ctx.punch_route_metadata_relays = old_route_metadata_relays;
 	ctx.punch_route_metadata_budget_exhausted = old_route_metadata_budget_exhausted;
+	ctx.punch_data_relay_attempts = old_data_relay_attempts;
+	ctx.punch_data_relay_unavailable = old_data_relay_unavailable;
 	ctx.punch_data_relay_packets = old_data_relay_packets;
 	ctx.punch_data_relay_bytes = old_data_relay_bytes;
 	memcpy(ctx.punch_pair_tasks, old_pair_tasks, sizeof(old_pair_tasks));
