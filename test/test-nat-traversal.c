@@ -1892,6 +1892,8 @@ static void test_punch_data_relay_only_for_learned_nat_unicast(void **state UNUS
 	size_t old_encrypt_headroom = conf.encrypt_headroom;
 	size_t old_max_buffer = ctx.max_buffer;
 	fastd_timeout_t old_now = ctx.now;
+	uint64_t old_data_relay_packets = ctx.punch_data_relay_packets;
+	uint64_t old_data_relay_bytes = ctx.punch_data_relay_bytes;
 
 	ctx.eth_addrs = (__typeof__(ctx.eth_addrs)){};
 	ctx.punch_pair_states = (__typeof__(ctx.punch_pair_states)){};
@@ -1901,6 +1903,8 @@ static void test_punch_data_relay_only_for_learned_nat_unicast(void **state UNUS
 	conf.encrypt_headroom = 0;
 	ctx.max_buffer = 2048;
 	ctx.now = 1000;
+	ctx.punch_data_relay_packets = 0;
+	ctx.punch_data_relay_bytes = 0;
 	fastd_init_buffers();
 
 	fastd_peer_group_t group = {
@@ -1930,17 +1934,23 @@ static void test_punch_data_relay_only_for_learned_nat_unicast(void **state UNUS
 	assert_ptr_equal(test_send_peer, &dest);
 	assert_int_equal(test_send_count, 1);
 	assert_int_equal(VECTOR_LEN(ctx.punch_pair_states), 1);
+	assert_int_equal(ctx.punch_data_relay_packets, 1);
+	assert_int_equal(ctx.punch_data_relay_bytes, sizeof(fastd_eth_header_t));
 
 	fastd_buffer_t *blocked = test_eth_frame(multicast_mac, source_mac);
 	assert_false(fastd_send_data_relay(blocked, &source));
 	fastd_buffer_free(blocked);
 	assert_int_equal(test_send_count, 1);
+	assert_int_equal(ctx.punch_data_relay_packets, 1);
+	assert_int_equal(ctx.punch_data_relay_bytes, sizeof(fastd_eth_header_t));
 
 	dest.nat_traversal = FASTD_TRISTATE_FALSE;
 	blocked = test_eth_frame(dest_mac, source_mac);
 	assert_false(fastd_send_data_relay(blocked, &source));
 	fastd_buffer_free(blocked);
 	assert_int_equal(test_send_count, 1);
+	assert_int_equal(ctx.punch_data_relay_packets, 1);
+	assert_int_equal(ctx.punch_data_relay_bytes, sizeof(fastd_eth_header_t));
 
 	fastd_cleanup_buffers();
 	VECTOR_FREE(ctx.eth_addrs);
@@ -1953,6 +1963,8 @@ static void test_punch_data_relay_only_for_learned_nat_unicast(void **state UNUS
 	conf.encrypt_headroom = old_encrypt_headroom;
 	ctx.max_buffer = old_max_buffer;
 	ctx.now = old_now;
+	ctx.punch_data_relay_packets = old_data_relay_packets;
+	ctx.punch_data_relay_bytes = old_data_relay_bytes;
 }
 
 static void test_punch_udp_command_suppressed_for_tcp_only_peer(void **state UNUSED) {
@@ -4311,6 +4323,8 @@ static void test_status_punch_exposes_udp_socket_pool(void **state UNUSED) {
 	uint64_t old_task_manager_outcome_no_peer = ctx.punch_task_manager_outcome_no_peer;
 	uint64_t old_task_manager_outcome_busy = ctx.punch_task_manager_outcome_busy;
 	uint64_t old_result_duplicates = ctx.punch_result_duplicates;
+	uint64_t old_data_relay_packets = ctx.punch_data_relay_packets;
+	uint64_t old_data_relay_bytes = ctx.punch_data_relay_bytes;
 	fastd_punch_pair_task_t old_pair_tasks[FASTD_PUNCH_PAIR_TASK_HISTORY];
 	memcpy(old_pair_tasks, ctx.punch_pair_tasks, sizeof(old_pair_tasks));
 	uint64_t old_next_pair_task_id = ctx.next_punch_pair_task_id;
@@ -4391,6 +4405,8 @@ static void test_status_punch_exposes_udp_socket_pool(void **state UNUSED) {
 	ctx.punch_task_manager_outcome_no_peer = 13;
 	ctx.punch_task_manager_outcome_busy = 14;
 	ctx.punch_result_duplicates = 15;
+	ctx.punch_data_relay_packets = 16;
+	ctx.punch_data_relay_bytes = 4096;
 	peer.last_punch_task = (fastd_peer_punch_task_t){
 		.id = 101,
 		.updated = ctx.now - 20,
@@ -4543,6 +4559,8 @@ static void test_status_punch_exposes_udp_socket_pool(void **state UNUSED) {
 
 	struct json_object *counters = json_get_object_required(punch, "counters");
 	assert_int_equal(json_get_int_required(counters, "result_duplicates"), 15);
+	assert_int_equal(json_get_int_required(counters, "data_relay_packets"), 16);
+	assert_int_equal(json_get_int_required(counters, "data_relay_bytes"), 4096);
 
 	struct json_object *sockets = json_get_array_required(pool, "sockets");
 	assert_int_equal(json_object_array_length(sockets), 2);
@@ -4600,6 +4618,8 @@ static void test_status_punch_exposes_udp_socket_pool(void **state UNUSED) {
 	ctx.punch_task_manager_outcome_no_peer = old_task_manager_outcome_no_peer;
 	ctx.punch_task_manager_outcome_busy = old_task_manager_outcome_busy;
 	ctx.punch_result_duplicates = old_result_duplicates;
+	ctx.punch_data_relay_packets = old_data_relay_packets;
+	ctx.punch_data_relay_bytes = old_data_relay_bytes;
 	memcpy(ctx.punch_pair_tasks, old_pair_tasks, sizeof(old_pair_tasks));
 	ctx.next_punch_pair_task_id = old_next_pair_task_id;
 	ctx.punch_pair_task_pos = old_pair_task_pos;
