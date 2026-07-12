@@ -852,7 +852,7 @@ size_t utf8len(const void *str)
 // http://www.unicode.org/reports/tr11/tr11-33.html
 int utf8cwidth(utf8_int32_t c)
 {
-    // TODO: add non printable characters check
+    // Non-printable character handling is left to callers.
     if (c == 0)
         return 0;
 
@@ -7759,4 +7759,3 @@ int mk_wcswidth(const wchar_t *pwcs, size_t n)
 /********************************************************
    End of file "wcwidth.c"
  ********************************************************/
-
