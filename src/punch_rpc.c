@@ -850,6 +850,47 @@ static bool pair_runtime_active(const fastd_punch_pair_runtime_t *runtime) {
 	       runtime->success_count;
 }
 
+/** Scores runtime entries for bounded eviction; higher scores protect scheduler-critical state */
+static unsigned pair_runtime_eviction_score(const fastd_punch_pair_runtime_t *runtime) {
+	if (task_timeout_active(runtime->in_flight_until))
+		return 5;
+
+	if (task_timeout_active(runtime->backoff_until))
+		return 4;
+
+	if (task_timeout_active(runtime->recent_demand_until)) {
+		if (runtime->demand_seq != runtime->served_demand_seq)
+			return 3;
+
+		return 2;
+	}
+
+	if (runtime->abort_count || runtime->failure_count || runtime->success_count)
+		return 1;
+
+	return 0;
+}
+
+/** Chooses the lowest-risk runtime entry to evict when the bounded state table is full */
+static size_t pair_runtime_eviction_victim(void) {
+	size_t victim = 0;
+	unsigned victim_score = pair_runtime_eviction_score(&VECTOR_INDEX(ctx.punch_pair_states, victim));
+
+	size_t i;
+	for (i = 1; i < VECTOR_LEN(ctx.punch_pair_states); i++) {
+		const fastd_punch_pair_runtime_t *runtime = &VECTOR_INDEX(ctx.punch_pair_states, i);
+		unsigned score = pair_runtime_eviction_score(runtime);
+		const fastd_punch_pair_runtime_t *current_victim = &VECTOR_INDEX(ctx.punch_pair_states, victim);
+
+		if (score < victim_score || (score == victim_score && runtime->updated < current_victim->updated)) {
+			victim = i;
+			victim_score = score;
+		}
+	}
+
+	return victim;
+}
+
 /** Finds the runtime state index for a peer pair */
 static bool find_pair_runtime_index(uint64_t peer_a_id, uint64_t peer_b_id, size_t *index) {
 	size_t i;
@@ -924,14 +965,7 @@ static fastd_punch_pair_runtime_t *get_pair_runtime(const fastd_peer_t *a, const
 		return &VECTOR_INDEX(ctx.punch_pair_states, index);
 
 	if (VECTOR_LEN(ctx.punch_pair_states) >= FASTD_PUNCH_PAIR_STATE_LIMIT) {
-		size_t victim = 0;
-		size_t i;
-		for (i = 1; i < VECTOR_LEN(ctx.punch_pair_states); i++) {
-			if (VECTOR_INDEX(ctx.punch_pair_states, i).updated <
-			    VECTOR_INDEX(ctx.punch_pair_states, victim).updated)
-				victim = i;
-		}
-		VECTOR_DELETE(ctx.punch_pair_states, victim);
+		VECTOR_DELETE(ctx.punch_pair_states, pair_runtime_eviction_victim());
 	}
 
 	VECTOR_ADD(

@@ -2806,6 +2806,97 @@ static void test_punch_pair_runtime_tracks_inflight_backoff_and_demand(void **st
 	ctx.now = old_now;
 }
 
+static bool test_find_pair_runtime(uint64_t peer_a_id, uint64_t peer_b_id, fastd_punch_pair_runtime_t **runtime) {
+	size_t i;
+	for (i = 0; i < VECTOR_LEN(ctx.punch_pair_states); i++) {
+		fastd_punch_pair_runtime_t *entry = &VECTOR_INDEX(ctx.punch_pair_states, i);
+		if (entry->peer_a_id == peer_a_id && entry->peer_b_id == peer_b_id) {
+			if (runtime)
+				*runtime = entry;
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static void test_punch_pair_runtime_limit_preserves_protected_state(void **state UNUSED) {
+	__typeof__(ctx.punch_pair_states) old_pair_states = ctx.punch_pair_states;
+	fastd_task_t old_next_maintenance = ctx.next_maintenance;
+	fastd_pqueue_t *old_task_queue = ctx.task_queue;
+	bool old_control_relay = conf.punch_control_relay;
+	int64_t old_now = ctx.now;
+
+	ctx.punch_pair_states = (__typeof__(ctx.punch_pair_states)){};
+	ctx.next_maintenance = (fastd_task_t){};
+	ctx.task_queue = NULL;
+	conf.punch_control_relay = false;
+	ctx.now = 1000;
+
+	size_t i;
+	for (i = 0; i < FASTD_PUNCH_PAIR_STATE_LIMIT; i++) {
+		fastd_punch_pair_runtime_t runtime = {
+			.peer_a_id = 1000 + 2 * i,
+			.peer_b_id = 1001 + 2 * i,
+			.updated = ctx.now + (fastd_timeout_t)i,
+			.in_flight_until = FASTD_TIMEOUT_INV,
+			.backoff_until = FASTD_TIMEOUT_INV,
+			.recent_demand_until = FASTD_TIMEOUT_INV,
+			.success_count = 1,
+		};
+
+		if (i == 0) {
+			runtime.updated = 1;
+			runtime.in_flight_until = ctx.now + 5000;
+			runtime.success_count = 0;
+		}
+		else if (i == 1) {
+			runtime.updated = 2;
+			runtime.failure_count = 1;
+			runtime.success_count = 0;
+		}
+		else if (i == 2) {
+			runtime.updated = 3;
+			runtime.backoff_until = ctx.now + 5000;
+			runtime.success_count = 0;
+		}
+		else if (i == 3) {
+			runtime.updated = 4;
+			runtime.recent_demand_until = ctx.now + 5000;
+			runtime.demand_seq = 2;
+			runtime.served_demand_seq = 1;
+			runtime.success_count = 0;
+		}
+
+		VECTOR_ADD(ctx.punch_pair_states, runtime);
+	}
+
+	assert_int_equal(VECTOR_LEN(ctx.punch_pair_states), FASTD_PUNCH_PAIR_STATE_LIMIT);
+
+	fastd_peer_t new_a = { .id = 10 };
+	fastd_peer_t new_b = { .id = 20 };
+	fastd_punch_note_peer_pair_demand(&new_a, &new_b);
+
+	fastd_punch_pair_runtime_t *runtime = NULL;
+	assert_int_equal(VECTOR_LEN(ctx.punch_pair_states), FASTD_PUNCH_PAIR_STATE_LIMIT);
+	assert_true(test_find_pair_runtime(1000, 1001, &runtime));
+	assert_int_equal(runtime->in_flight_until, ctx.now + 5000);
+	assert_false(test_find_pair_runtime(1002, 1003, NULL));
+	assert_true(test_find_pair_runtime(1004, 1005, &runtime));
+	assert_int_equal(runtime->backoff_until, ctx.now + 5000);
+	assert_true(test_find_pair_runtime(10, 20, &runtime));
+	assert_true(runtime->recent_demand_until > ctx.now);
+	assert_int_equal(runtime->demand_seq, 1);
+	assert_int_equal(runtime->served_demand_seq, 0);
+
+	VECTOR_FREE(ctx.punch_pair_states);
+	ctx.punch_pair_states = old_pair_states;
+	ctx.next_maintenance = old_next_maintenance;
+	ctx.task_queue = old_task_queue;
+	conf.punch_control_relay = old_control_relay;
+	ctx.now = old_now;
+}
+
 static void test_punch_task_manager_waits_for_new_demand_after_failed_pair(void **state UNUSED) {
 	__typeof__(ctx.peers) old_peers = ctx.peers;
 	__typeof__(ctx.punch_pair_states) old_pair_states = ctx.punch_pair_states;
@@ -6609,6 +6700,7 @@ int main(void) {
 		cmocka_unit_test(test_punch_task_pair_state_requires_established_metadata_and_due),
 		cmocka_unit_test(test_punch_task_manager_launch_lifecycle_accounting),
 		cmocka_unit_test(test_punch_pair_runtime_tracks_inflight_backoff_and_demand),
+		cmocka_unit_test(test_punch_pair_runtime_limit_preserves_protected_state),
 		cmocka_unit_test(test_punch_task_manager_waits_for_new_demand_after_failed_pair),
 		cmocka_unit_test(test_punch_task_manager_requests_missing_metadata_on_demand),
 		cmocka_unit_test(test_punch_task_manager_requests_partial_symmetric_metadata),
