@@ -4920,6 +4920,110 @@ static void test_punch_route_relays_fresh_nat_metadata(void **state UNUSED) {
 	fastd_cleanup_buffers();
 }
 
+static void test_punch_maintenance_prewarms_new_peer_route_metadata(void **state UNUSED) {
+	__typeof__(ctx.peers) old_peers = ctx.peers;
+	__typeof__(ctx.punch_pair_states) old_pair_states = ctx.punch_pair_states;
+	const fastd_protocol_t *old_protocol = conf.protocol;
+	fastd_peer_group_t *old_peer_group = conf.peer_group;
+	bool old_control_relay = conf.punch_control_relay;
+	unsigned old_announce_interval = conf.punch_announce_interval;
+	unsigned old_max_packets = conf.punch_max_packets;
+	size_t old_encrypt_headroom = conf.encrypt_headroom;
+	size_t old_max_buffer = ctx.max_buffer;
+	uint64_t old_tx = ctx.punch_control_tx;
+	uint64_t old_route_metadata_updates = ctx.punch_route_metadata_updates;
+	uint64_t old_route_metadata_relays = ctx.punch_route_metadata_relays;
+	uint64_t old_route_metadata_budget_exhausted = ctx.punch_route_metadata_budget_exhausted;
+	int64_t old_now = ctx.now;
+
+	ctx.peers = (__typeof__(ctx.peers)){};
+	ctx.punch_pair_states = (__typeof__(ctx.punch_pair_states)){};
+	ctx.now = 1000;
+	conf.protocol = &test_protocol;
+	conf.punch_control_relay = true;
+	conf.punch_announce_interval = 15000;
+	conf.punch_max_packets = 1;
+	conf.encrypt_headroom = 0;
+	ctx.max_buffer = 2048;
+	ctx.punch_route_metadata_updates = 0;
+	ctx.punch_route_metadata_relays = 0;
+	ctx.punch_route_metadata_budget_exhausted = 0;
+	test_reset_control_sends();
+	fastd_init_buffers();
+
+	fastd_peer_group_t group = {
+		.transport = TRANSPORT_AUTO,
+		.hole_punch = HOLE_PUNCH_AUTO,
+		.nat_traversal = FASTD_TRISTATE_TRUE,
+	};
+	conf.peer_group = &group;
+
+	fastd_peer_t a = {
+		.id = 30,
+		.group = &group,
+		.config_state = CONFIG_STATIC,
+		.name = "peer-a",
+		.state = STATE_ESTABLISHED,
+		.established = ctx.now - 100000,
+		.punch_endpoint = addr4(0xc6336407, 51000),
+		.punch_nat_type = FASTD_NAT_FULL_CONE,
+		.punch_min_port = 51000,
+		.punch_max_port = 51000,
+		.punch_timeout = ctx.now + 10000,
+		.next_punch_relay = ctx.now + 10000,
+	};
+	fastd_peer_t b = {
+		.id = 20,
+		.group = &group,
+		.config_state = CONFIG_STATIC,
+		.name = "peer-b",
+		.state = STATE_ESTABLISHED,
+		.established = ctx.now,
+		.next_punch_relay = ctx.now + 10000,
+	};
+	VECTOR_ADD(ctx.peers, &a);
+	VECTOR_ADD(ctx.peers, &b);
+
+	fastd_punch_maintenance();
+	assert_int_equal(test_control_send_count, 1);
+	assert_ptr_equal(test_control_send_peers[0], &b);
+	assert_int_equal(test_control_send_types[0], TEST_PUNCH_NAT_INFO);
+	assert_int_equal(test_control_send_nat_types[0], FASTD_NAT_FULL_CONE);
+	assert_int_equal(test_control_send_ports[0], 51000);
+	assert_int_equal(test_control_send_reserved[0] & TEST_PUNCH_NAT_INFO_RELAYED, TEST_PUNCH_NAT_INFO_RELAYED);
+	assert_int_equal(ctx.punch_route_metadata_updates, 0);
+	assert_int_equal(ctx.punch_route_metadata_relays, 1);
+	assert_int_equal(ctx.punch_route_metadata_budget_exhausted, 1);
+
+	ctx.now += 100000;
+	a.next_punch_announce = ctx.now;
+	b.next_punch_announce = ctx.now;
+	test_reset_control_sends();
+	fastd_punch_maintenance();
+	assert_int_equal(test_control_send_count, 0);
+	assert_int_equal(ctx.punch_route_metadata_relays, 1);
+	assert_int_equal(ctx.punch_route_metadata_budget_exhausted, 1);
+
+	VECTOR_FREE(ctx.peers);
+	VECTOR_FREE(ctx.punch_pair_states);
+	ctx.peers = old_peers;
+	ctx.punch_pair_states = old_pair_states;
+	conf.protocol = old_protocol;
+	conf.peer_group = old_peer_group;
+	conf.punch_control_relay = old_control_relay;
+	conf.punch_announce_interval = old_announce_interval;
+	conf.punch_max_packets = old_max_packets;
+	conf.encrypt_headroom = old_encrypt_headroom;
+	ctx.max_buffer = old_max_buffer;
+	ctx.punch_control_tx = old_tx;
+	ctx.punch_route_metadata_updates = old_route_metadata_updates;
+	ctx.punch_route_metadata_relays = old_route_metadata_relays;
+	ctx.punch_route_metadata_budget_exhausted = old_route_metadata_budget_exhausted;
+	ctx.now = old_now;
+	test_reset_control_sends();
+	fastd_cleanup_buffers();
+}
+
 static void test_punch_control_preserves_scoped_ipv6_metadata_and_candidate(void **state UNUSED) {
 	const fastd_protocol_t *old_protocol = conf.protocol;
 	fastd_peer_group_t *old_peer_group = conf.peer_group;
@@ -6716,6 +6820,7 @@ int main(void) {
 		cmocka_unit_test(test_punch_maintenance_announces_unpunchable_tcp_nat_metadata),
 		cmocka_unit_test(test_punch_accepts_relayed_nat_metadata),
 		cmocka_unit_test(test_punch_route_relays_fresh_nat_metadata),
+		cmocka_unit_test(test_punch_maintenance_prewarms_new_peer_route_metadata),
 		cmocka_unit_test(test_punch_control_preserves_scoped_ipv6_metadata_and_candidate),
 		cmocka_unit_test(test_punch_metadata_updates_wake_task_manager),
 		cmocka_unit_test(test_punch_task_manager_outcome_accounting),

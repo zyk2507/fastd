@@ -2057,6 +2057,32 @@ static size_t relay_nat_metadata_to_peer(fastd_peer_t *dest, const fastd_peer_t 
 	return sent;
 }
 
+/** Returns true while a newly established peer should receive a route metadata snapshot */
+static bool peer_route_metadata_snapshot_due(const fastd_peer_t *peer) {
+	if (!conf.punch_control_relay || !fastd_peer_get_nat_traversal(peer))
+		return false;
+
+	return peer->established && ctx.now < peer->established + FASTD_PUNCH_NAT_INFO_GRACE;
+}
+
+/** Relays the currently known route NAT metadata to a newly established peer */
+static size_t relay_route_metadata_snapshot_to_peer(fastd_peer_t *dest, size_t limit) {
+	if (!limit || !peer_route_metadata_snapshot_due(dest))
+		return 0;
+
+	size_t sent = 0;
+	size_t i;
+	for (i = 0; i < VECTOR_LEN(ctx.peers) && sent < limit; i++) {
+		fastd_peer_t *subject = VECTOR_INDEX(ctx.peers, i);
+		if (subject == dest || !fastd_peer_is_established(subject))
+			continue;
+
+		sent += relay_nat_metadata_to_peer(dest, subject, limit - sent);
+	}
+
+	return sent;
+}
+
 /** Propagates newly learned NAT metadata to established peers before a pair task needs it */
 static size_t relay_nat_metadata_to_route_peers(
 	const fastd_peer_t *origin, const fastd_peer_t *subject, size_t limit, unsigned families) {
@@ -2165,9 +2191,9 @@ static bool send_listener_info(
 }
 
 /** Sends this instance's current NAT metadata to one established peer */
-static void send_local_nat_info(fastd_peer_t *dest) {
+static bool send_local_nat_info(fastd_peer_t *dest) {
 	if (!fastd_timed_out(dest->next_punch_announce))
-		return;
+		return false;
 
 	dest->next_punch_announce = ctx.now + conf.punch_announce_interval;
 
@@ -2207,6 +2233,8 @@ static void send_local_nat_info(fastd_peer_t *dest) {
 				status.tcp_reflexive_addrs, status.n_tcp_reflexive_addrs, status.tcp_type,
 				status.tcp_min_port, status.tcp_max_port, 0);
 	}
+
+	return true;
 }
 
 /** Selects this instance's current base mapped UDP listener endpoint for a punch result */
@@ -4265,12 +4293,22 @@ void fastd_punch_maintenance(void) {
 	if (!punch_control_supported())
 		return;
 
+	size_t route_metadata_snapshot_sent = 0;
 	size_t i;
 	for (i = 0; i < VECTOR_LEN(ctx.peers); i++) {
 		fastd_peer_t *peer = VECTOR_INDEX(ctx.peers, i);
-		if (fastd_peer_is_established(peer))
-			send_local_nat_info(peer);
+		if (!fastd_peer_is_established(peer))
+			continue;
+
+		bool announced = send_local_nat_info(peer);
+		if (announced && route_metadata_snapshot_sent < conf.punch_max_packets) {
+			route_metadata_snapshot_sent += relay_route_metadata_snapshot_to_peer(
+				peer, conf.punch_max_packets - route_metadata_snapshot_sent);
+		}
 	}
+	ctx.punch_route_metadata_relays += route_metadata_snapshot_sent;
+	if (route_metadata_snapshot_sent >= conf.punch_max_packets && conf.punch_max_packets)
+		ctx.punch_route_metadata_budget_exhausted++;
 
 	relay_peer_endpoints();
 }
