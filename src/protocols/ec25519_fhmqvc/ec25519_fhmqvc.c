@@ -214,16 +214,28 @@ static void send_backup_candidate_probes(fastd_peer_t *peer, protocol_session_t 
 	}
 }
 
+/** Checks whether inactive direct candidates still need payload proving */
+static bool should_send_inactive_candidate_payloads(const fastd_peer_t *peer, size_t payload_len) {
+	if (!payload_len || !conf.punch_max_backups || !peer_has_endpoint_dependent_nat(peer))
+		return false;
+
+	if (fastd_peer_has_backup_path(peer) && peer->backup_payload_proven)
+		return false;
+
+	return true;
+}
+
+#ifdef WITH_TESTS
+bool fastd_protocol_ec25519_fhmqvc_test_should_send_inactive_candidate_payloads(
+	const fastd_peer_t *peer, size_t payload_len) {
+	return should_send_inactive_candidate_payloads(peer, payload_len);
+}
+#endif
+
 /** Sends bounded payload probes to inactive direct candidates until a payload-proven backup exists */
 static void send_inactive_candidate_payloads(
 	fastd_peer_t *peer, protocol_session_t *session, const fastd_buffer_t *buffer) {
-	if (!buffer->len || !conf.punch_max_backups || !peer_has_endpoint_dependent_nat(peer))
-		return;
-
-	if (fastd_peer_active_path_proven(peer) && fastd_peer_has_backup_path(peer))
-		return;
-
-	if (fastd_peer_has_verified_backup_path(peer) && peer->backup_payload_proven)
+	if (!should_send_inactive_candidate_payloads(peer, buffer->len))
 		return;
 
 	size_t sent = 0;

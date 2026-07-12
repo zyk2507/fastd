@@ -786,6 +786,8 @@ bool fastd_protocol_ec25519_fhmqvc_test_accept_simultaneous_responder(
 bool fastd_protocol_ec25519_fhmqvc_test_accept_same_active_simultaneous_responder(
 	const uint8_t own_key[32], const uint8_t peer_key[32], bool established, bool same_active_path,
 	bool active_path_proven, bool initiator, uint64_t serial, uint64_t last_serial);
+bool fastd_protocol_ec25519_fhmqvc_test_should_send_inactive_candidate_payloads(
+	const fastd_peer_t *peer, size_t payload_len);
 #endif
 
 bool fastd_realm_check(void);

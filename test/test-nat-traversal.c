@@ -1848,6 +1848,57 @@ static void test_ec25519_same_active_simultaneous_responder_requires_unproven_pa
 	ctx.now = old_now;
 }
 
+static void test_ec25519_endpoint_dependent_payload_probes_wait_for_payload_proven_backup(void **state UNUSED) {
+	int64_t old_now = ctx.now;
+	unsigned old_punch_max_backups = conf.punch_max_backups;
+
+	ctx.now = 120000;
+	conf.punch_max_backups = 2;
+
+	fastd_peer_address_t backup_local = addr4(0xcb007105, 35001);
+	fastd_socket_t backup_sock = {
+		.fd.fd = 7,
+		.type = SOCKET_TYPE_UDP,
+		.bound_addr = &backup_local,
+	};
+	fastd_peer_t peer = {
+		.punch_nat_type = FASTD_NAT_SYMMETRIC_EASY_INC,
+		.punch_timeout = ctx.now + 5000,
+		.active_path_proven_timeout = ctx.now + 5000,
+	};
+
+	assert_true(fastd_protocol_ec25519_fhmqvc_test_should_send_inactive_candidate_payloads(&peer, 64));
+
+	peer.backup_sock = &backup_sock;
+	peer.backup_address = addr4(0xcb007105, 41005);
+	peer.backup_reset_timeout = ctx.now + 5000;
+
+	assert_true(fastd_protocol_ec25519_fhmqvc_test_should_send_inactive_candidate_payloads(&peer, 64));
+
+	peer.backup_path_verified = true;
+	assert_true(fastd_protocol_ec25519_fhmqvc_test_should_send_inactive_candidate_payloads(&peer, 64));
+
+	peer.backup_payload_proven = true;
+	assert_false(fastd_protocol_ec25519_fhmqvc_test_should_send_inactive_candidate_payloads(&peer, 64));
+
+	peer.backup_payload_proven = false;
+	conf.punch_max_backups = 0;
+	assert_false(fastd_protocol_ec25519_fhmqvc_test_should_send_inactive_candidate_payloads(&peer, 64));
+
+	conf.punch_max_backups = 2;
+	assert_false(fastd_protocol_ec25519_fhmqvc_test_should_send_inactive_candidate_payloads(&peer, 0));
+
+	peer.punch_nat_type = FASTD_NAT_FULL_CONE;
+	assert_false(fastd_protocol_ec25519_fhmqvc_test_should_send_inactive_candidate_payloads(&peer, 64));
+
+	peer.punch_nat_type = FASTD_NAT_SYMMETRIC_EASY_INC;
+	peer.punch_timeout = ctx.now - 1;
+	assert_false(fastd_protocol_ec25519_fhmqvc_test_should_send_inactive_candidate_payloads(&peer, 64));
+
+	conf.punch_max_backups = old_punch_max_backups;
+	ctx.now = old_now;
+}
+
 static void test_punch_data_relay_effective_setting(void **state UNUSED) {
 	fastd_tristate_t old_data_relay = conf.punch_data_relay;
 	bool old_control_relay = conf.punch_control_relay;
@@ -5607,6 +5658,7 @@ int main(void) {
 		cmocka_unit_test(test_tcp_direct_loss_preserves_nat_session_and_schedules_reconnect),
 		cmocka_unit_test(test_ec25519_simultaneous_responder_yield_is_deterministic),
 		cmocka_unit_test(test_ec25519_same_active_simultaneous_responder_requires_unproven_path),
+		cmocka_unit_test(test_ec25519_endpoint_dependent_payload_probes_wait_for_payload_proven_backup),
 		cmocka_unit_test(test_punch_data_relay_effective_setting),
 		cmocka_unit_test(test_punch_data_relay_only_for_learned_nat_unicast),
 		cmocka_unit_test(test_punch_data_relay_receive_path_bypasses_local_iface),

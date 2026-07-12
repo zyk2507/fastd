@@ -196,6 +196,7 @@ static bool establish_backup(
 		compression == COMPRESSION_NONE ? "" : ", compression `",
 		compression == COMPRESSION_NONE ? "" : fastd_compression_get_name(compression),
 		compression == COMPRESSION_NONE ? "" : "'");
+	fastd_peer_backup_seen(peer);
 
 	bool payload_candidate = fastd_peer_is_payload_candidate(peer, remote_addr);
 	bool probe_candidate = fastd_peer_is_probe_candidate(peer, remote_addr);
