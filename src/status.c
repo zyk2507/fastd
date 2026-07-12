@@ -496,12 +496,31 @@ static void print_punch_table(json_object *punch) {
 	json_object *counters = get_object_member(punch, "counters");
 	if (counters) {
 		static const char *const names[] = {
-			"control_tx",        "control_rx",        "direct_handshakes", "direct_success",
-			"direct_failures",   "direct_suppressed", "data_relay_packets", "data_relay_bytes",
-			"udp_exact_tx",      "probe_tx",          "probe_rx",           "probe_response_tx",
-			"probe_matched",     "probe_handshakes",  "result_tx",          "result_rx",
-			"result_accepted",   "result_handshake",  "result_duplicates", "result_suppressed",
-			"result_no_peer",    "result_busy",
+			"control_tx",
+			"control_rx",
+			"route_metadata_updates",
+			"route_metadata_relays",
+			"route_metadata_budget_exhausted",
+			"direct_handshakes",
+			"direct_success",
+			"direct_failures",
+			"direct_suppressed",
+			"data_relay_packets",
+			"data_relay_bytes",
+			"udp_exact_tx",
+			"probe_tx",
+			"probe_rx",
+			"probe_response_tx",
+			"probe_matched",
+			"probe_handshakes",
+			"result_tx",
+			"result_rx",
+			"result_accepted",
+			"result_handshake",
+			"result_duplicates",
+			"result_suppressed",
+			"result_no_peer",
+			"result_busy",
 		};
 
 		size_t i;
@@ -1933,6 +1952,12 @@ static json_object *dump_punch(void) {
 	struct json_object *counters = json_object_new_object();
 	json_object_object_add(counters, "control_tx", json_object_new_int64(ctx.punch_control_tx));
 	json_object_object_add(counters, "control_rx", json_object_new_int64(ctx.punch_control_rx));
+	json_object_object_add(
+		counters, "route_metadata_updates", json_object_new_int64(ctx.punch_route_metadata_updates));
+	json_object_object_add(counters, "route_metadata_relays", json_object_new_int64(ctx.punch_route_metadata_relays));
+	json_object_object_add(
+		counters, "route_metadata_budget_exhausted",
+		json_object_new_int64(ctx.punch_route_metadata_budget_exhausted));
 	json_object_object_add(counters, "direct_handshakes", json_object_new_int64(ctx.punch_direct_handshakes));
 	json_object_object_add(counters, "direct_success", json_object_new_int64(ctx.punch_direct_success));
 	json_object_object_add(counters, "direct_failures", json_object_new_int64(ctx.punch_direct_failures));

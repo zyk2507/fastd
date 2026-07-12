@@ -558,6 +558,9 @@ struct fastd_context {
 
 	uint64_t punch_control_tx;        /**< Number of punch control packets sent */
 	uint64_t punch_control_rx;        /**< Number of punch control packets received */
+	uint64_t punch_route_metadata_updates; /**< Number of NAT metadata updates considered for route-wide relay */
+	uint64_t punch_route_metadata_relays; /**< Number of route-wide NAT metadata relay packets sent */
+	uint64_t punch_route_metadata_budget_exhausted; /**< Number of route metadata relays that hit the packet budget */
 	uint64_t punch_direct_handshakes; /**< Number of direct handshakes sent from punch control commands */
 	uint64_t punch_direct_success;    /**< Number of direct sessions established from punch control candidates */
 	uint64_t punch_direct_failures;   /**< Number of attempted punch control candidates that expired */

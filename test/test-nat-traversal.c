@@ -3944,6 +3944,9 @@ static void test_punch_route_relays_fresh_nat_metadata(void **state UNUSED) {
 	size_t old_max_buffer = ctx.max_buffer;
 	uint64_t old_rx = ctx.punch_control_rx;
 	uint64_t old_tx = ctx.punch_control_tx;
+	uint64_t old_route_metadata_updates = ctx.punch_route_metadata_updates;
+	uint64_t old_route_metadata_relays = ctx.punch_route_metadata_relays;
+	uint64_t old_route_metadata_budget_exhausted = ctx.punch_route_metadata_budget_exhausted;
 	int64_t old_now = ctx.now;
 
 	ctx.peers = (__typeof__(ctx.peers)){};
@@ -3956,6 +3959,9 @@ static void test_punch_route_relays_fresh_nat_metadata(void **state UNUSED) {
 	conf.punch_max_packets = 1;
 	conf.encrypt_headroom = 0;
 	ctx.max_buffer = 2048;
+	ctx.punch_route_metadata_updates = 0;
+	ctx.punch_route_metadata_relays = 0;
+	ctx.punch_route_metadata_budget_exhausted = 0;
 	test_reset_control_sends();
 	fastd_init_buffers();
 
@@ -4010,6 +4016,9 @@ static void test_punch_route_relays_fresh_nat_metadata(void **state UNUSED) {
 	assert_int_equal(test_control_send_ports[0], 51000);
 	assert_int_equal(test_control_send_reserved[0] & TEST_PUNCH_NAT_INFO_RELAYED, TEST_PUNCH_NAT_INFO_RELAYED);
 	assert_int_equal(port4(&a.punch_endpoint), 51000);
+	assert_int_equal(ctx.punch_route_metadata_updates, 1);
+	assert_int_equal(ctx.punch_route_metadata_relays, 1);
+	assert_int_equal(ctx.punch_route_metadata_budget_exhausted, 1);
 
 	conf.punch_max_packets = 4;
 	test_reset_control_sends();
@@ -4027,6 +4036,9 @@ static void test_punch_route_relays_fresh_nat_metadata(void **state UNUSED) {
 	assert_int_equal(test_control_send_ports[1], 53000);
 	assert_int_equal(test_control_send_reserved[0] & TEST_PUNCH_NAT_INFO_RELAYED, TEST_PUNCH_NAT_INFO_RELAYED);
 	assert_int_equal(test_control_send_reserved[1] & TEST_PUNCH_NAT_INFO_RELAYED, TEST_PUNCH_NAT_INFO_RELAYED);
+	assert_int_equal(ctx.punch_route_metadata_updates, 2);
+	assert_int_equal(ctx.punch_route_metadata_relays, 3);
+	assert_int_equal(ctx.punch_route_metadata_budget_exhausted, 1);
 
 	test_reset_control_sends();
 	fastd_peer_address_t relayed_endpoint = addr4(0xc6336407, 51010);
@@ -4037,6 +4049,9 @@ static void test_punch_route_relays_fresh_nat_metadata(void **state UNUSED) {
 			sizeof(test_key_a), TEST_PUNCH_NAT_INFO_RELAYED)));
 	assert_int_equal(test_control_send_count, 0);
 	assert_int_equal(port4(&a.punch_endpoint), 51010);
+	assert_int_equal(ctx.punch_route_metadata_updates, 2);
+	assert_int_equal(ctx.punch_route_metadata_relays, 3);
+	assert_int_equal(ctx.punch_route_metadata_budget_exhausted, 1);
 
 	fastd_task_unschedule(&ctx.next_maintenance);
 	VECTOR_FREE(ctx.peers);
@@ -4054,6 +4069,9 @@ static void test_punch_route_relays_fresh_nat_metadata(void **state UNUSED) {
 	ctx.max_buffer = old_max_buffer;
 	ctx.punch_control_rx = old_rx;
 	ctx.punch_control_tx = old_tx;
+	ctx.punch_route_metadata_updates = old_route_metadata_updates;
+	ctx.punch_route_metadata_relays = old_route_metadata_relays;
+	ctx.punch_route_metadata_budget_exhausted = old_route_metadata_budget_exhausted;
 	ctx.now = old_now;
 	test_reset_control_sends();
 	fastd_cleanup_buffers();
@@ -4895,6 +4913,9 @@ static void test_status_punch_exposes_udp_socket_pool(void **state UNUSED) {
 	uint64_t old_task_manager_outcome_no_peer = ctx.punch_task_manager_outcome_no_peer;
 	uint64_t old_task_manager_outcome_busy = ctx.punch_task_manager_outcome_busy;
 	uint64_t old_result_duplicates = ctx.punch_result_duplicates;
+	uint64_t old_route_metadata_updates = ctx.punch_route_metadata_updates;
+	uint64_t old_route_metadata_relays = ctx.punch_route_metadata_relays;
+	uint64_t old_route_metadata_budget_exhausted = ctx.punch_route_metadata_budget_exhausted;
 	uint64_t old_data_relay_packets = ctx.punch_data_relay_packets;
 	uint64_t old_data_relay_bytes = ctx.punch_data_relay_bytes;
 	fastd_punch_pair_task_t old_pair_tasks[FASTD_PUNCH_PAIR_TASK_HISTORY];
@@ -4978,6 +4999,9 @@ static void test_status_punch_exposes_udp_socket_pool(void **state UNUSED) {
 	ctx.punch_task_manager_outcome_no_peer = 13;
 	ctx.punch_task_manager_outcome_busy = 14;
 	ctx.punch_result_duplicates = 15;
+	ctx.punch_route_metadata_updates = 20;
+	ctx.punch_route_metadata_relays = 21;
+	ctx.punch_route_metadata_budget_exhausted = 22;
 	ctx.punch_data_relay_packets = 16;
 	ctx.punch_data_relay_bytes = 4096;
 	peer.last_punch_task = (fastd_peer_punch_task_t){
@@ -5146,6 +5170,9 @@ static void test_status_punch_exposes_udp_socket_pool(void **state UNUSED) {
 
 	struct json_object *counters = json_get_object_required(punch, "counters");
 	assert_int_equal(json_get_int_required(counters, "result_duplicates"), 15);
+	assert_int_equal(json_get_int_required(counters, "route_metadata_updates"), 20);
+	assert_int_equal(json_get_int_required(counters, "route_metadata_relays"), 21);
+	assert_int_equal(json_get_int_required(counters, "route_metadata_budget_exhausted"), 22);
 	assert_int_equal(json_get_int_required(counters, "data_relay_packets"), 16);
 	assert_int_equal(json_get_int_required(counters, "data_relay_bytes"), 4096);
 
@@ -5206,6 +5233,9 @@ static void test_status_punch_exposes_udp_socket_pool(void **state UNUSED) {
 	ctx.punch_task_manager_outcome_no_peer = old_task_manager_outcome_no_peer;
 	ctx.punch_task_manager_outcome_busy = old_task_manager_outcome_busy;
 	ctx.punch_result_duplicates = old_result_duplicates;
+	ctx.punch_route_metadata_updates = old_route_metadata_updates;
+	ctx.punch_route_metadata_relays = old_route_metadata_relays;
+	ctx.punch_route_metadata_budget_exhausted = old_route_metadata_budget_exhausted;
 	ctx.punch_data_relay_packets = old_data_relay_packets;
 	ctx.punch_data_relay_bytes = old_data_relay_bytes;
 	memcpy(ctx.punch_pair_tasks, old_pair_tasks, sizeof(old_pair_tasks));

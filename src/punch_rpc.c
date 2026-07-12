@@ -1984,6 +1984,7 @@ static size_t relay_nat_metadata_to_route_peers(
 	if (!fastd_peer_is_established(subject) || !fastd_peer_get_nat_traversal(subject))
 		return 0;
 
+	ctx.punch_route_metadata_updates++;
 	size_t sent = 0;
 	size_t i;
 	for (i = 0; i < VECTOR_LEN(ctx.peers) && sent < limit; i++) {
@@ -1996,6 +1997,10 @@ static size_t relay_nat_metadata_to_route_peers(
 		if (sent < limit && (families & PUNCH_METADATA_RELAY_TCP))
 			sent += relay_tcp_nat_metadata_to_peer(dest, subject, limit - sent);
 	}
+
+	ctx.punch_route_metadata_relays += sent;
+	if (sent >= limit)
+		ctx.punch_route_metadata_budget_exhausted++;
 
 	return sent;
 }
