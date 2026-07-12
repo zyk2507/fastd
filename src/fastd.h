@@ -777,8 +777,10 @@ bool fastd_punch_probe_test_parse(
 	const uint8_t *data, size_t len, uint8_t *type, uint32_t *transaction, size_t *key_len);
 size_t fastd_punch_probe_test_build(uint8_t *out, size_t out_len, uint8_t type, uint32_t transaction, size_t key_len);
 bool fastd_protocol_ec25519_fhmqvc_test_accept_simultaneous_responder(
-	const uint8_t own_key[32], const uint8_t peer_key[32], fastd_nat_type_t peer_nat_type,
-	fastd_timeout_t punch_timeout);
+	const uint8_t own_key[32], const uint8_t peer_key[32]);
+bool fastd_protocol_ec25519_fhmqvc_test_accept_same_active_simultaneous_responder(
+	const uint8_t own_key[32], const uint8_t peer_key[32], bool established, bool same_active_path,
+	bool active_path_proven, bool initiator, uint64_t serial, uint64_t last_serial);
 #endif
 
 bool fastd_realm_check(void);

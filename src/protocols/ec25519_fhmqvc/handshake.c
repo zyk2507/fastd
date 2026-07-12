@@ -246,16 +246,21 @@ static bool accept_simultaneous_responder_session(const fastd_peer_t *peer) {
 	return simultaneous_responder_key_order_accepts(conf.protocol_config->key.public.u8, peer->key->key.u8);
 }
 
+/** Returns true if a same-path responder handshake may replace an unproven simultaneous active session */
+static bool accept_same_active_simultaneous_responder(
+	const fastd_peer_t *peer, const fastd_peer_address_t *remote_addr, unsigned session_flags, uint64_t serial) {
+	return fastd_peer_is_established(peer) && fastd_peer_address_equal(&peer->address, remote_addr) &&
+	       serial == peer->protocol_state->last_serial && !(session_flags & FASTD_SESSION_INITIATOR) &&
+	       !fastd_peer_active_path_proven(peer) && accept_simultaneous_responder_session(peer);
+}
+
 #ifdef WITH_TESTS
 bool fastd_protocol_ec25519_fhmqvc_test_accept_simultaneous_responder(
-	const uint8_t own_key[32], const uint8_t peer_key[32], fastd_nat_type_t peer_nat_type,
-	fastd_timeout_t punch_timeout) {
+	const uint8_t own_key[32], const uint8_t peer_key[32]) {
 	fastd_protocol_config_t protocol_config = {};
 	fastd_protocol_key_t protocol_key = {};
 	fastd_peer_t peer = {
 		.key = &protocol_key,
-		.punch_nat_type = peer_nat_type,
-		.punch_timeout = punch_timeout,
 	};
 	fastd_protocol_config_t *old_protocol_config = conf.protocol_config;
 
@@ -264,6 +269,48 @@ bool fastd_protocol_ec25519_fhmqvc_test_accept_simultaneous_responder(
 	conf.protocol_config = &protocol_config;
 
 	bool ret = accept_simultaneous_responder_session(&peer);
+	conf.protocol_config = old_protocol_config;
+	return ret;
+}
+
+bool fastd_protocol_ec25519_fhmqvc_test_accept_same_active_simultaneous_responder(
+	const uint8_t own_key[32], const uint8_t peer_key[32], bool established, bool same_active_path,
+	bool active_path_proven, bool initiator, uint64_t serial, uint64_t last_serial) {
+	fastd_protocol_config_t protocol_config = {};
+	fastd_protocol_key_t protocol_key = {};
+	fastd_protocol_peer_state_t protocol_state = {
+		.last_serial = last_serial,
+	};
+	fastd_peer_address_t active_addr = (fastd_peer_address_t){
+		.in = {
+			.sin_family = AF_INET,
+			.sin_port = htons(10000),
+			.sin_addr.s_addr = htonl(0xc0000201),
+		},
+	};
+	fastd_peer_address_t other_addr = (fastd_peer_address_t){
+		.in = {
+			.sin_family = AF_INET,
+			.sin_port = htons(10001),
+			.sin_addr.s_addr = htonl(0xc0000202),
+		},
+	};
+	fastd_peer_address_t remote_addr = same_active_path ? active_addr : other_addr;
+	fastd_peer_t peer = {
+		.key = &protocol_key,
+		.protocol_state = &protocol_state,
+		.state = established ? STATE_ESTABLISHED : STATE_INACTIVE,
+		.address = active_addr,
+		.active_path_proven_timeout = active_path_proven ? ctx.now + 10000 : FASTD_TIMEOUT_INV,
+	};
+	fastd_protocol_config_t *old_protocol_config = conf.protocol_config;
+
+	memcpy(protocol_config.key.public.u8, own_key, PUBLICKEYBYTES);
+	memcpy(protocol_key.key.u8, peer_key, PUBLICKEYBYTES);
+	conf.protocol_config = &protocol_config;
+
+	bool ret = accept_same_active_simultaneous_responder(
+		&peer, &remote_addr, initiator ? FASTD_SESSION_INITIATOR : 0, serial);
 	conf.protocol_config = old_protocol_config;
 	return ret;
 }
@@ -285,8 +332,8 @@ static bool establish(
 	bool responder_reuses_current_serial =
 		serial == peer->protocol_state->last_serial && !(session_flags & FASTD_SESSION_INITIATOR);
 	bool active_path_payload_proven = fastd_peer_active_path_proven(peer);
-	bool simultaneous_responder = responder_reuses_current_serial && same_active_path &&
-				      !active_path_payload_proven && accept_simultaneous_responder_session(peer);
+	bool simultaneous_responder =
+		accept_same_active_simultaneous_responder(peer, remote_addr, session_flags, serial);
 	bool same_ip_unproven_direct_path =
 		established && !same_active_path && !active_path_payload_proven && peer->direct_established &&
 		peer_address_ip_equal(&peer->address, remote_addr);

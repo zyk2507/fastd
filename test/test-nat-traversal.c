@@ -1793,33 +1793,50 @@ static void test_tcp_direct_loss_preserves_nat_session_and_schedules_reconnect(v
 	conf.punch_keepalive_interval = old_keepalive_interval;
 }
 
-static bool test_simultaneous_yield(uint8_t own_key_byte, uint8_t peer_key_byte, fastd_nat_type_t peer_nat_type) {
+static bool test_simultaneous_yield(uint8_t own_key_byte, uint8_t peer_key_byte) {
 	uint8_t own_key[32] = {};
 	uint8_t peer_key[32] = {};
 
 	own_key[31] = own_key_byte;
 	peer_key[31] = peer_key_byte;
-	return fastd_protocol_ec25519_fhmqvc_test_accept_simultaneous_responder(
-		own_key, peer_key, peer_nat_type, ctx.now + 10000);
+	return fastd_protocol_ec25519_fhmqvc_test_accept_simultaneous_responder(own_key, peer_key);
+}
+
+static bool test_same_active_simultaneous_responder(
+	uint8_t own_key_byte, uint8_t peer_key_byte, bool established, bool same_active_path, bool active_path_proven,
+	bool initiator, uint64_t serial, uint64_t last_serial) {
+	uint8_t own_key[32] = {};
+	uint8_t peer_key[32] = {};
+
+	own_key[31] = own_key_byte;
+	peer_key[31] = peer_key_byte;
+	return fastd_protocol_ec25519_fhmqvc_test_accept_same_active_simultaneous_responder(
+		own_key, peer_key, established, same_active_path, active_path_proven, initiator, serial, last_serial);
 }
 
 static void test_ec25519_simultaneous_responder_yield_is_deterministic(void **state UNUSED) {
 	int64_t old_now = ctx.now;
 	ctx.now = 1000;
 
-	assert_true(test_simultaneous_yield(2, 1, FASTD_NAT_SYMMETRIC_EASY_INC));
-	assert_false(test_simultaneous_yield(1, 2, FASTD_NAT_SYMMETRIC_EASY_INC));
-	assert_int_equal(
-		test_simultaneous_yield(2, 1, FASTD_NAT_SYMMETRIC_EASY_INC) +
-			test_simultaneous_yield(1, 2, FASTD_NAT_SYMMETRIC_EASY_INC),
-		1);
+	assert_true(test_simultaneous_yield(2, 1));
+	assert_false(test_simultaneous_yield(1, 2));
+	assert_int_equal(test_simultaneous_yield(2, 1) + test_simultaneous_yield(1, 2), 1);
 
-	assert_true(test_simultaneous_yield(2, 1, FASTD_NAT_SYMMETRIC_EASY_DEC));
-	assert_false(test_simultaneous_yield(1, 2, FASTD_NAT_SYMMETRIC_EASY_DEC));
-	assert_int_equal(
-		test_simultaneous_yield(2, 1, FASTD_NAT_SYMMETRIC_EASY_DEC) +
-			test_simultaneous_yield(1, 2, FASTD_NAT_SYMMETRIC_EASY_DEC),
-		1);
+	ctx.now = old_now;
+}
+
+static void test_ec25519_same_active_simultaneous_responder_requires_unproven_path(void **state UNUSED) {
+	int64_t old_now = ctx.now;
+	ctx.now = 1000;
+
+	assert_true(test_same_active_simultaneous_responder(2, 1, true, true, false, false, 7, 7));
+	assert_false(test_same_active_simultaneous_responder(1, 2, true, true, false, false, 7, 7));
+	assert_false(test_same_active_simultaneous_responder(2, 1, false, true, false, false, 7, 7));
+	assert_false(test_same_active_simultaneous_responder(2, 1, true, false, false, false, 7, 7));
+	assert_false(test_same_active_simultaneous_responder(2, 1, true, true, true, false, 7, 7));
+	assert_false(test_same_active_simultaneous_responder(2, 1, true, true, false, true, 7, 7));
+	assert_false(test_same_active_simultaneous_responder(2, 1, true, true, false, false, 6, 7));
+	assert_false(test_same_active_simultaneous_responder(2, 1, true, true, false, false, 8, 7));
 
 	ctx.now = old_now;
 }
@@ -5164,6 +5181,7 @@ int main(void) {
 		cmocka_unit_test(test_nat_traversal_inherits_and_overrides),
 		cmocka_unit_test(test_tcp_direct_loss_preserves_nat_session_and_schedules_reconnect),
 		cmocka_unit_test(test_ec25519_simultaneous_responder_yield_is_deterministic),
+		cmocka_unit_test(test_ec25519_same_active_simultaneous_responder_requires_unproven_path),
 		cmocka_unit_test(test_punch_data_relay_effective_setting),
 		cmocka_unit_test(test_punch_data_relay_only_for_learned_nat_unicast),
 		cmocka_unit_test(test_punch_udp_command_suppressed_for_tcp_only_peer),
