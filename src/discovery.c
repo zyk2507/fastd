@@ -15,6 +15,7 @@
 
 
 #define FASTD_DISCOVERY_VERSION 1
+#define FASTD_DISCOVERY_VERSION_SCOPED 2
 #define FASTD_DISCOVERY_ENDPOINT 1
 #define FASTD_DISCOVERY_MAX_MACS 16
 #define FASTD_DISCOVERY_ANNOUNCE_INTERVAL 5000
@@ -35,6 +36,48 @@ typedef struct __attribute__((packed)) fastd_discovery_endpoint {
 	uint8_t address[16];    /**< IPv4 address in the first 4 bytes, or an IPv6 address */
 } fastd_discovery_endpoint_t;
 
+
+/** Returns true if an endpoint announcement must carry an IPv6 scope ID */
+static bool address_needs_scope_id(const fastd_peer_address_t *addr) {
+	return addr->sa.sa_family == AF_INET6 && addr->in6.sin6_scope_id;
+}
+
+/** Returns the wire header length for an endpoint announcement */
+static size_t endpoint_header_len(const fastd_discovery_endpoint_t *header) {
+	switch (header->version) {
+	case FASTD_DISCOVERY_VERSION:
+		return sizeof(fastd_discovery_endpoint_t);
+
+	case FASTD_DISCOVERY_VERSION_SCOPED:
+		return sizeof(fastd_discovery_endpoint_t) + sizeof(uint32_t);
+
+	default:
+		return 0;
+	}
+}
+
+/** Writes the optional IPv6 scope ID extension */
+static bool encode_scope_id(uint8_t *wire, size_t len, const fastd_peer_address_t *addr) {
+	if (!address_needs_scope_id(addr))
+		return false;
+
+	if (len < sizeof(fastd_discovery_endpoint_t) + sizeof(uint32_t))
+		return false;
+
+	uint32_t scope_id = htonl(addr->in6.sin6_scope_id);
+	memcpy(wire + sizeof(fastd_discovery_endpoint_t), &scope_id, sizeof(scope_id));
+	return true;
+}
+
+/** Reads the optional IPv6 scope ID extension */
+static void decode_scope_id(fastd_peer_address_t *addr, const uint8_t *wire, size_t len) {
+	if (addr->sa.sa_family != AF_INET6 || len < sizeof(fastd_discovery_endpoint_t) + sizeof(uint32_t))
+		return;
+
+	uint32_t scope_id;
+	memcpy(&scope_id, wire + sizeof(fastd_discovery_endpoint_t), sizeof(scope_id));
+	addr->in6.sin6_scope_id = ntohl(scope_id);
+}
 
 /** Returns true if two Ethernet addresses are equal */
 static bool eth_addr_equal(fastd_eth_addr_t a, fastd_eth_addr_t b) {
@@ -130,12 +173,14 @@ send_endpoint_announce(fastd_peer_t *dest, fastd_peer_t *subject, const fastd_et
 	if (key_len > UINT8_MAX)
 		return;
 
-	size_t len = sizeof(fastd_discovery_endpoint_t) + key_len + n_macs * sizeof(fastd_eth_addr_t);
+	bool scoped = address_needs_scope_id(&subject->address);
+	size_t header_len = sizeof(fastd_discovery_endpoint_t) + (scoped ? sizeof(uint32_t) : 0);
+	size_t len = header_len + key_len + n_macs * sizeof(fastd_eth_addr_t);
 	fastd_buffer_t *buffer = fastd_buffer_alloc(len, conf.encrypt_headroom);
 
 	fastd_discovery_endpoint_t *header = buffer->data;
 	*header = (fastd_discovery_endpoint_t){
-		.version = FASTD_DISCOVERY_VERSION,
+		.version = scoped ? FASTD_DISCOVERY_VERSION_SCOPED : FASTD_DISCOVERY_VERSION,
 		.type = FASTD_DISCOVERY_ENDPOINT,
 		.key_len = key_len,
 		.mac_count = n_macs,
@@ -146,7 +191,12 @@ send_endpoint_announce(fastd_peer_t *dest, fastd_peer_t *subject, const fastd_et
 		return;
 	}
 
-	uint8_t *p = (uint8_t *)(header + 1);
+	if (scoped && !encode_scope_id(buffer->data, len, &subject->address)) {
+		fastd_buffer_free(buffer);
+		return;
+	}
+
+	uint8_t *p = (uint8_t *)buffer->data + header_len;
 	memcpy(p, conf.protocol->get_peer_key(subject), key_len);
 	p += key_len;
 
@@ -202,7 +252,11 @@ void fastd_discovery_handle_control(fastd_peer_t *relay, fastd_buffer_t *buffer)
 		goto end_free;
 
 	const fastd_discovery_endpoint_t *header = buffer->data;
-	if (header->version != FASTD_DISCOVERY_VERSION || header->type != FASTD_DISCOVERY_ENDPOINT)
+	if (header->type != FASTD_DISCOVERY_ENDPOINT)
+		goto end_free;
+
+	size_t header_len = endpoint_header_len(header);
+	if (!header_len || buffer->len < header_len)
 		goto end_free;
 
 	if (!conf.protocol->key_length || !conf.protocol->find_peer_by_key_data)
@@ -212,17 +266,19 @@ void fastd_discovery_handle_control(fastd_peer_t *relay, fastd_buffer_t *buffer)
 	if (header->key_len != key_len)
 		goto end_free;
 
-	size_t expected = sizeof(*header) + key_len + header->mac_count * sizeof(fastd_eth_addr_t);
+	size_t expected = header_len + key_len + header->mac_count * sizeof(fastd_eth_addr_t);
 	if (buffer->len != expected)
 		goto end_free;
 
-	const uint8_t *key = (const uint8_t *)(header + 1);
+	const uint8_t *key = (const uint8_t *)buffer->data + header_len;
 	if (key_is_self_or_relay(relay, key, key_len))
 		goto end_free;
 
 	fastd_peer_address_t remote_addr;
 	if (!decode_address(&remote_addr, header))
 		goto end_free;
+	if (header->version == FASTD_DISCOVERY_VERSION_SCOPED)
+		decode_scope_id(&remote_addr, buffer->data, header_len);
 
 	fastd_peer_t *peer = conf.protocol->find_peer_by_key_data(key, key_len);
 #ifdef WITH_DYNAMIC_PEERS
@@ -239,6 +295,52 @@ void fastd_discovery_handle_control(fastd_peer_t *relay, fastd_buffer_t *buffer)
 end_free:
 	fastd_buffer_free(buffer);
 }
+
+#ifdef WITH_TESTS
+
+/** Test wrapper for endpoint discovery address encoding */
+size_t fastd_discovery_test_encode_endpoint(void *out, size_t out_len, const fastd_peer_address_t *addr) {
+	fastd_discovery_endpoint_t *header = out;
+	bool scoped = address_needs_scope_id(addr);
+	size_t len = sizeof(fastd_discovery_endpoint_t) + (scoped ? sizeof(uint32_t) : 0);
+
+	if (out_len < len)
+		return 0;
+
+	memset(out, 0, len);
+	*header = (fastd_discovery_endpoint_t){
+		.version = scoped ? FASTD_DISCOVERY_VERSION_SCOPED : FASTD_DISCOVERY_VERSION,
+		.type = FASTD_DISCOVERY_ENDPOINT,
+	};
+
+	if (!encode_address(header, addr))
+		return 0;
+
+	if (scoped && !encode_scope_id(out, len, addr))
+		return 0;
+
+	return len;
+}
+
+/** Test wrapper for endpoint discovery address decoding */
+bool fastd_discovery_test_decode_endpoint(fastd_peer_address_t *addr, const void *data, size_t len) {
+	if (len < sizeof(fastd_discovery_endpoint_t))
+		return false;
+
+	const fastd_discovery_endpoint_t *header = data;
+	size_t header_len = endpoint_header_len(header);
+	if (!header_len || len < header_len)
+		return false;
+
+	if (!decode_address(addr, header))
+		return false;
+	if (header->version == FASTD_DISCOVERY_VERSION_SCOPED)
+		decode_scope_id(addr, data, header_len);
+
+	return true;
+}
+
+#endif
 
 /** Applies known direct MAC mappings after a direct peer session has been established */
 void fastd_discovery_peer_established(fastd_peer_t *peer) {

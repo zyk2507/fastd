@@ -4,6 +4,7 @@
   All rights reserved.
 */
 
+#include "discovery.h"
 #include "nat_detect.h"
 #include "method.h"
 #include "peer.h"
@@ -26,6 +27,8 @@
 
 #define FASTD_PUNCH_TEST_HARD_SYM_PORT_SPACE 65535U
 #define FASTD_PUNCH_TEST_HARD_SYM_LAST_INDEX (FASTD_PUNCH_TEST_HARD_SYM_PORT_SPACE - 1)
+#define TEST_DISCOVERY_ENDPOINT_V1_LEN 24U
+#define TEST_DISCOVERY_ENDPOINT_V2_LEN 28U
 
 typedef struct __attribute__((packed)) test_punch_header {
 	uint8_t magic[4];
@@ -299,6 +302,118 @@ static void assert_port4(const fastd_peer_address_t *addr, uint16_t port) {
 static void assert_port6(const fastd_peer_address_t *addr, uint16_t port) {
 	assert_int_equal(addr->sa.sa_family, AF_INET6);
 	assert_int_equal(port6(addr), port);
+}
+
+static fastd_peer_address_t linklocal_addr6(uint16_t suffix, uint16_t port, uint32_t scope_id) {
+	fastd_peer_address_t ret = {};
+
+	ret.in6.sin6_family = AF_INET6;
+	ret.in6.sin6_port = htons(port);
+	ret.in6.sin6_addr.s6_addr[0] = 0xfe;
+	ret.in6.sin6_addr.s6_addr[1] = 0x80;
+	ret.in6.sin6_addr.s6_addr[14] = suffix >> 8;
+	ret.in6.sin6_addr.s6_addr[15] = suffix & 0xff;
+	ret.in6.sin6_scope_id = scope_id;
+
+	return ret;
+}
+
+static void test_discovery_ipv6_without_scope_uses_legacy_wire_format(void **state UNUSED) {
+	fastd_peer_address_t original = addr6(0x1234, 45678);
+	fastd_peer_address_t decoded = {};
+	uint8_t wire[64];
+
+	size_t len = fastd_discovery_test_encode_endpoint(wire, sizeof(wire), &original);
+	assert_int_equal(len, TEST_DISCOVERY_ENDPOINT_V1_LEN);
+	assert_int_equal(wire[0], 1);
+	assert_true(fastd_discovery_test_decode_endpoint(&decoded, wire, len));
+	assert_port6(&decoded, 45678);
+	assert_int_equal(decoded.in6.sin6_scope_id, 0);
+	assert_memory_equal(
+		decoded.in6.sin6_addr.s6_addr, original.in6.sin6_addr.s6_addr, sizeof(decoded.in6.sin6_addr.s6_addr));
+}
+
+static void test_discovery_ipv6_scope_id_round_trips(void **state UNUSED) {
+	fastd_peer_address_t original = linklocal_addr6(0x12, 56789, 42);
+	fastd_peer_address_t decoded = {};
+	uint8_t wire[64];
+
+	size_t len = fastd_discovery_test_encode_endpoint(wire, sizeof(wire), &original);
+	assert_int_equal(len, TEST_DISCOVERY_ENDPOINT_V2_LEN);
+	assert_int_equal(wire[0], 2);
+	assert_true(fastd_discovery_test_decode_endpoint(&decoded, wire, len));
+	assert_port6(&decoded, 56789);
+	assert_int_equal(decoded.in6.sin6_scope_id, 42);
+	assert_memory_equal(
+		decoded.in6.sin6_addr.s6_addr, original.in6.sin6_addr.s6_addr, sizeof(decoded.in6.sin6_addr.s6_addr));
+}
+
+static void test_discovery_control_accepts_scoped_ipv6_candidate(void **state UNUSED) {
+	const fastd_protocol_t *old_protocol = conf.protocol;
+	bool old_peer_discovery = conf.peer_discovery;
+	int64_t old_now = ctx.now;
+	size_t old_max_buffer = ctx.max_buffer;
+	fastd_peer_t *old_lookup_peer = test_lookup_peer;
+
+	conf.protocol = &test_protocol;
+	conf.peer_discovery = true;
+	ctx.now = 1000;
+	ctx.max_buffer = 2048;
+	fastd_init_buffers();
+
+	fastd_peer_group_t group = {
+		.transport = TRANSPORT_UDP,
+		.hole_punch = HOLE_PUNCH_UDP,
+		.nat_traversal = FASTD_TRISTATE_TRUE,
+	};
+	fastd_peer_t relay = {
+		.id = 30,
+		.group = &group,
+		.config_state = CONFIG_STATIC,
+		.name = "relay",
+		.state = STATE_ESTABLISHED,
+	};
+	fastd_peer_address_t endpoint = linklocal_addr6(0x34, 4567, 77);
+	fastd_peer_t peer = {
+		.id = 20,
+		.group = &group,
+		.config_state = CONFIG_STATIC,
+		.name = "peer-b",
+		.state = STATE_ESTABLISHED,
+		.address = endpoint,
+	};
+	test_lookup_peer = &peer;
+
+	uint8_t endpoint_wire[64];
+	size_t header_len = fastd_discovery_test_encode_endpoint(endpoint_wire, sizeof(endpoint_wire), &endpoint);
+	assert_int_equal(header_len, TEST_DISCOVERY_ENDPOINT_V2_LEN);
+
+	size_t key_len = sizeof(test_key_b);
+	assert_true(key_len <= UINT8_MAX);
+	fastd_buffer_t *buffer = fastd_buffer_alloc(header_len + key_len, 0);
+	memcpy(buffer->data, endpoint_wire, header_len);
+	uint8_t *wire = buffer->data;
+	wire[2] = (uint8_t)key_len;
+	wire[3] = 0;
+	memcpy(wire + header_len, test_key_b, key_len);
+
+	fastd_discovery_handle_control(&relay, buffer);
+
+	assert_int_equal(VECTOR_LEN(peer.direct_candidates), 1);
+	fastd_peer_direct_candidate_t *candidate = &VECTOR_INDEX(peer.direct_candidates, 0);
+	assert_ptr_equal(candidate->relay, &relay);
+	assert_int_equal(candidate->source, DIRECT_CANDIDATE_DISCOVERY);
+	assert_true(fastd_peer_address_equal(&candidate->remote, &endpoint));
+	assert_int_equal(candidate->remote.in6.sin6_scope_id, 77);
+	assert_true(fastd_peer_address_equal(&peer.direct_remote, &endpoint));
+
+	VECTOR_FREE(peer.direct_candidates);
+	fastd_cleanup_buffers();
+	conf.protocol = old_protocol;
+	conf.peer_discovery = old_peer_discovery;
+	ctx.now = old_now;
+	ctx.max_buffer = old_max_buffer;
+	test_lookup_peer = old_lookup_peer;
 }
 
 	#ifdef WITH_STATUS_SOCKET
@@ -4681,6 +4796,9 @@ int main(void) {
 		cmocka_unit_test(test_punch_detects_noncurrent_exact_candidate),
 		cmocka_unit_test(test_endpoint_dependent_candidate_matches_same_ip),
 		cmocka_unit_test(test_direct_candidate_transport_scope),
+		cmocka_unit_test(test_discovery_ipv6_without_scope_uses_legacy_wire_format),
+		cmocka_unit_test(test_discovery_ipv6_scope_id_round_trips),
+		cmocka_unit_test(test_discovery_control_accepts_scoped_ipv6_candidate),
 		cmocka_unit_test(test_udp_punch_family_policy_allows_ipv6_deterministic),
 		cmocka_unit_test(test_udp_punch_socket_counts_public_listeners_separately),
 		cmocka_unit_test(test_udp_punch_public_listener_selection_policy),
