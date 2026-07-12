@@ -17,6 +17,7 @@
 
 
 #define FASTD_PUNCH_VERSION 1
+#define FASTD_PUNCH_VERSION_SCOPED 2
 #define FASTD_PUNCH_NAT_INFO 1
 #define FASTD_PUNCH_SEND_CONE 2
 #define FASTD_PUNCH_RESULT 3
@@ -104,6 +105,12 @@ typedef struct __attribute__((packed)) fastd_punch_command_listener {
 	uint32_t listener_id; /**< Runtime public listener ID for the command endpoint, network byte order */
 } fastd_punch_command_listener_t;
 
+/** Optional scope metadata used by version 2 endpoint punch control messages */
+typedef struct __attribute__((packed)) fastd_punch_scope_ext {
+	uint32_t endpoint_scope_id; /**< IPv6 scope ID for the primary endpoint, network byte order */
+	uint32_t compact_scope_id;  /**< IPv6 scope ID for an embedded compact endpoint, network byte order */
+} fastd_punch_scope_ext_t;
+
 enum {
 	FASTD_PUNCH_ADDRESS_AVAILABLE = 1u << 0,
 	FASTD_PUNCH_ADDRESS_PORT_MAPPED = 1u << 1,
@@ -136,6 +143,45 @@ static bool punch_control_supported(void) {
 static bool peer_control_supported(const fastd_peer_t *peer) {
 	const fastd_method_info_t *method = conf.protocol->get_current_method(peer);
 	return method && (method->provider->flags & METHOD_SUPPORTS_CONTROL);
+}
+
+/** Returns true if an endpoint announcement must carry an IPv6 scope ID */
+static bool address_needs_scope_id(const fastd_peer_address_t *addr) {
+	return addr && addr->sa.sa_family == AF_INET6 && addr->in6.sin6_scope_id;
+}
+
+/** Returns the endpoint message header for an already validated payload */
+static const fastd_punch_header_t *endpoint_message_header(const fastd_punch_endpoint_t *payload) {
+	return (const fastd_punch_header_t *)payload - 1;
+}
+
+/** Returns the optional scope extension for an already validated endpoint punch control message */
+static const fastd_punch_scope_ext_t *endpoint_message_scope_ext(const fastd_punch_endpoint_t *payload) {
+	const fastd_punch_header_t *header = endpoint_message_header(payload);
+	return header->version == FASTD_PUNCH_VERSION_SCOPED ? (const fastd_punch_scope_ext_t *)(payload + 1) :
+							       NULL;
+}
+
+/** Returns the optional scope extension length for an already validated endpoint punch control message */
+static size_t endpoint_message_scope_ext_len(const fastd_punch_endpoint_t *payload) {
+	return endpoint_message_scope_ext(payload) ? sizeof(fastd_punch_scope_ext_t) : 0;
+}
+
+/** Returns the primary endpoint IPv6 scope ID for an already validated endpoint punch control message */
+static uint32_t endpoint_message_scope_id(const fastd_punch_endpoint_t *payload) {
+	const fastd_punch_scope_ext_t *scope = endpoint_message_scope_ext(payload);
+	return scope ? be32toh(scope->endpoint_scope_id) : 0;
+}
+
+/** Returns the embedded compact endpoint IPv6 scope ID for an already validated endpoint punch control message */
+static uint32_t endpoint_message_compact_scope_id(const fastd_punch_endpoint_t *payload) {
+	const fastd_punch_scope_ext_t *scope = endpoint_message_scope_ext(payload);
+	return scope ? be32toh(scope->compact_scope_id) : 0;
+}
+
+/** Returns the first byte after the endpoint and optional scope extension */
+static const uint8_t *endpoint_message_payload_extra(const fastd_punch_endpoint_t *payload) {
+	return (const uint8_t *)(payload + 1) + endpoint_message_scope_ext_len(payload);
 }
 
 /** Encodes an endpoint into a punch control payload */
@@ -174,6 +220,7 @@ static bool decode_address(fastd_peer_address_t *addr, const fastd_punch_endpoin
 		addr->in6.sin6_family = AF_INET6;
 		addr->in6.sin6_port = endpoint->port;
 		memcpy(&addr->in6.sin6_addr, endpoint->address, sizeof(addr->in6.sin6_addr));
+		addr->in6.sin6_scope_id = endpoint_message_scope_id(endpoint);
 		return true;
 
 	default:
@@ -227,6 +274,18 @@ static bool decode_compact_address(fastd_peer_address_t *addr, const fastd_punch
 	}
 }
 
+/** Decodes a compact address from a nested punch control payload and an optional IPv6 scope ID */
+static bool decode_compact_address_scoped(
+	fastd_peer_address_t *addr, const fastd_punch_address_t *payload, uint32_t scope_id) {
+	if (!decode_compact_address(addr, payload))
+		return false;
+
+	if (addr->sa.sa_family == AF_INET6)
+		addr->in6.sin6_scope_id = scope_id;
+
+	return true;
+}
+
 /** Returns the extra payload length used by a punch control message type */
 static size_t endpoint_message_static_extra_len(uint8_t type) {
 	switch (type) {
@@ -266,9 +325,9 @@ static size_t endpoint_message_extra_len(uint8_t type, const fastd_punch_endpoin
 	if (!endpoint_message_accepts_command_listener(type))
 		return 0;
 
-	const fastd_punch_header_t *header = (const fastd_punch_header_t *)payload - 1;
+	const fastd_punch_header_t *header = endpoint_message_header(payload);
 	size_t len = be16toh(header->length);
-	size_t base_len = sizeof(*header) + sizeof(*payload) + payload->key_len;
+	size_t base_len = sizeof(*header) + sizeof(*payload) + endpoint_message_scope_ext_len(payload) + payload->key_len;
 
 	return len == base_len + sizeof(fastd_punch_command_listener_t) ?
 		       sizeof(fastd_punch_command_listener_t) :
@@ -277,7 +336,7 @@ static size_t endpoint_message_extra_len(uint8_t type, const fastd_punch_endpoin
 
 /** Returns the key pointer for an already validated endpoint punch control message */
 static const uint8_t *endpoint_message_key(uint8_t type, const fastd_punch_endpoint_t *payload) {
-	return (const uint8_t *)(payload + 1) + endpoint_message_extra_len(type, payload);
+	return endpoint_message_payload_extra(payload) + endpoint_message_extra_len(type, payload);
 }
 
 /** Returns the extended result payload for an already validated result-ext message */
@@ -285,7 +344,7 @@ static const fastd_punch_result_ext_t *endpoint_message_result_ext(uint8_t type,
 	if (type != FASTD_PUNCH_RESULT_EXT && type != FASTD_PUNCH_RESULT_LISTENER)
 		return NULL;
 
-	return (const fastd_punch_result_ext_t *)(payload + 1);
+	return (const fastd_punch_result_ext_t *)endpoint_message_payload_extra(payload);
 }
 
 /** Returns the listener result payload for an already validated listener-result message */
@@ -294,7 +353,7 @@ endpoint_message_result_listener(uint8_t type, const fastd_punch_endpoint_t *pay
 	if (type != FASTD_PUNCH_RESULT_LISTENER)
 		return NULL;
 
-	return (const fastd_punch_result_listener_t *)(payload + 1);
+	return (const fastd_punch_result_listener_t *)endpoint_message_payload_extra(payload);
 }
 
 /** Returns the listener-info payload for an already validated listener-info message */
@@ -303,7 +362,7 @@ endpoint_message_listener_info(uint8_t type, const fastd_punch_endpoint_t *paylo
 	if (type != FASTD_PUNCH_LISTENER_INFO)
 		return NULL;
 
-	return (const fastd_punch_listener_info_t *)(payload + 1);
+	return (const fastd_punch_listener_info_t *)endpoint_message_payload_extra(payload);
 }
 
 /** Returns optional command listener metadata for an already validated endpoint command message */
@@ -314,7 +373,7 @@ endpoint_message_command_listener(uint8_t type, const fastd_punch_endpoint_t *pa
 	if (endpoint_message_extra_len(type, payload) != sizeof(fastd_punch_command_listener_t))
 		return NULL;
 
-	return (const fastd_punch_command_listener_t *)(payload + 1);
+	return (const fastd_punch_command_listener_t *)endpoint_message_payload_extra(payload);
 }
 
 /** Parses and validates the common endpoint punch control message format */
@@ -327,7 +386,7 @@ parse_endpoint_message(const fastd_buffer_t *buffer, uint8_t *type, const fastd_
 	if (memcmp(header->magic, fastd_punch_magic, sizeof(header->magic)))
 		return false;
 
-	if (header->version != FASTD_PUNCH_VERSION)
+	if (header->version != FASTD_PUNCH_VERSION && header->version != FASTD_PUNCH_VERSION_SCOPED)
 		return false;
 
 	size_t len = be16toh(header->length);
@@ -335,8 +394,12 @@ parse_endpoint_message(const fastd_buffer_t *buffer, uint8_t *type, const fastd_
 		return false;
 
 	const fastd_punch_endpoint_t *parsed_payload = (const fastd_punch_endpoint_t *)(header + 1);
+	size_t scope_ext_len = header->version == FASTD_PUNCH_VERSION_SCOPED ? sizeof(fastd_punch_scope_ext_t) : 0;
+	if (len < sizeof(*header) + sizeof(*parsed_payload) + scope_ext_len)
+		return false;
+
 	size_t key_len = parsed_payload->key_len;
-	size_t base_len = sizeof(*header) + sizeof(*parsed_payload) + key_len;
+	size_t base_len = sizeof(*header) + sizeof(*parsed_payload) + scope_ext_len + key_len;
 	size_t static_extra_len = endpoint_message_static_extra_len(header->type);
 	if (static_extra_len) {
 		if (len != base_len + static_extra_len)
@@ -346,6 +409,19 @@ parse_endpoint_message(const fastd_buffer_t *buffer, uint8_t *type, const fastd_
 			return false;
 	} else if (len != base_len) {
 		return false;
+	}
+
+	const fastd_punch_scope_ext_t *scope = endpoint_message_scope_ext(parsed_payload);
+	if (scope && be32toh(scope->endpoint_scope_id) && parsed_payload->address_family != FASTD_PUNCH_AF_INET6)
+		return false;
+	if (scope && be32toh(scope->compact_scope_id)) {
+		if (header->type != FASTD_PUNCH_RESULT_LISTENER)
+			return false;
+
+		const uint8_t *extra_payload = (const uint8_t *)(parsed_payload + 1) + scope_ext_len;
+		const fastd_punch_result_listener_t *listener = (const fastd_punch_result_listener_t *)extra_payload;
+		if (listener->base_mapped_addr.address_family != FASTD_PUNCH_AF_INET6)
+			return false;
 	}
 
 	*type = header->type;
@@ -1660,10 +1736,11 @@ punch_endpoint_command_type(const fastd_peer_t *dest, const fastd_peer_t *subjec
 }
 
 /** Sends one endpoint punch control message, optionally with type-specific extra payload before the key */
-static bool send_endpoint_message_extra(
+static bool send_endpoint_message_extra_scoped(
 	fastd_peer_t *dest, uint8_t type, const void *subject_key, size_t key_len, const fastd_peer_address_t *endpoint,
 	fastd_nat_type_t nat_type, uint16_t min_port, uint16_t max_port, int port_delta, uint8_t extra,
-	uint16_t packet_count, const void *extra_payload, size_t extra_payload_len) {
+	uint16_t packet_count, const void *extra_payload, size_t extra_payload_len,
+	const fastd_peer_address_t *compact_endpoint) {
 	if (!punch_control_supported() || !fastd_peer_is_established(dest))
 		return false;
 	if (!peer_control_supported(dest))
@@ -1672,7 +1749,10 @@ static bool send_endpoint_message_extra(
 	if (key_len > UINT8_MAX)
 		return false;
 
-	size_t len = sizeof(fastd_punch_header_t) + sizeof(fastd_punch_endpoint_t) + extra_payload_len + key_len;
+	bool scoped = address_needs_scope_id(endpoint) || address_needs_scope_id(compact_endpoint);
+	size_t scope_len = scoped ? sizeof(fastd_punch_scope_ext_t) : 0;
+	size_t len =
+		sizeof(fastd_punch_header_t) + sizeof(fastd_punch_endpoint_t) + scope_len + extra_payload_len + key_len;
 	if (len > UINT16_MAX)
 		return false;
 
@@ -1680,7 +1760,7 @@ static bool send_endpoint_message_extra(
 
 	fastd_punch_header_t *header = buffer->data;
 	memcpy(header->magic, fastd_punch_magic, sizeof(header->magic));
-	header->version = FASTD_PUNCH_VERSION;
+	header->version = scoped ? FASTD_PUNCH_VERSION_SCOPED : FASTD_PUNCH_VERSION;
 	header->type = type;
 	header->length = htobe16(len);
 
@@ -1701,6 +1781,16 @@ static bool send_endpoint_message_extra(
 	}
 
 	uint8_t *cursor = (uint8_t *)(payload + 1);
+	if (scoped) {
+		fastd_punch_scope_ext_t *scope = (fastd_punch_scope_ext_t *)cursor;
+		*scope = (fastd_punch_scope_ext_t){
+			.endpoint_scope_id = htobe32(address_needs_scope_id(endpoint) ? endpoint->in6.sin6_scope_id : 0),
+			.compact_scope_id =
+				htobe32(address_needs_scope_id(compact_endpoint) ? compact_endpoint->in6.sin6_scope_id : 0),
+		};
+		cursor += sizeof(*scope);
+	}
+
 	if (extra_payload_len) {
 		memcpy(cursor, extra_payload, extra_payload_len);
 		cursor += extra_payload_len;
@@ -1711,6 +1801,16 @@ static bool send_endpoint_message_extra(
 	conf.protocol->send_control(dest, buffer);
 	ctx.punch_control_tx++;
 	return true;
+}
+
+/** Sends one endpoint punch control message, optionally with type-specific extra payload before the key */
+static bool send_endpoint_message_extra(
+	fastd_peer_t *dest, uint8_t type, const void *subject_key, size_t key_len, const fastd_peer_address_t *endpoint,
+	fastd_nat_type_t nat_type, uint16_t min_port, uint16_t max_port, int port_delta, uint8_t extra,
+	uint16_t packet_count, const void *extra_payload, size_t extra_payload_len) {
+	return send_endpoint_message_extra_scoped(
+		dest, type, subject_key, key_len, endpoint, nat_type, min_port, max_port, port_delta, extra,
+		packet_count, extra_payload, extra_payload_len, NULL);
 }
 
 /** Sends one endpoint punch control message */
@@ -2415,6 +2515,29 @@ bool fastd_punch_test_parse_endpoint_message(
 	return true;
 }
 
+/** Test wrapper for endpoint punch control address parsing */
+bool fastd_punch_test_parse_endpoint_address(
+	const uint8_t *data, size_t len, uint8_t *version, fastd_peer_address_t *endpoint) {
+	fastd_buffer_t buffer = {
+		.data = (void *)data,
+		.len = len,
+	};
+	const fastd_punch_endpoint_t *payload = NULL;
+	uint8_t parsed_type = 0;
+
+	if (!parse_endpoint_message(&buffer, &parsed_type, &payload))
+		return false;
+
+	if (version) {
+		const fastd_punch_header_t *header = endpoint_message_header(payload);
+		*version = header->version;
+	}
+	if (endpoint && !decode_address(endpoint, payload))
+		return false;
+
+	return true;
+}
+
 /** Test wrapper for extended punch result message parsing */
 bool fastd_punch_test_parse_result_ext_message(
 	const uint8_t *data, size_t len, uint8_t *type, size_t *key_len, uint16_t *packet_count,
@@ -2497,7 +2620,9 @@ bool fastd_punch_test_parse_result_listener_message(
 		*wait_window_ms = be32toh(ext->wait_window_ms);
 	if (base_mapped_listener_id)
 		*base_mapped_listener_id = be32toh(listener->listener_id);
-	if (base_mapped_endpoint && !decode_compact_address(base_mapped_endpoint, &listener->base_mapped_addr))
+	if (base_mapped_endpoint &&
+	    !decode_compact_address_scoped(
+		    base_mapped_endpoint, &listener->base_mapped_addr, endpoint_message_compact_scope_id(payload)))
 		return false;
 	if (base_mapped_port_mapped)
 		*base_mapped_port_mapped =
@@ -2767,9 +2892,9 @@ static void send_punch_result(
 			if (base_mapped_port_mapped)
 				listener.base_mapped_addr.flags |= FASTD_PUNCH_ADDRESS_PORT_MAPPED;
 
-			sent_listener = send_endpoint_message_extra(
+			sent_listener = send_endpoint_message_extra_scoped(
 				dest, FASTD_PUNCH_RESULT_LISTENER, subject_key, key_len, endpoint, FASTD_NAT_UNKNOWN,
-				0, 0, 0, (uint8_t)result, packet_count, &listener, sizeof(listener));
+				0, 0, 0, (uint8_t)result, packet_count, &listener, sizeof(listener), base_mapped_endpoint);
 		}
 	}
 
@@ -3290,7 +3415,7 @@ static void handle_nat_info(fastd_peer_t *sender, const fastd_punch_endpoint_t *
 	if (payload->key_len != key_len)
 		return;
 
-	const uint8_t *key = (const uint8_t *)(payload + 1);
+	const uint8_t *key = endpoint_message_key(FASTD_PUNCH_NAT_INFO, payload);
 	fastd_peer_t *subject = find_peer_by_key(key, key_len);
 	if (!nat_info_sender_allowed(sender, subject, (payload->reserved & FASTD_PUNCH_NAT_INFO_RELAYED) != 0))
 		return;
@@ -3339,7 +3464,7 @@ static void handle_tcp_nat_info(fastd_peer_t *sender, const fastd_punch_endpoint
 	if (payload->key_len != key_len)
 		return;
 
-	const uint8_t *key = (const uint8_t *)(payload + 1);
+	const uint8_t *key = endpoint_message_key(FASTD_PUNCH_TCP_NAT_INFO, payload);
 	fastd_peer_t *subject = find_peer_by_key(key, key_len);
 	if (!nat_info_sender_allowed(sender, subject, (payload->reserved & FASTD_PUNCH_NAT_INFO_RELAYED) != 0))
 		return;
@@ -3388,7 +3513,7 @@ static void handle_select_listener_request(fastd_peer_t *sender, const fastd_pun
 	if (payload->key_len != key_len)
 		return;
 
-	const uint8_t *key = (const uint8_t *)(payload + 1);
+	const uint8_t *key = endpoint_message_key(FASTD_PUNCH_SELECT_LISTENER, payload);
 	fastd_peer_t *subject = find_peer_by_key(key, key_len);
 	if (!subject || subject != sender)
 		return;
@@ -3596,7 +3721,7 @@ static void handle_send_tcp_endpoint_command(fastd_peer_t *sender, const fastd_p
 	if (payload->key_len != key_len)
 		return;
 
-	const uint8_t *key = (const uint8_t *)(payload + 1);
+	const uint8_t *key = endpoint_message_key(FASTD_PUNCH_SEND_TCP, payload);
 	if (key_is_self(key, key_len))
 		return;
 
@@ -3721,7 +3846,8 @@ static void handle_result(fastd_peer_t *sender, const fastd_punch_endpoint_t *pa
 	const fastd_punch_result_listener_t *listener = endpoint_message_result_listener(type, payload);
 	if (listener) {
 		base_mapped_listener_id = be32toh(listener->listener_id);
-		have_base_mapped = decode_compact_address(&base_mapped_endpoint, &listener->base_mapped_addr);
+		have_base_mapped = decode_compact_address_scoped(
+			&base_mapped_endpoint, &listener->base_mapped_addr, endpoint_message_compact_scope_id(payload));
 		base_mapped_port_mapped =
 			(listener->base_mapped_addr.flags & FASTD_PUNCH_ADDRESS_PORT_MAPPED) != 0;
 	}

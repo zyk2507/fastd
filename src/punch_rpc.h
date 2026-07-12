@@ -56,6 +56,8 @@ size_t fastd_punch_test_build_punch_endpoint_candidates(
 
 bool fastd_punch_test_parse_endpoint_message(
 	const uint8_t *data, size_t len, uint8_t *type, size_t *key_len, uint16_t *packet_count);
+bool fastd_punch_test_parse_endpoint_address(
+	const uint8_t *data, size_t len, uint8_t *version, fastd_peer_address_t *endpoint);
 bool fastd_punch_test_parse_result_ext_message(
 	const uint8_t *data, size_t len, uint8_t *type, size_t *key_len, uint16_t *packet_count,
 	uint8_t *command_type, uint16_t *udp_punch_sockets, uint32_t *hard_sym_port_index,

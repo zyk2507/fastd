@@ -81,11 +81,23 @@ typedef struct __attribute__((packed)) test_punch_command_listener {
 	uint32_t listener_id;
 } test_punch_command_listener_t;
 
+typedef struct __attribute__((packed)) test_punch_scope_ext {
+	uint32_t endpoint_scope_id;
+	uint32_t compact_scope_id;
+} test_punch_scope_ext_t;
+
 typedef struct __attribute__((packed)) test_punch_message {
 	test_punch_header_t header;
 	test_punch_endpoint_t endpoint;
 	uint8_t key[4];
 } test_punch_message_t;
+
+typedef struct __attribute__((packed)) test_punch_scoped_message {
+	test_punch_header_t header;
+	test_punch_endpoint_t endpoint;
+	test_punch_scope_ext_t scope;
+	uint8_t key[4];
+} test_punch_scoped_message_t;
 
 typedef struct __attribute__((packed)) test_punch_result_ext_message {
 	test_punch_header_t header;
@@ -100,6 +112,14 @@ typedef struct __attribute__((packed)) test_punch_result_listener_message {
 	test_punch_result_listener_t listener;
 	uint8_t key[4];
 } test_punch_result_listener_message_t;
+
+typedef struct __attribute__((packed)) test_punch_scoped_result_listener_message {
+	test_punch_header_t header;
+	test_punch_endpoint_t endpoint;
+	test_punch_scope_ext_t scope;
+	test_punch_result_listener_t listener;
+	uint8_t key[4];
+} test_punch_scoped_result_listener_message_t;
 
 typedef struct __attribute__((packed)) test_punch_listener_info_message {
 	test_punch_header_t header;
@@ -515,6 +535,50 @@ static fastd_buffer_t *make_punch_control_buffer_extra(
 	test_punch_endpoint_t *payload = (test_punch_endpoint_t *)((test_punch_header_t *)buffer->data + 1);
 	payload->reserved = extra;
 	return buffer;
+}
+
+static fastd_buffer_t *make_scoped_punch_control_buffer_extra(
+	uint8_t type, const fastd_peer_address_t *endpoint, fastd_nat_type_t nat_type, const uint8_t *key,
+	size_t key_len, uint8_t extra) {
+	size_t len = sizeof(test_punch_header_t) + sizeof(test_punch_endpoint_t) + sizeof(test_punch_scope_ext_t) +
+		     key_len;
+	fastd_buffer_t *buffer = fastd_buffer_alloc(len, 0);
+
+	test_punch_header_t *header = buffer->data;
+	memset(header, 0, len);
+	memcpy(header->magic, "fpch", 4);
+	header->version = 2;
+	header->type = type;
+	header->length = htobe16(len);
+
+	test_punch_endpoint_t *payload = (test_punch_endpoint_t *)(header + 1);
+	payload->key_len = key_len;
+	payload->nat_type = nat_type;
+	payload->reserved = extra;
+	payload->address_family = endpoint->sa.sa_family == AF_INET6 ? 6 : 4;
+	if (endpoint->sa.sa_family == AF_INET6) {
+		payload->port = endpoint->in6.sin6_port;
+		memcpy(payload->address, &endpoint->in6.sin6_addr, sizeof(endpoint->in6.sin6_addr));
+		payload->min_port = endpoint->in6.sin6_port;
+		payload->max_port = endpoint->in6.sin6_port;
+	} else {
+		payload->port = endpoint->in.sin_port;
+		memcpy(payload->address, &endpoint->in.sin_addr, sizeof(endpoint->in.sin_addr));
+		payload->min_port = endpoint->in.sin_port;
+		payload->max_port = endpoint->in.sin_port;
+	}
+
+	test_punch_scope_ext_t *scope = (test_punch_scope_ext_t *)(payload + 1);
+	scope->endpoint_scope_id =
+		htobe32(endpoint->sa.sa_family == AF_INET6 ? endpoint->in6.sin6_scope_id : 0);
+	memcpy(scope + 1, key, key_len);
+	return buffer;
+}
+
+static fastd_buffer_t *make_scoped_punch_control_buffer(
+	uint8_t type, const fastd_peer_address_t *endpoint, fastd_nat_type_t nat_type, const uint8_t *key,
+	size_t key_len) {
+	return make_scoped_punch_control_buffer_extra(type, endpoint, nat_type, key, key_len, 0);
 }
 
 static test_punch_result_ext_message_t make_punch_result_ext_message(void) {
@@ -1248,6 +1312,99 @@ static void test_punch_parses_result_listener_message(void **state UNUSED) {
 	assert_true(base_mapped_port_mapped);
 }
 
+static void test_punch_parses_scoped_ipv6_endpoint_message(void **state UNUSED) {
+	fastd_peer_address_t endpoint = linklocal_addr6(0x1234, 41000, 42);
+	test_punch_scoped_message_t msg = {};
+
+	memcpy(msg.header.magic, "fpch", 4);
+	msg.header.version = 2;
+	msg.header.type = TEST_PUNCH_SEND_CONE;
+	msg.header.length = htobe16(sizeof(msg));
+	msg.endpoint.key_len = sizeof(msg.key);
+	msg.endpoint.nat_type = FASTD_NAT_FULL_CONE;
+	msg.endpoint.address_family = 6;
+	msg.endpoint.port = endpoint.in6.sin6_port;
+	memcpy(msg.endpoint.address, &endpoint.in6.sin6_addr, sizeof(endpoint.in6.sin6_addr));
+	msg.scope.endpoint_scope_id = htobe32(endpoint.in6.sin6_scope_id);
+	memcpy(msg.key, "\x01\x02\x03\x04", sizeof(msg.key));
+
+	uint8_t type = 0;
+	size_t key_len = 0;
+	uint8_t version = 0;
+	fastd_peer_address_t decoded = {};
+
+	assert_true(fastd_punch_test_parse_endpoint_message((const uint8_t *)&msg, sizeof(msg), &type, &key_len, NULL));
+	assert_true(fastd_punch_test_parse_endpoint_address((const uint8_t *)&msg, sizeof(msg), &version, &decoded));
+	assert_int_equal(type, TEST_PUNCH_SEND_CONE);
+	assert_int_equal(key_len, sizeof(msg.key));
+	assert_int_equal(version, 2);
+	assert_true(fastd_peer_address_equal(&decoded, &endpoint));
+	assert_int_equal(decoded.in6.sin6_scope_id, 42);
+}
+
+static void test_punch_parses_scoped_result_listener_message(void **state UNUSED) {
+	fastd_peer_address_t endpoint = linklocal_addr6(0x1234, 41000, 11);
+	fastd_peer_address_t base = linklocal_addr6(0x5678, 43000, 88);
+	test_punch_scoped_result_listener_message_t msg = {};
+
+	memcpy(msg.header.magic, "fpch", 4);
+	msg.header.version = 2;
+	msg.header.type = TEST_PUNCH_RESULT_LISTENER;
+	msg.header.length = htobe16(sizeof(msg));
+	msg.endpoint.key_len = sizeof(msg.key);
+	msg.endpoint.address_family = 6;
+	msg.endpoint.port = endpoint.in6.sin6_port;
+	memcpy(msg.endpoint.address, &endpoint.in6.sin6_addr, sizeof(endpoint.in6.sin6_addr));
+	msg.endpoint.packet_count = htobe16(25);
+	msg.endpoint.reserved = TEST_PUNCH_RESULT_HANDSHAKE;
+	msg.scope.endpoint_scope_id = htobe32(endpoint.in6.sin6_scope_id);
+	msg.scope.compact_scope_id = htobe32(base.in6.sin6_scope_id);
+	msg.listener.result.command_type = TEST_PUNCH_BOTH_EASY_SYM;
+	msg.listener.result.udp_punch_sockets = htobe16(25);
+	msg.listener.result.wait_window_ms = htobe32(5000);
+	msg.listener.listener_id = htobe32(77);
+	msg.listener.base_mapped_addr.address_family = 6;
+	msg.listener.base_mapped_addr.flags = TEST_PUNCH_ADDRESS_AVAILABLE;
+	msg.listener.base_mapped_addr.port = base.in6.sin6_port;
+	memcpy(msg.listener.base_mapped_addr.address, &base.in6.sin6_addr, sizeof(base.in6.sin6_addr));
+	memcpy(msg.key, "\x01\x02\x03\x04", sizeof(msg.key));
+
+	uint8_t version = 0;
+	fastd_peer_address_t decoded_endpoint = {};
+	assert_true(fastd_punch_test_parse_endpoint_address(
+		(const uint8_t *)&msg, sizeof(msg), &version, &decoded_endpoint));
+	assert_int_equal(version, 2);
+	assert_true(fastd_peer_address_equal(&decoded_endpoint, &endpoint));
+
+	uint8_t type = 0;
+	size_t key_len = 0;
+	uint16_t packet_count = 0;
+	uint8_t command_type = 0;
+	uint16_t udp_punch_sockets = 0;
+	uint32_t hard_sym_port_index = 0;
+	uint32_t hard_sym_next_index = 0;
+	uint32_t hard_sym_round = 0;
+	uint32_t wait_window_ms = 0;
+	uint32_t base_mapped_listener_id = 0;
+	fastd_peer_address_t base_mapped_endpoint = {};
+	bool base_mapped_port_mapped = false;
+
+	assert_true(fastd_punch_test_parse_result_listener_message(
+		(const uint8_t *)&msg, sizeof(msg), &type, &key_len, &packet_count, &command_type,
+		&udp_punch_sockets, &hard_sym_port_index, &hard_sym_next_index, &hard_sym_round,
+		&base_mapped_endpoint, &wait_window_ms, &base_mapped_listener_id, &base_mapped_port_mapped));
+	assert_int_equal(type, TEST_PUNCH_RESULT_LISTENER);
+	assert_int_equal(key_len, sizeof(msg.key));
+	assert_int_equal(packet_count, 25);
+	assert_int_equal(command_type, TEST_PUNCH_BOTH_EASY_SYM);
+	assert_int_equal(udp_punch_sockets, 25);
+	assert_int_equal(wait_window_ms, 5000);
+	assert_int_equal(base_mapped_listener_id, 77);
+	assert_false(base_mapped_port_mapped);
+	assert_true(fastd_peer_address_equal(&base_mapped_endpoint, &base));
+	assert_int_equal(base_mapped_endpoint.in6.sin6_scope_id, 88);
+}
+
 static void test_punch_parses_listener_info_message(void **state UNUSED) {
 	test_punch_listener_info_message_t msg = make_punch_listener_info_message();
 	msg.listener.listener_id = htobe32(1234);
@@ -1382,7 +1539,7 @@ static void test_punch_rejects_bad_magic(void **state UNUSED) {
 
 static void test_punch_rejects_bad_version(void **state UNUSED) {
 	test_punch_message_t msg = make_punch_message();
-	msg.header.version = 2;
+	msg.header.version = 99;
 
 	assert_false(fastd_punch_test_parse_endpoint_message((const uint8_t *)&msg, sizeof(msg), NULL, NULL, NULL));
 }
@@ -3222,6 +3379,87 @@ static void test_punch_accepts_relayed_nat_metadata(void **state UNUSED) {
 	fastd_cleanup_buffers();
 }
 
+static void test_punch_control_preserves_scoped_ipv6_metadata_and_candidate(void **state UNUSED) {
+	const fastd_protocol_t *old_protocol = conf.protocol;
+	fastd_peer_group_t *old_peer_group = conf.peer_group;
+	fastd_peer_t *old_lookup_peer = test_lookup_peer;
+	size_t old_encrypt_headroom = conf.encrypt_headroom;
+	size_t old_max_buffer = ctx.max_buffer;
+	uint64_t old_rx = ctx.punch_control_rx;
+	uint64_t old_tx = ctx.punch_result_tx;
+	int64_t old_now = ctx.now;
+
+	ctx.now = 1000;
+	conf.protocol = &test_protocol;
+	conf.encrypt_headroom = 0;
+	ctx.max_buffer = 2048;
+	fastd_init_buffers();
+	test_reset_control_sends();
+
+	fastd_peer_group_t group = {
+		.transport = TRANSPORT_AUTO,
+		.hole_punch = HOLE_PUNCH_AUTO,
+		.nat_traversal = FASTD_TRISTATE_TRUE,
+	};
+	conf.peer_group = &group;
+
+	fastd_peer_t relay = {
+		.id = 30,
+		.group = &group,
+		.config_state = CONFIG_STATIC,
+		.name = "relay",
+		.state = STATE_ESTABLISHED,
+	};
+	fastd_peer_t peer = {
+		.id = 20,
+		.group = &group,
+		.config_state = CONFIG_STATIC,
+		.name = "peer-b",
+		.state = STATE_ESTABLISHED,
+	};
+	test_lookup_peer = &peer;
+
+	fastd_peer_address_t metadata_endpoint = linklocal_addr6(0x1234, 52000, 55);
+	assert_true(fastd_punch_handle_control(
+		&relay,
+		make_scoped_punch_control_buffer_extra(
+			TEST_PUNCH_NAT_INFO, &metadata_endpoint, FASTD_NAT_FULL_CONE, test_key_b,
+			sizeof(test_key_b), TEST_PUNCH_NAT_INFO_RELAYED)));
+	assert_true(fastd_peer_address_equal(&peer.punch_endpoint, &metadata_endpoint));
+	assert_int_equal(peer.punch_endpoint.in6.sin6_scope_id, 55);
+	assert_int_equal(peer.n_punch_endpoints, 1);
+	assert_true(fastd_peer_address_equal(&peer.punch_endpoints[0].address, &metadata_endpoint));
+
+	fastd_peer_address_t command_endpoint = linklocal_addr6(0x5678, 52001, 66);
+	assert_true(fastd_punch_handle_control(
+		&relay,
+		make_scoped_punch_control_buffer(
+			TEST_PUNCH_SEND_CONE, &command_endpoint, FASTD_NAT_FULL_CONE, test_key_b, sizeof(test_key_b))));
+	assert_true(fastd_peer_address_equal(&peer.punch_endpoint, &command_endpoint));
+	assert_int_equal(peer.punch_endpoint.in6.sin6_scope_id, 66);
+	assert_int_equal(VECTOR_LEN(peer.direct_candidates), 1);
+	fastd_peer_direct_candidate_t *candidate = &VECTOR_INDEX(peer.direct_candidates, 0);
+	assert_int_equal(candidate->source, DIRECT_CANDIDATE_PUNCH_CONTROL);
+	assert_true(fastd_peer_address_equal(&candidate->remote, &command_endpoint));
+	assert_int_equal(candidate->remote.in6.sin6_scope_id, 66);
+	assert_true(fastd_peer_address_equal(&peer.direct_remote, &command_endpoint));
+	assert_int_equal(peer.direct_remote.in6.sin6_scope_id, 66);
+
+	VECTOR_FREE(peer.direct_candidates);
+	VECTOR_FREE(peer.punch_suppressions);
+	fastd_task_unschedule(&peer.task);
+	test_lookup_peer = old_lookup_peer;
+	conf.protocol = old_protocol;
+	conf.peer_group = old_peer_group;
+	conf.encrypt_headroom = old_encrypt_headroom;
+	ctx.max_buffer = old_max_buffer;
+	ctx.punch_control_rx = old_rx;
+	ctx.punch_result_tx = old_tx;
+	ctx.now = old_now;
+	test_reset_control_sends();
+	fastd_cleanup_buffers();
+}
+
 static void test_punch_metadata_updates_wake_task_manager(void **state UNUSED) {
 	const fastd_protocol_t *old_protocol = conf.protocol;
 	fastd_peer_group_t *old_peer_group = conf.peer_group;
@@ -4747,6 +4985,8 @@ int main(void) {
 		cmocka_unit_test(test_punch_parses_result_message),
 		cmocka_unit_test(test_punch_parses_result_ext_message),
 		cmocka_unit_test(test_punch_parses_result_listener_message),
+		cmocka_unit_test(test_punch_parses_scoped_ipv6_endpoint_message),
+		cmocka_unit_test(test_punch_parses_scoped_result_listener_message),
 		cmocka_unit_test(test_punch_parses_listener_info_message),
 		cmocka_unit_test(test_punch_parses_command_listener_message),
 		cmocka_unit_test(test_punch_parses_all_endpoint_command_messages),
@@ -4784,6 +5024,7 @@ int main(void) {
 		cmocka_unit_test(test_punch_send_tcp_preserves_multiple_received_endpoints),
 		cmocka_unit_test(test_tcp_direct_handshake_reuses_unestablished_candidate_socket),
 		cmocka_unit_test(test_punch_accepts_relayed_nat_metadata),
+		cmocka_unit_test(test_punch_control_preserves_scoped_ipv6_metadata_and_candidate),
 		cmocka_unit_test(test_punch_metadata_updates_wake_task_manager),
 		cmocka_unit_test(test_punch_task_manager_outcome_accounting),
 		cmocka_unit_test(test_punch_pair_task_history_is_bounded_and_ordered),
