@@ -92,6 +92,7 @@ test('hysteria-realm-netns',
 	args : [files('test-hysteria-realm-netns.sh'), fastd_exe.full_path()],
 	protocol : 'tap',
 	is_parallel : false,
+	# Includes SSH clone and Go build; the script enforces a 60 second netns runtime budget after build.
 	timeout : 180,
 )
 

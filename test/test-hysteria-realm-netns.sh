@@ -87,6 +87,7 @@ FAST_WAIT_SLEEP=0.25
 PING_WAIT_ATTEMPTS=35
 PING_WAIT_SLEEP=0.1
 PING_TIMEOUT=0.4
+REALM_RUNTIME_LIMIT=60
 REALM_TOKEN="fastd-realm-test-token"
 REALM_URL="http://10.62.0.1:8443"
 RUNTIME_DEADLINE=0
@@ -124,15 +125,17 @@ run() {
 
 runtime_budget_check() {
 	if ((RUNTIME_DEADLINE > 0 && $(date +%s) > RUNTIME_DEADLINE)); then
-		fail 'hysteria realm netns runtime exceeded 60 seconds after build completed'
+		fail "hysteria realm netns runtime exceeded $REALM_RUNTIME_LIMIT seconds after build completed"
 	fi
 }
 
 build_realm_server() {
 	local src="$WORK/hysteria-realm-server"
 	local built="$src/hysteria-realm-server"
+	local repo=${FASTD_HYSTERIA_REALM_REPO:-git@ssh.github.com:apernet/hysteria-realm-server.git}
+	local git_ssh_command=${GIT_SSH_COMMAND:-ssh -p 443 -o BatchMode=yes}
 
-	if ! git clone --depth 1 git@github.com:apernet/hysteria-realm-server.git "$src" > "$WORK/clone.log" 2>&1; then
+	if ! GIT_SSH_COMMAND="$git_ssh_command" git clone --depth 1 "$repo" "$src" > "$WORK/clone.log" 2>&1; then
 		fail 'failed to clone hysteria-realm-server'
 	fi
 
@@ -537,7 +540,7 @@ wait_for_direct_ping() {
 }
 
 build_realm_server
-RUNTIME_DEADLINE=$(($(date +%s) + 60))
+RUNTIME_DEADLINE=$(($(date +%s) + REALM_RUNTIME_LIMIT))
 setup_netns
 start_fake_stun
 start_realm_server
