@@ -834,6 +834,21 @@ static void test_nat_classifies_port_restricted(void **state UNUSED) {
 		FASTD_NAT_PORT_RESTRICTED);
 }
 
+static void test_nat_stun_change_response_source(void **state UNUSED) {
+	const fastd_peer_address_t server = addr4(0xc0000201, 3478);
+	const fastd_peer_address_t same = addr4(0xc0000201, 3478);
+	const fastd_peer_address_t alternate_port = addr4(0xc0000201, 3479);
+	const fastd_peer_address_t alternate_ip_port = addr4(0xc0000202, 3479);
+	const fastd_peer_address_t alternate_ip = addr4(0xc0000202, 3478);
+
+	assert_true(fastd_nat_test_stun_response_source_matches(&same, &server, false, false));
+	assert_true(fastd_nat_test_stun_response_source_matches(&alternate_port, &server, false, true));
+	assert_true(fastd_nat_test_stun_response_source_matches(&alternate_ip_port, &server, true, true));
+	assert_false(fastd_nat_test_stun_response_source_matches(&same, &server, false, true));
+	assert_false(fastd_nat_test_stun_response_source_matches(&alternate_ip, &server, true, true));
+	assert_false(fastd_nat_test_stun_response_source_matches(&alternate_ip_port, &server, false, true));
+}
+
 static void test_nat_classifies_no_pat(void **state UNUSED) {
 	const fastd_peer_address_t base[] = {
 		addr4(0xcb007105, 51234),
@@ -7262,6 +7277,7 @@ int main(void) {
 		cmocka_unit_test(test_nat_classifies_full_cone),
 		cmocka_unit_test(test_nat_classifies_restricted),
 		cmocka_unit_test(test_nat_classifies_port_restricted),
+		cmocka_unit_test(test_nat_stun_change_response_source),
 		cmocka_unit_test(test_nat_classifies_no_pat),
 		cmocka_unit_test(test_nat_classifies_easy_symmetric_inc),
 		cmocka_unit_test(test_nat_classifies_hard_symmetric),

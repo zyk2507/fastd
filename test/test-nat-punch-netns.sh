@@ -563,6 +563,15 @@ clear_blocked_direct_path() {
 	ip netns exec "$NS_RB" nft delete table ip failover >/dev/null 2>&1 || true
 }
 
+enable_full_cone_alternate_stun() {
+	run ip netns exec "$NS_RA" nft add table ip alternate_stun
+	run ip netns exec "$NS_RA" nft 'add chain ip alternate_stun prerouting { type nat hook prerouting priority -101; policy accept; }'
+	run ip netns exec "$NS_RA" nft add rule ip alternate_stun prerouting iifname pub ip saddr 10.52.0.4 udp dport 1-65535 dnat to 10.52.1.2
+	run ip netns exec "$NS_RB" nft add table ip fullcone
+	run ip netns exec "$NS_RB" nft 'add chain ip fullcone prerouting { type nat hook prerouting priority -101; policy accept; }'
+	run ip netns exec "$NS_RB" nft add rule ip fullcone prerouting iifname pub ip saddr 10.52.0.4 udp dport 1-65535 dnat to 10.52.2.2
+}
+
 block_direct_udp_between_nat_peers() {
 	run ip netns exec "$NS_RA" nft add table ip hardfail
 	run ip netns exec "$NS_RA" nft 'add chain ip hardfail forward { type filter hook forward priority -150; policy accept; }'
@@ -866,6 +875,7 @@ make_private_link "$NS_A" eth0 "$NS_RA" priv 1
 make_private_link "$NS_B" eth0 "$NS_RB" priv 2
 
 run ip -n "$NS_C" addr add 10.52.0.1/24 dev pub
+run ip -n "$NS_C" addr add 10.52.0.4/24 dev pub
 run ip -n "$NS_RA" addr add 10.52.0.2/24 dev pub
 run ip -n "$NS_RB" addr add 10.52.0.3/24 dev pub
 run ip -n "$NS_RA" addr add 10.52.1.1/24 dev priv
@@ -1170,6 +1180,7 @@ import sys
 
 COOKIE = 0x2112A442
 SERVER_IP = "10.52.0.1"
+ALTERNATE_SERVER_IP = "10.52.0.4"
 READY = sys.argv[1]
 MODE = sys.argv[2]
 running = True
@@ -1224,11 +1235,23 @@ def stun_response(data, source):
         return None
 
     transaction = data[8:20]
+    change_request = 0
+    offset = 20
+    end = 20 + msg_len
+    while offset + 4 <= end:
+        attr_type, attr_len = struct.unpack("!HH", data[offset:offset + 4])
+        attr_end = offset + 4 + attr_len
+        if attr_end > end:
+            return None
+        if attr_type == 0x0003 and attr_len == 4:
+            change_request = struct.unpack("!I", data[offset + 4:attr_end])[0]
+        offset = attr_end + ((4 - attr_len % 4) % 4)
+
     mapped_ip, mapped_port = mapped_endpoint(source)
     xport = mapped_port ^ (COOKIE >> 16)
     xaddr = struct.unpack("!I", socket.inet_aton(mapped_ip))[0] ^ COOKIE
     attr = struct.pack("!HHBBHI", 0x0020, 8, 0, 1, xport, xaddr)
-    return struct.pack("!HHI12s", 0x0101, len(attr), COOKIE, transaction) + attr
+    return struct.pack("!HHI12s", 0x0101, len(attr), COOKIE, transaction) + attr, change_request
 
 
 signal.signal(signal.SIGTERM, stop)
@@ -1237,18 +1260,23 @@ signal.signal(signal.SIGINT, stop)
 sockets = []
 socket_roles = {}
 tcp_buffers = {}
+udp_sockets = {}
 
 
 def add_socket(sock, role):
     sock.setblocking(False)
     sockets.append(sock)
     socket_roles[sock] = role
+    if role == "udp":
+        udp_sockets[sock.getsockname()] = sock
 
 
 def close_socket(sock):
     if sock in sockets:
         sockets.remove(sock)
-    socket_roles.pop(sock, None)
+    role = socket_roles.pop(sock, None)
+    if role == "udp":
+        udp_sockets.pop(sock.getsockname(), None)
     tcp_buffers.pop(sock, None)
     sock.close()
 
@@ -1265,6 +1293,11 @@ for port in (3478, 3479):
     tcp_sock.listen(16)
     add_socket(tcp_sock, "tcp-listener")
 
+alternate_udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+alternate_udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+alternate_udp_sock.bind((ALTERNATE_SERVER_IP, 3479))
+add_socket(alternate_udp_sock, "udp")
+
 open(READY, "w").close()
 
 while running:
@@ -1273,9 +1306,17 @@ while running:
         role = socket_roles.get(sock)
         if role == "udp":
             data, source = sock.recvfrom(2048)
-            response = stun_response(data, source)
+            result = stun_response(data, source)
+            response = result[0] if result else None
             if response:
-                sock.sendto(response, source)
+                change_request = result[1]
+                if change_request & 0x04:
+                    response_sock = udp_sockets[(ALTERNATE_SERVER_IP, 3479)]
+                elif change_request & 0x02:
+                    response_sock = udp_sockets[(SERVER_IP, 3479)]
+                else:
+                    response_sock = sock
+                response_sock.sendto(response, source)
         elif role == "tcp-listener":
             while True:
                 try:
@@ -1304,9 +1345,9 @@ while running:
             if len(buf) < total:
                 continue
 
-            response = stun_response(buf[:total], source)
-            if response:
-                sock.sendall(response)
+            result = stun_response(buf[:total], source)
+            if result:
+                sock.sendall(result[0])
             close_socket(sock)
 
 for sock in sockets:
@@ -1633,6 +1674,7 @@ run_iperf_tests() {
 
 		begin_iperf_case
 		stop_fastds
+		enable_full_cone_alternate_stun
 		start_fake_stun
 		run ip netns exec "$NS_RA" nft insert rule ip nat postrouting ip saddr 10.52.1.2 ip daddr 10.52.0.1 udp dport 11000 snat to 10.52.0.2:41100
 		run ip netns exec "$NS_RA" nft insert rule ip nat postrouting ip saddr 10.52.1.2 ip daddr 10.52.0.3 udp dport 11001 snat to 10.52.0.2:41100-41124
@@ -1908,6 +1950,7 @@ printf 'ok 3 - control relay establishes direct UDP path through full-cone mappi
 
 CURRENT_TEST=4
 stop_fastds
+enable_full_cone_alternate_stun
 start_fake_stun
 run ip netns exec "$NS_RA" nft insert rule ip nat postrouting ip saddr 10.52.1.2 ip daddr 10.52.0.1 udp dport 11000 snat to 10.52.0.2:41100
 run ip netns exec "$NS_RA" nft insert rule ip nat postrouting ip saddr 10.52.1.2 ip daddr 10.52.0.3 udp dport 11001 snat to 10.52.0.2:41100-41124

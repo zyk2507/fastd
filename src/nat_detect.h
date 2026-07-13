@@ -28,6 +28,8 @@ fastd_nat_type_t fastd_nat_test_classify(
 int fastd_nat_test_detect_port_delta(const fastd_peer_address_t *samples, size_t n_samples);
 size_t fastd_nat_test_collect_public_endpoints(
 	fastd_peer_address_t *out, const fastd_peer_address_t *samples, size_t n_samples);
+bool fastd_nat_test_stun_response_source_matches(
+	const fastd_peer_address_t *source, const fastd_peer_address_t *server, bool change_ip, bool change_port);
 
 fastd_nat_type_t fastd_nat_test_classify_tcp(
 	const fastd_peer_address_t *samples, size_t n_samples, const fastd_peer_address_t *source);

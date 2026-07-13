@@ -203,6 +203,15 @@ static uint16_t address_port_host(const fastd_peer_address_t *addr) {
 	return ntohs(fastd_peer_address_get_port(addr));
 }
 
+/** Verifies that a CHANGE-REQUEST response originated from the requested alternate endpoint */
+static bool stun_response_source_matches(
+	const fastd_peer_address_t *source, const fastd_peer_address_t *server, bool change_ip, bool change_port) {
+	bool ip_changed = !address_ip_equal(source, server);
+	bool port_changed = address_port_host(source) != address_port_host(server);
+
+	return ip_changed == change_ip && port_changed == change_port;
+}
+
 /** Sets the peer address port from host byte order */
 static void set_address_port_host(fastd_peer_address_t *addr, uint16_t port) {
 	switch (addr->sa.sa_family) {
@@ -1018,6 +1027,12 @@ fastd_nat_type_t fastd_nat_test_classify(
 	return ret;
 }
 
+/** Test wrapper for STUN CHANGE-REQUEST response source verification */
+bool fastd_nat_test_stun_response_source_matches(
+	const fastd_peer_address_t *source, const fastd_peer_address_t *server, bool change_ip, bool change_port) {
+	return stun_response_source_matches(source, server, change_ip, change_port);
+}
+
 /** Test wrapper for TCP NAT classification without performing network I/O */
 fastd_nat_type_t fastd_nat_test_classify_tcp(
 	const fastd_peer_address_t *samples, size_t n_samples, const fastd_peer_address_t *source) {
@@ -1165,9 +1180,10 @@ static fastd_nat_status_t detect_nat(const nat_worker_t *work) {
 
 	if (n_base_samples) {
 		nat_stun_response_t response = {};
-		change_ip_port =
-			stun_request(fd, &servers[0], FASTD_STUN_CHANGE_IP | FASTD_STUN_CHANGE_PORT, &response);
-		change_port = stun_request(fd, &servers[0], FASTD_STUN_CHANGE_PORT, &response);
+		change_ip_port = stun_request(fd, &servers[0], FASTD_STUN_CHANGE_IP | FASTD_STUN_CHANGE_PORT, &response) &&
+			stun_response_source_matches(&response.source, &servers[0], true, true);
+		change_port = stun_request(fd, &servers[0], FASTD_STUN_CHANGE_PORT, &response) &&
+			stun_response_source_matches(&response.source, &servers[0], false, true);
 	}
 
 	if (n_base_samples >= 2 && !samples_are_stable(base_samples, n_base_samples)) {
