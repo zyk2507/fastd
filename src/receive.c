@@ -64,13 +64,39 @@ handle_socket_control(struct msghdr *message, const fastd_socket_t *sock, fastd_
 			local_addr->in6.sin6_addr = pktinfo.ipi6_addr;
 			local_addr->in6.sin6_port = fastd_peer_address_get_port(sock->bound_addr);
 
-			if (IN6_IS_ADDR_LINKLOCAL(&local_addr->in6.sin6_addr))
-				local_addr->in6.sin6_scope_id = pktinfo.ipi6_ifindex;
+			local_addr->in6.sin6_scope_id = pktinfo.ipi6_ifindex;
 
 			return;
 		}
 	}
 }
+
+#ifdef WITH_TESTS
+
+/** Test wrapper for receiving IPv6 packet-info source selection */
+bool fastd_receive_test_ipv6_pktinfo(
+	const fastd_socket_t *sock, const struct in6_pktinfo *pktinfo, fastd_peer_address_t *local_addr) {
+	if (!sock || !sock->bound_addr || !pktinfo || !local_addr)
+		return false;
+
+	uint8_t cbuf[CMSG_SPACE(sizeof(struct in6_pktinfo))] __attribute__((aligned(8))) = {};
+	struct msghdr msg = {
+		.msg_control = cbuf,
+		.msg_controllen = sizeof(cbuf),
+	};
+
+	struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+	cmsg->cmsg_level = IPPROTO_IPV6;
+	cmsg->cmsg_type = IPV6_PKTINFO;
+	cmsg->cmsg_len = CMSG_LEN(sizeof(*pktinfo));
+	memcpy(CMSG_DATA(cmsg), pktinfo, sizeof(*pktinfo));
+	msg.msg_controllen = cmsg->cmsg_len;
+
+	handle_socket_control(&msg, sock, local_addr);
+	return local_addr->sa.sa_family == AF_INET6;
+}
+
+#endif
 
 /** Initializes the hashtables used to keep track of handshakes sent to unknown peers */
 void fastd_receive_unknown_init(void) {

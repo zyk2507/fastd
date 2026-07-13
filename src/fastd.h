@@ -790,6 +790,9 @@ bool fastd_socket_test_udp_punch_should_create_public_listener(
 	size_t current_listener_count, bool has_reusable_listener, bool has_port_mapping_listener, bool force_new,
 	bool prefer_port_mapping);
 uint32_t fastd_socket_test_udp_punch_select_public_listener_id(sa_family_t family, bool prefer_port_mapping);
+bool fastd_send_test_ipv6_pktinfo(const fastd_peer_address_t *local_addr, struct in6_pktinfo *pktinfo);
+bool fastd_receive_test_ipv6_pktinfo(
+	const fastd_socket_t *sock, const struct in6_pktinfo *pktinfo, fastd_peer_address_t *local_addr);
 void fastd_port_mapping_test_begin(bool natpmp_requested, bool upnp_requested, bool pcp_requested);
 void fastd_port_mapping_test_end(void);
 size_t fastd_port_mapping_test_entry_count(void);

@@ -459,6 +459,38 @@ static void test_discovery_ipv6_scope_id_round_trips(void **state UNUSED) {
 		decoded.in6.sin6_addr.s6_addr, original.in6.sin6_addr.s6_addr, sizeof(decoded.in6.sin6_addr.s6_addr));
 }
 
+static void test_ipv6_pktinfo_preserves_global_preferred_interface(void **state UNUSED) {
+	fastd_peer_address_t local = addr6(0x1234, 45678);
+	local.in6.sin6_scope_id = 99;
+
+	struct in6_pktinfo send_pktinfo = {};
+	assert_true(fastd_send_test_ipv6_pktinfo(&local, &send_pktinfo));
+	assert_memory_equal(
+		send_pktinfo.ipi6_addr.s6_addr, local.in6.sin6_addr.s6_addr,
+		sizeof(send_pktinfo.ipi6_addr.s6_addr));
+	assert_int_equal(send_pktinfo.ipi6_ifindex, 99);
+
+	fastd_peer_address_t bound = addr6(0x1111, 45678);
+	fastd_socket_t sock = {
+		.bound_addr = &bound,
+	};
+	struct in6_pktinfo recv_pktinfo = {
+		.ipi6_addr = local.in6.sin6_addr,
+		.ipi6_ifindex = 100,
+	};
+	fastd_peer_address_t decoded = {};
+	assert_true(fastd_receive_test_ipv6_pktinfo(&sock, &recv_pktinfo, &decoded));
+	assert_port6(&decoded, 45678);
+	assert_memory_equal(
+		decoded.in6.sin6_addr.s6_addr, local.in6.sin6_addr.s6_addr,
+		sizeof(decoded.in6.sin6_addr.s6_addr));
+	assert_int_equal(decoded.in6.sin6_scope_id, 100);
+
+	fastd_peer_address_t same_global = local;
+	same_global.in6.sin6_scope_id = 101;
+	assert_true(fastd_peer_address_equal(&local, &same_global));
+}
+
 static void test_discovery_control_accepts_scoped_ipv6_candidate(void **state UNUSED) {
 	const fastd_protocol_t *old_protocol = conf.protocol;
 	bool old_peer_discovery = conf.peer_discovery;
@@ -7096,6 +7128,7 @@ int main(void) {
 		cmocka_unit_test(test_direct_candidate_transport_scope),
 		cmocka_unit_test(test_discovery_ipv6_without_scope_uses_legacy_wire_format),
 		cmocka_unit_test(test_discovery_ipv6_scope_id_round_trips),
+		cmocka_unit_test(test_ipv6_pktinfo_preserves_global_preferred_interface),
 		cmocka_unit_test(test_discovery_control_accepts_scoped_ipv6_candidate),
 		cmocka_unit_test(test_udp_punch_family_policy_allows_ipv6_deterministic),
 		cmocka_unit_test(test_udp_punch_socket_counts_public_listeners_separately),

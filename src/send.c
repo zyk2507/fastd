@@ -70,12 +70,37 @@ static inline void add_pktinfo(struct msghdr *msg, const fastd_peer_address_t *l
 		struct in6_pktinfo pktinfo = {};
 		pktinfo.ipi6_addr = local_addr->in6.sin6_addr;
 
-		if (IN6_IS_ADDR_LINKLOCAL(&local_addr->in6.sin6_addr))
-			pktinfo.ipi6_ifindex = local_addr->in6.sin6_scope_id;
+		pktinfo.ipi6_ifindex = local_addr->in6.sin6_scope_id;
 
 		memcpy(CMSG_DATA(cmsg), &pktinfo, sizeof(pktinfo));
 	}
 }
+
+#ifdef WITH_TESTS
+
+/** Test wrapper for IPv6 packet-info source selection */
+bool fastd_send_test_ipv6_pktinfo(const fastd_peer_address_t *local_addr, struct in6_pktinfo *pktinfo) {
+	if (!local_addr || !pktinfo)
+		return false;
+
+	uint8_t cbuf[CMSG_SPACE(sizeof(struct in6_pktinfo))] __attribute__((aligned(8))) = {};
+	struct msghdr msg = {
+		.msg_control = cbuf,
+	};
+
+	add_pktinfo(&msg, local_addr);
+	if (!msg.msg_controllen)
+		return false;
+
+	struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+	if (!cmsg || cmsg->cmsg_level != IPPROTO_IPV6 || cmsg->cmsg_type != IPV6_PKTINFO)
+		return false;
+
+	memcpy(pktinfo, CMSG_DATA(cmsg), sizeof(*pktinfo));
+	return true;
+}
+
+#endif
 
 /** Sends a packet */
 void fastd_send(
