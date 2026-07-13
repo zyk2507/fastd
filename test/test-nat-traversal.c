@@ -6710,6 +6710,47 @@ static void test_public_listener_pcp_mapping_response(void **state UNUSED) {
 	assert_int_equal(mapped.in.sin_addr.s_addr, htonl(0xcb007109));
 	assert_int_equal(port4(&mapped), 45555);
 
+#ifdef WITH_STATUS_SOCKET
+	struct json_object *port_mapping = fastd_port_mapping_status();
+	assert_true(json_get_bool_required(port_mapping, "available"));
+	assert_int_equal(json_get_int_required(port_mapping, "mapping_count"), 1);
+
+	struct json_object *requested = json_get_array_required(port_mapping, "requested");
+	assert_int_equal(json_object_array_length(requested), 1);
+	assert_string_equal(json_object_get_string(json_object_array_get_idx(requested, 0)), "pcp");
+
+	struct json_object *active = json_get_array_required(port_mapping, "active");
+	assert_int_equal(json_object_array_length(active), 1);
+	assert_string_equal(json_object_get_string(json_object_array_get_idx(active, 0)), "pcp");
+
+	struct json_object *backend_status = json_get_object_required(port_mapping, "backends");
+	struct json_object *pcp_backend = json_get_object_required(backend_status, "pcp");
+	assert_true(json_get_bool_required(pcp_backend, "compiled"));
+	assert_true(json_get_bool_required(pcp_backend, "requested"));
+	assert_true(json_get_bool_required(pcp_backend, "active"));
+
+	struct json_object *mappings = json_get_array_required(port_mapping, "mappings");
+	assert_int_equal(json_object_array_length(mappings), 1);
+	struct json_object *entry = json_object_array_get_idx(mappings, 0);
+	assert_int_equal(json_object_get_type(entry), json_type_object);
+	assert_int_equal(json_get_int_required(entry, "local_port"), 40002);
+
+	struct json_object *backends = json_get_array_required(entry, "backends");
+	assert_int_equal(json_object_array_length(backends), 1);
+	assert_string_equal(json_object_get_string(json_object_array_get_idx(backends, 0)), "pcp");
+
+	struct json_object *pcp = json_get_object_required(entry, "pcp");
+	assert_true(json_get_bool_required(pcp, "mapped"));
+	assert_int_equal(json_get_int_required(pcp, "public_port"), 45555);
+	assert_int_equal(json_get_int_required(pcp, "lifetime"), 1800);
+	assert_non_null(strstr(json_get_string_required(pcp, "external_address"), "203.0.113.9"));
+
+	struct json_object *public_endpoints = json_get_array_required(entry, "public_endpoints");
+	assert_int_equal(json_object_array_length(public_endpoints), 1);
+	assert_non_null(strstr(json_object_get_string(json_object_array_get_idx(public_endpoints, 0)), "45555"));
+	json_object_put(port_mapping);
+#endif
+
 	response[24] ^= 0x55;
 	assert_false(fastd_port_mapping_test_pcp_handle_response(response, sizeof(response)));
 

@@ -753,6 +753,9 @@ bool fastd_port_mapping_register_socket(fastd_socket_t *sock);
 bool fastd_port_mapping_get_external_address(const fastd_socket_t *sock, fastd_peer_address_t *addr);
 void fastd_port_mapping_release_socket(fastd_socket_t *sock);
 void fastd_port_mapping_cleanup(void);
+#ifdef WITH_STATUS_SOCKET
+struct json_object *fastd_port_mapping_status(void);
+#endif
 
 bool fastd_turn_check(void);
 void fastd_turn_handle_task(void);

@@ -21,6 +21,10 @@
 #include <unistd.h>
 
 
+#ifdef WITH_STATUS_SOCKET
+#include <json-c/json.h>
+#endif
+
 #ifdef WITH_NATPMP
 #include <natpmp.h>
 #endif
@@ -1412,6 +1416,286 @@ static void clear_dynamic_socket_mapping_flags(void) {
 		sock->punch_listener_port_mapped = false;
 	}
 }
+
+#ifdef WITH_STATUS_SOCKET
+
+/** Returns true if a peer address contains an IP endpoint */
+static bool mapping_address_available(const fastd_peer_address_t *addr) {
+	return addr && (addr->sa.sa_family == AF_INET || addr->sa.sa_family == AF_INET6);
+}
+
+/** Returns a peer address string as a json_object *, allowing unavailable addresses */
+static json_object *wrap_mapping_address_or_null(const fastd_peer_address_t *addr) {
+	if (!mapping_address_available(addr))
+		return NULL;
+
+	char addr_buf[1 + INET6_ADDRSTRLEN + 2 + IFNAMSIZ + 1 + 5 + 1];
+	fastd_snprint_peer_address(addr_buf, sizeof(addr_buf), addr, NULL, false, false);
+	return json_object_new_string(addr_buf);
+}
+
+/** Adds one backend name to an array when enabled */
+static void add_backend_name(json_object *array, const char *name, bool enabled) {
+	if (enabled)
+		json_object_array_add(array, json_object_new_string(name));
+}
+
+/** Returns a backend name array for the provided flags */
+static json_object *backend_name_array(bool natpmp, bool upnp_igd, bool pcp) {
+	json_object *ret = json_object_new_array();
+	add_backend_name(ret, "nat-pmp", natpmp);
+	add_backend_name(ret, "upnp-igd", upnp_igd);
+	add_backend_name(ret, "pcp", pcp);
+	return ret;
+}
+
+/** Adds an endpoint string to the public endpoint list */
+static void add_public_endpoint(
+	json_object *array, const char *backend, const fastd_peer_address_t *addr, uint16_t port) {
+	char endpoint[1 + INET6_ADDRSTRLEN + 2 + IFNAMSIZ + 1 + 5 + 1];
+	char value[sizeof(endpoint) + 32];
+
+	if (mapping_address_available(addr)) {
+		fastd_peer_address_t endpoint_addr = *addr;
+		set_mapped_address_port(&endpoint_addr, port);
+		fastd_snprint_peer_address(endpoint, sizeof(endpoint), &endpoint_addr, NULL, false, false);
+		snprintf(value, sizeof(value), "%s %s", backend, endpoint);
+	} else {
+		snprintf(value, sizeof(value), "%s port %u", backend, port);
+	}
+
+	json_object_array_add(array, json_object_new_string(value));
+}
+
+/** Returns the currently selected NAT-PMP port, if any */
+static json_object *natpmp_current_port(const fastd_port_mapping_t *mapping) {
+#ifdef WITH_NATPMP
+	if (mapping && mapping->request_pending && mapping->current < VECTOR_LEN(mapping->mappings))
+		return json_object_new_int(VECTOR_INDEX(mapping->mappings, mapping->current).port);
+#endif
+
+	return NULL;
+}
+
+/** Dumps NAT-PMP backend status */
+static json_object *dump_natpmp_backend_status(const fastd_port_mapping_t *mapping) {
+	json_object *ret = json_object_new_object();
+#ifdef WITH_NATPMP
+	json_object_object_add(ret, "compiled", json_object_new_boolean(true));
+	json_object_object_add(ret, "requested", json_object_new_boolean(mapping && mapping->natpmp_requested));
+	json_object_object_add(ret, "active", json_object_new_boolean(mapping && mapping->use_natpmp));
+	json_object_object_add(ret, "initialized", json_object_new_boolean(mapping && mapping->initialized));
+	json_object_object_add(ret, "request_pending", json_object_new_boolean(mapping && mapping->request_pending));
+	json_object_object_add(ret, "current_port", natpmp_current_port(mapping));
+#else
+	json_object_object_add(ret, "compiled", json_object_new_boolean(false));
+	json_object_object_add(ret, "requested", json_object_new_boolean(mapping && mapping->natpmp_requested));
+	json_object_object_add(ret, "active", json_object_new_boolean(false));
+	json_object_object_add(ret, "initialized", json_object_new_boolean(false));
+	json_object_object_add(ret, "request_pending", json_object_new_boolean(false));
+	json_object_object_add(ret, "current_port", NULL);
+#endif
+	return ret;
+}
+
+/** Dumps UPnP IGD backend status */
+static json_object *dump_upnp_backend_status(const fastd_port_mapping_t *mapping) {
+	json_object *ret = json_object_new_object();
+#ifdef WITH_UPNP_IGD
+	json_object_object_add(ret, "compiled", json_object_new_boolean(true));
+	json_object_object_add(ret, "requested", json_object_new_boolean(mapping && mapping->upnp_igd_requested));
+	json_object_object_add(ret, "active", json_object_new_boolean(mapping && mapping->use_upnp_igd));
+	json_object_object_add(ret, "initialized", json_object_new_boolean(mapping && mapping->upnp_initialized));
+	json_object_object_add(
+		ret, "external_address", mapping ? wrap_mapping_address_or_null(&mapping->upnp_external_addr) : NULL);
+	json_object_object_add(
+		ret, "lan_address",
+		mapping && mapping->upnp_lanaddr[0] ? json_object_new_string(mapping->upnp_lanaddr) : NULL);
+#else
+	json_object_object_add(ret, "compiled", json_object_new_boolean(false));
+	json_object_object_add(ret, "requested", json_object_new_boolean(mapping && mapping->upnp_igd_requested));
+	json_object_object_add(ret, "active", json_object_new_boolean(false));
+	json_object_object_add(ret, "initialized", json_object_new_boolean(false));
+	json_object_object_add(ret, "external_address", NULL);
+	json_object_object_add(ret, "lan_address", NULL);
+#endif
+	return ret;
+}
+
+#ifdef WITH_PCP
+/** Returns the currently selected PCP port, if any */
+static json_object *pcp_current_port(const fastd_port_mapping_t *mapping) {
+	if (mapping && mapping->pcp_request_pending && mapping->pcp_current < VECTOR_LEN(mapping->mappings))
+		return json_object_new_int(VECTOR_INDEX(mapping->mappings, mapping->pcp_current).port);
+
+	return NULL;
+}
+#endif
+
+/** Dumps PCP backend status */
+static json_object *dump_pcp_backend_status(const fastd_port_mapping_t *mapping) {
+	json_object *ret = json_object_new_object();
+#ifdef WITH_PCP
+	json_object_object_add(ret, "compiled", json_object_new_boolean(true));
+	json_object_object_add(ret, "requested", json_object_new_boolean(mapping && mapping->pcp_requested));
+	json_object_object_add(ret, "active", json_object_new_boolean(mapping && mapping->use_pcp));
+	json_object_object_add(ret, "initialized", json_object_new_boolean(mapping && mapping->pcp_initialized));
+	json_object_object_add(ret, "request_pending", json_object_new_boolean(mapping && mapping->pcp_request_pending));
+	json_object_object_add(ret, "current_port", pcp_current_port(mapping));
+	json_object_object_add(ret, "server", mapping ? wrap_mapping_address_or_null(&mapping->pcp_server_addr) : NULL);
+	json_object_object_add(ret, "retries", json_object_new_int(mapping ? mapping->pcp_retries : 0));
+#else
+	json_object_object_add(ret, "compiled", json_object_new_boolean(false));
+	json_object_object_add(ret, "requested", json_object_new_boolean(mapping && mapping->pcp_requested));
+	json_object_object_add(ret, "active", json_object_new_boolean(false));
+	json_object_object_add(ret, "initialized", json_object_new_boolean(false));
+	json_object_object_add(ret, "request_pending", json_object_new_boolean(false));
+	json_object_object_add(ret, "current_port", NULL);
+	json_object_object_add(ret, "server", NULL);
+	json_object_object_add(ret, "retries", json_object_new_int(0));
+#endif
+	return ret;
+}
+
+/** Dumps one mapping entry's NAT-PMP lease status */
+static json_object *dump_natpmp_entry_status(const fastd_port_mapping_entry_t *entry, json_object *endpoints) {
+	json_object *ret = json_object_new_object();
+#ifdef WITH_NATPMP
+	json_object_object_add(ret, "compiled", json_object_new_boolean(true));
+	json_object_object_add(ret, "active", json_object_new_boolean(entry->use_natpmp));
+	json_object_object_add(ret, "mapped", json_object_new_boolean(entry->natpmp_mapped));
+	json_object_object_add(
+		ret, "public_port", entry->natpmp_mapped ? json_object_new_int(entry->natpmp_public_port) : NULL);
+	json_object_object_add(
+		ret, "lifetime", entry->natpmp_mapped ? json_object_new_int64(entry->natpmp_lifetime) : NULL);
+	if (entry->natpmp_mapped)
+		add_public_endpoint(endpoints, "nat-pmp", NULL, entry->natpmp_public_port);
+#else
+	json_object_object_add(ret, "compiled", json_object_new_boolean(false));
+	json_object_object_add(ret, "active", json_object_new_boolean(false));
+	json_object_object_add(ret, "mapped", json_object_new_boolean(false));
+	json_object_object_add(ret, "public_port", NULL);
+	json_object_object_add(ret, "lifetime", NULL);
+#endif
+	return ret;
+}
+
+/** Dumps one mapping entry's UPnP IGD lease status */
+static json_object *dump_upnp_entry_status(
+	const fastd_port_mapping_t *mapping, const fastd_port_mapping_entry_t *entry, json_object *endpoints) {
+	json_object *ret = json_object_new_object();
+#ifdef WITH_UPNP_IGD
+	json_object_object_add(ret, "compiled", json_object_new_boolean(true));
+	json_object_object_add(ret, "active", json_object_new_boolean(entry->use_upnp_igd));
+	json_object_object_add(ret, "mapped", json_object_new_boolean(entry->upnp_mapped));
+	json_object_object_add(
+		ret, "public_port", entry->upnp_mapped ? json_object_new_int(entry->upnp_public_port) : NULL);
+	json_object_object_add(
+		ret, "external_address",
+		entry->upnp_mapped ? wrap_mapping_address_or_null(&mapping->upnp_external_addr) : NULL);
+	if (entry->upnp_mapped)
+		add_public_endpoint(endpoints, "upnp-igd", &mapping->upnp_external_addr, entry->upnp_public_port);
+#else
+	json_object_object_add(ret, "compiled", json_object_new_boolean(false));
+	json_object_object_add(ret, "active", json_object_new_boolean(false));
+	json_object_object_add(ret, "mapped", json_object_new_boolean(false));
+	json_object_object_add(ret, "public_port", NULL);
+	json_object_object_add(ret, "external_address", NULL);
+#endif
+	return ret;
+}
+
+/** Dumps one mapping entry's PCP lease status */
+static json_object *dump_pcp_entry_status(const fastd_port_mapping_entry_t *entry UNUSED, json_object *endpoints UNUSED) {
+	json_object *ret = json_object_new_object();
+#ifdef WITH_PCP
+	json_object_object_add(ret, "compiled", json_object_new_boolean(true));
+	json_object_object_add(ret, "active", json_object_new_boolean(entry->use_pcp));
+	json_object_object_add(ret, "mapped", json_object_new_boolean(entry->pcp_mapped));
+	json_object_object_add(
+		ret, "public_port", entry->pcp_mapped ? json_object_new_int(entry->pcp_public_port) : NULL);
+	json_object_object_add(
+		ret, "lifetime", entry->pcp_mapped ? json_object_new_int64(entry->pcp_lifetime) : NULL);
+	json_object_object_add(
+		ret, "external_address", entry->pcp_mapped ? wrap_mapping_address_or_null(&entry->pcp_external_addr) : NULL);
+	if (entry->pcp_mapped)
+		add_public_endpoint(endpoints, "pcp", &entry->pcp_external_addr, entry->pcp_public_port);
+#else
+	json_object_object_add(ret, "compiled", json_object_new_boolean(false));
+	json_object_object_add(ret, "active", json_object_new_boolean(false));
+	json_object_object_add(ret, "mapped", json_object_new_boolean(false));
+	json_object_object_add(ret, "public_port", NULL);
+	json_object_object_add(ret, "lifetime", NULL);
+	json_object_object_add(ret, "external_address", NULL);
+#endif
+	return ret;
+}
+
+/** Dumps one port mapping entry */
+static json_object *dump_port_mapping_entry(
+	const fastd_port_mapping_t *mapping, const fastd_port_mapping_entry_t *entry) {
+	json_object *ret = json_object_new_object();
+	json_object *endpoints = json_object_new_array();
+
+	json_object_object_add(ret, "local_port", json_object_new_int(entry->port));
+	json_object_object_add(ret, "backends", backend_name_array(entry->use_natpmp, entry->use_upnp_igd, entry->use_pcp));
+
+	json_object *fixed = json_object_new_object();
+	json_object_object_add(fixed, "natpmp", json_object_new_boolean(entry->fixed_natpmp));
+	json_object_object_add(fixed, "upnp_igd", json_object_new_boolean(entry->fixed_upnp_igd));
+	json_object_object_add(fixed, "pcp", json_object_new_boolean(entry->fixed_pcp));
+	json_object_object_add(ret, "fixed", fixed);
+
+	json_object *dynamic_refs = json_object_new_object();
+	json_object_object_add(dynamic_refs, "natpmp", json_object_new_int(entry->dynamic_natpmp_refs));
+	json_object_object_add(dynamic_refs, "upnp_igd", json_object_new_int(entry->dynamic_upnp_igd_refs));
+	json_object_object_add(dynamic_refs, "pcp", json_object_new_int(entry->dynamic_pcp_refs));
+	json_object_object_add(ret, "dynamic_refs", dynamic_refs);
+
+	json_object_object_add(ret, "natpmp", dump_natpmp_entry_status(entry, endpoints));
+	json_object_object_add(ret, "upnp_igd", dump_upnp_entry_status(mapping, entry, endpoints));
+	json_object_object_add(ret, "pcp", dump_pcp_entry_status(entry, endpoints));
+	json_object_object_add(ret, "public_endpoints", endpoints);
+
+	return ret;
+}
+
+/** Dumps automatic port mapping state for the status socket */
+struct json_object *fastd_port_mapping_status(void) {
+	const fastd_port_mapping_t *mapping = ctx.port_mapping;
+	json_object *ret = json_object_new_object();
+	json_object *backend_status = json_object_new_object();
+	json_object *mappings = json_object_new_array();
+
+	json_object_object_add(ret, "available", json_object_new_boolean(mapping != NULL));
+	json_object_object_add(
+		ret, "requested",
+		backend_name_array(
+			mapping && mapping->natpmp_requested, mapping && mapping->upnp_igd_requested,
+			mapping && mapping->pcp_requested));
+	json_object_object_add(
+		ret, "active",
+		backend_name_array(
+			mapping && mapping->use_natpmp, mapping && mapping->use_upnp_igd, mapping && mapping->use_pcp));
+	json_object_object_add(ret, "mapping_count", json_object_new_int64(mapping ? VECTOR_LEN(mapping->mappings) : 0));
+
+	json_object_object_add(backend_status, "natpmp", dump_natpmp_backend_status(mapping));
+	json_object_object_add(backend_status, "upnp_igd", dump_upnp_backend_status(mapping));
+	json_object_object_add(backend_status, "pcp", dump_pcp_backend_status(mapping));
+	json_object_object_add(ret, "backends", backend_status);
+
+	if (mapping) {
+		size_t i;
+		for (i = 0; i < VECTOR_LEN(mapping->mappings); i++)
+			json_object_array_add(
+				mappings, dump_port_mapping_entry(mapping, &VECTOR_INDEX(mapping->mappings, i)));
+	}
+	json_object_object_add(ret, "mappings", mappings);
+
+	return ret;
+}
+
+#endif
 
 /** Checks if the configured automatic port mapping support is available */
 bool fastd_port_mapping_check(void) {

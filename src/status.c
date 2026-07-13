@@ -20,6 +20,7 @@
 #include "nat_detect.h"
 #include "offload/offload.h"
 #include "peer.h"
+#include "port_mapping.h"
 
 #include "dep/libfort/fort.h"
 
@@ -464,6 +465,21 @@ static void print_punch_table(json_object *punch) {
 	format_counter(value, get_int_member(punch, "active_relay_backoffs"));
 	add_key_value_row(table, "Relay backoffs", value);
 
+	json_object *port_mapping = get_object_member(punch, "port_mapping");
+	if (port_mapping) {
+		char *requested = join_string_array(get_array_member(port_mapping, "requested"));
+		char *active = join_string_array(get_array_member(port_mapping, "active"));
+
+		add_key_value_row(table, "Port mapping", onoff(get_bool_member(port_mapping, "available")));
+		add_key_value_row(table, "Port mapping requested", requested);
+		add_key_value_row(table, "Port mapping active", active);
+		format_counter(value, get_int_member(port_mapping, "mapping_count"));
+		add_key_value_row(table, "Port mappings", value);
+
+		free(requested);
+		free(active);
+	}
+
 	json_object *task_summary = get_object_member(punch, "task_summary");
 	if (task_summary) {
 		format_counter(value, get_int_member(task_summary, "latest_tasks"));
@@ -536,6 +552,67 @@ static void print_punch_table(json_object *punch) {
 	}
 
 	print_status_table("Punch", table);
+}
+
+/** Formats the fixed backend flags of a port mapping entry */
+static void format_fixed_port_mapping_flags(char buf[32], json_object *fixed) {
+	const char *natpmp = get_bool_member(fixed, "natpmp") ? "nat-pmp" : "";
+	const char *upnp = get_bool_member(fixed, "upnp_igd") ? "upnp-igd" : "";
+	const char *pcp = get_bool_member(fixed, "pcp") ? "pcp" : "";
+
+	if (!*natpmp && !*upnp && !*pcp) {
+		snprintf(buf, 32, "-");
+		return;
+	}
+
+	snprintf(
+		buf, 32, "%s%s%s%s%s", natpmp, *natpmp && (*upnp || *pcp) ? "," : "", upnp,
+		*upnp && *pcp ? "," : "", pcp);
+}
+
+/** Prints automatic port mapping lease state as a table */
+static void print_port_mapping_table(json_object *punch) {
+	json_object *port_mapping = get_object_member(punch, "port_mapping");
+	json_object *mappings = get_array_member(port_mapping, "mappings");
+	size_t len = mappings ? json_object_array_length(mappings) : 0;
+	if (!len)
+		return;
+
+	ft_table_t *table = create_status_table();
+	size_t row = ft_cur_row(table);
+	ft_write_ln(table, "Local Port", "Backends", "Dynamic Refs", "Fixed", "Public Endpoints", "State");
+	mark_header_row(table, row);
+	ft_set_cell_prop(table, FT_ANY_ROW, 0, FT_CPROP_TEXT_ALIGN, FT_ALIGNED_RIGHT);
+
+	for (size_t i = 0; i < len; i++) {
+		json_object *entry = json_object_array_get_idx(mappings, i);
+		if (!entry || json_object_get_type(entry) != json_type_object)
+			continue;
+
+		char port[32], refs[64], fixed_flags[32];
+		format_counter(port, get_int_member(entry, "local_port"));
+
+		json_object *dynamic_refs = get_object_member(entry, "dynamic_refs");
+		snprintf(
+			refs, sizeof(refs), "nat-pmp:%lld upnp-igd:%lld pcp:%lld",
+			(long long)get_int_member(dynamic_refs, "natpmp"),
+			(long long)get_int_member(dynamic_refs, "upnp_igd"),
+			(long long)get_int_member(dynamic_refs, "pcp"));
+
+		format_fixed_port_mapping_flags(fixed_flags, get_object_member(entry, "fixed"));
+
+		json_object *endpoints_array = get_array_member(entry, "public_endpoints");
+		char *backends = join_string_array(get_array_member(entry, "backends"));
+		char *endpoints = join_string_array(endpoints_array);
+		const char *state = endpoints_array && json_object_array_length(endpoints_array) ? "mapped" : "pending";
+
+		ft_write_ln(table, port, backends, refs, fixed_flags, endpoints, state);
+
+		free(backends);
+		free(endpoints);
+	}
+
+	print_status_table("Port Mapping", table);
 }
 
 /** Prints current peer-pair punch task runtime states */
@@ -754,6 +831,7 @@ static void print_status_human(json_object *json) {
 	print_overview_table(json, peer_count, established_count);
 	print_nat_table(get_object_member(json, "nat"));
 	print_punch_table(get_object_member(json, "punch"));
+	print_port_mapping_table(get_object_member(json, "punch"));
 	print_traffic_table(get_object_member(json, "statistics"));
 	print_peer_list_table(peers);
 	print_connection_table(peers);
@@ -1964,6 +2042,7 @@ static json_object *dump_punch(void) {
 	json_object_object_add(ret, "active_candidates", json_object_new_int64(active_candidates));
 	json_object_object_add(ret, "active_suppressions", json_object_new_int64(active_suppressions));
 	json_object_object_add(ret, "active_relay_backoffs", json_object_new_int64(active_relay_backoffs));
+	json_object_object_add(ret, "port_mapping", fastd_port_mapping_status());
 	json_object_object_add(ret, "udp_punch_socket_pool", dump_udp_punch_socket_pool());
 	json_object_object_add(ret, "task_summary", dump_punch_task_summary());
 	json_object_object_add(ret, "task_manager", dump_punch_task_manager());
