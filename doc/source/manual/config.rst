@@ -75,7 +75,9 @@ Example config:
   mappings periodically, and removes them again during shutdown. ``upnp-igd`` uses UPnP IGD to add permanent UDP
   mappings and removes them during shutdown. ``pcp`` uses PCP MAP requests against the IPv4 default gateway, renews
   successful leases, and removes them during shutdown. ``auto`` uses all automatic port mapping backends compiled into
-  fastd. ``nat-pmp yes|no`` is kept as a compatibility alias for ``port-mapping nat-pmp|off``.
+  fastd. ``nat traversal yes`` also selects ``port-mapping auto`` when at least one port mapping backend is
+  available in the build; put ``port-mapping off`` after it to keep automatic router mappings disabled.
+  ``nat-pmp yes|no`` is kept as a compatibility alias for ``port-mapping nat-pmp|off``.
 
   NAT-PMP, UPnP IGD, and PCP do not apply to IPv6-only sockets or sockets created dynamically for individual peer attempts.
   Reusable public UDP punch listeners created by punch-control can request dynamic mappings when automatic port
@@ -89,10 +91,10 @@ Example config:
   Enables or disables fastd's NAT traversal bundle. This option may be set globally, in peer groups, or in peer
   sections; peer settings override peer group settings, and peer group settings inherit from their parent group.
 
-  ``nat traversal yes`` enables ``transport auto``, ``hole-punch auto``, symmetric NAT punching, punch-control
-  relay on the root configuration, controlled data relay fallback, and NAT keepalives. If TURN servers are configured,
-  peers may also use TURN as a fallback while direct punching is unavailable. The switch does not enable NAT-PMP,
-  UPnP IGD, or PCP by itself; configure ``port-mapping auto`` explicitly when external router port mappings should be
+  ``nat traversal yes`` enables ``transport auto``, ``hole-punch auto``, ``port-mapping auto`` when supported by the
+  build, symmetric NAT punching, punch-control relay on the root configuration, controlled data relay fallback, and
+  NAT keepalives. If TURN servers are configured, peers may also use TURN as a fallback while direct punching is
+  unavailable. Put ``port-mapping off`` after ``nat traversal yes`` when automatic router mappings should not be
   requested.
 
   ``nat traversal no`` disables inherited NAT traversal behavior for that scope. On a peer, it disables automatic

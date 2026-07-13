@@ -173,6 +173,7 @@
 		fastd_port_mapping_mode_t mode);
 	static bool fastd_config_set_turn_relay(
 		YYLTYPE *loc, fastd_parser_state_t *state, fastd_tristate_t *dest, bool enabled);
+	static void fastd_config_enable_nat_traversal_port_mapping(fastd_port_mapping_mode_t *dest);
 	static void fastd_config_set_nat_traversal(
 		YYLTYPE *loc, fastd_parser_state_t *state, fastd_peer_group_t *group, fastd_peer_t *peer,
 		bool enabled);
@@ -1027,6 +1028,11 @@ static bool fastd_config_set_turn_relay(
 	return true;
 }
 
+static void fastd_config_enable_nat_traversal_port_mapping(fastd_port_mapping_mode_t *dest) {
+	if (fastd_config_port_mapping_supported(PORT_MAPPING_AUTO, NULL))
+		*dest = PORT_MAPPING_AUTO;
+}
+
 static void fastd_config_set_nat_traversal(
 	UNUSED YYLTYPE *loc, UNUSED fastd_parser_state_t *state, fastd_peer_group_t *group, fastd_peer_t *peer,
 	bool enabled) {
@@ -1036,9 +1042,10 @@ static void fastd_config_set_nat_traversal(
 		peer->punch_symmetric = enabled ? FASTD_TRISTATE_TRUE : FASTD_TRISTATE_FALSE;
 		peer->turn_relay = enabled ? FASTD_TRISTATE_UNDEF : FASTD_TRISTATE_FALSE;
 
-		if (enabled)
+		if (enabled) {
 			peer->transport = TRANSPORT_AUTO;
-		else {
+			fastd_config_enable_nat_traversal_port_mapping(&peer->port_mapping);
+		} else {
 			peer->transport = TRANSPORT_UDP;
 			peer->port_mapping = PORT_MAPPING_OFF;
 		}
@@ -1050,7 +1057,9 @@ static void fastd_config_set_nat_traversal(
 	group->hole_punch = enabled ? HOLE_PUNCH_AUTO : HOLE_PUNCH_OFF;
 	group->turn_relay = enabled ? FASTD_TRISTATE_UNDEF : FASTD_TRISTATE_FALSE;
 	group->transport = enabled ? TRANSPORT_AUTO : TRANSPORT_UDP;
-	if (!enabled)
+	if (enabled)
+		fastd_config_enable_nat_traversal_port_mapping(&group->port_mapping);
+	else
 		group->port_mapping = PORT_MAPPING_OFF;
 
 	if (group == conf.peer_group) {

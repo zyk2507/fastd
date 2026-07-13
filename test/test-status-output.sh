@@ -69,7 +69,7 @@ secret "$SEC";
 bind 127.0.0.1:0;
 status socket "$WORK/status.sock";
 punch max attempts 3;
-punch data relay yes;
+nat traversal yes;
 peer "dummy" { key "$PUB"; hole-punch udp; }
 EOF
 
@@ -145,8 +145,12 @@ if (doc.get("punch") or {}).get("max_attempts") != 3:
     raise SystemExit("unexpected max_attempts")
 if (doc.get("punch") or {}).get("data_relay") is not True:
     raise SystemExit("unexpected data_relay")
-if (doc.get("punch") or {}).get("data_relay_explicit") is not True:
+punch = doc.get("punch") or {}
+if punch.get("data_relay_explicit") is not False:
     raise SystemExit("unexpected data_relay_explicit")
+requested = ((punch.get("port_mapping") or {}).get("requested") or [])
+if "pcp" not in requested:
+    raise SystemExit(f"nat traversal did not request automatic port mapping backends: {requested!r}")
 PY
 
 printf 'ok 3 - JSON status output remains parseable\n'

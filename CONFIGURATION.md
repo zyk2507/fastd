@@ -291,9 +291,10 @@ turn server "<address>" port <port> user "<username>" password "<password>";
 - `transport udp`：默认 UDP 数据传输。
 - `transport tcp`：通过 TCP stream 传输 fastd packet。
 - `transport auto`：先探测 TCP，失败后回退 UDP。握手中会校验双方实际 transport 一致。
-- `port-mapping`：自动映射固定 IPv4 UDP bind 端口。`nat-pmp` 和 `pcp` 会向 IPv4 默认网关申请可续租映射；`upnp-igd` 会通过 UPnP IGD 添加 UDP 映射；`auto` 使用当前构建中可用的所有后端。PCP/NAT-PMP/UPnP IGD 不处理 IPv6-only socket，也不映射每次 peer 尝试用的临时 socket；punch-control 创建的可复用 public UDP listener 可以申请动态映射。
+- `port-mapping`：自动映射固定 IPv4 UDP bind 端口。`nat-pmp` 和 `pcp` 会向 IPv4 默认网关申请可续租映射；`upnp-igd` 会通过 UPnP IGD 添加 UDP 映射；`auto` 使用当前构建中可用的所有后端。`nat traversal yes` 会在构建支持时自动选择 `port-mapping auto`；若不希望自动申请路由器映射，在 `nat traversal yes` 后显式写 `port-mapping off`。PCP/NAT-PMP/UPnP IGD 不处理 IPv6-only socket，也不映射每次 peer 尝试用的临时 socket；punch-control 创建的可复用 public UDP listener 可以申请动态映射。
 - `nat-pmp yes|no`：兼容别名，等价于 `port-mapping nat-pmp|off`。
 - `hole-punch tcp|udp|auto`：启用确定性 IPv4 打洞；默认关闭。双方需要知道彼此公网 IPv4 endpoint；在 TAP relay 转发网络中，`peer discovery yes` 可以由可信 relay 提供这个 endpoint。
+- `nat traversal yes`：一键启用 `transport auto`、`hole-punch auto`、`port-mapping auto`（构建支持时）、symmetric NAT 策略、root 上的 punch-control relay、受控 data relay fallback 和 NAT keepalive。需要关闭自动端口映射时，在其后写 `port-mapping off`。
 - `stun server`、`punch control relay`、`punch data relay`、`punch max sockets`、`punch max packet(s)` 只能写在主配置中；`punch symmetric` 可写在主配置或 peer 配置中。
 - `stun server`：启用全局 NAT 类型识别，结果用于 status 输出和 punch control NAT 元数据交换。该指令不同于 `realm server ... stun server ...`；realm 内嵌 STUN 只用于向 realm server 通告当前 UDP endpoint。
 - `punch control relay yes`：启用控制面 endpoint/NAT 信息转发，可在 `forward no` 的可信公网节点上帮助两个已配置彼此公钥的 NAT 后 peer 发起直接 UDP 打洞。
