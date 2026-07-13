@@ -1628,13 +1628,28 @@ static json_object *dump_natpmp_backend_status(const fastd_port_mapping_t *mappi
 }
 
 /** Dumps UPnP IGD backend status */
-static json_object *dump_upnp_backend_status(const fastd_port_mapping_t *mapping) {
+static json_object *dump_upnp_backend_status(fastd_port_mapping_t *mapping) {
 	json_object *ret = json_object_new_object();
 #ifdef WITH_UPNP_IGD
+	bool discovery_in_flight = false;
+	if (mapping) {
+		pthread_mutex_lock(&mapping->upnp_mutex);
+		discovery_in_flight = mapping->upnp_worker_running;
+		pthread_mutex_unlock(&mapping->upnp_mutex);
+	}
+
+	fastd_timeout_t retry_timeout =
+		mapping && fastd_task_scheduled(&mapping->upnp_task)
+			? fastd_task_timeout(&mapping->upnp_task)
+			: FASTD_TIMEOUT_INV;
 	json_object_object_add(ret, "compiled", json_object_new_boolean(true));
 	json_object_object_add(ret, "requested", json_object_new_boolean(mapping && mapping->upnp_igd_requested));
 	json_object_object_add(ret, "active", json_object_new_boolean(mapping && mapping->use_upnp_igd));
 	json_object_object_add(ret, "initialized", json_object_new_boolean(mapping && mapping->upnp_initialized));
+	json_object_object_add(ret, "discovery_in_flight", json_object_new_boolean(discovery_in_flight));
+	json_object_object_add(
+		ret, "retry_in",
+		retry_timeout == FASTD_TIMEOUT_INV ? NULL : json_object_new_int64(retry_timeout > ctx.now ? retry_timeout - ctx.now : 0));
 	json_object_object_add(
 		ret, "external_address", mapping ? wrap_mapping_address_or_null(&mapping->upnp_external_addr) : NULL);
 	json_object_object_add(
@@ -1645,6 +1660,8 @@ static json_object *dump_upnp_backend_status(const fastd_port_mapping_t *mapping
 	json_object_object_add(ret, "requested", json_object_new_boolean(mapping && mapping->upnp_igd_requested));
 	json_object_object_add(ret, "active", json_object_new_boolean(false));
 	json_object_object_add(ret, "initialized", json_object_new_boolean(false));
+	json_object_object_add(ret, "discovery_in_flight", json_object_new_boolean(false));
+	json_object_object_add(ret, "retry_in", NULL);
 	json_object_object_add(ret, "external_address", NULL);
 	json_object_object_add(ret, "lan_address", NULL);
 #endif
@@ -1791,7 +1808,7 @@ static json_object *dump_port_mapping_entry(
 
 /** Dumps automatic port mapping state for the status socket */
 struct json_object *fastd_port_mapping_status(void) {
-	const fastd_port_mapping_t *mapping = ctx.port_mapping;
+	fastd_port_mapping_t *mapping = ctx.port_mapping;
 	json_object *ret = json_object_new_object();
 	json_object *backend_status = json_object_new_object();
 	json_object *mappings = json_object_new_array();

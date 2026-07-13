@@ -6891,6 +6891,15 @@ static void test_upnp_discovery_result_retries_and_rejects_stale_generation(void
 	fastd_port_mapping_handle_upnp_igd_result(&result);
 	assert_int_equal(fastd_port_mapping_test_upnp_retry_timeout(), 301000);
 
+#ifdef WITH_STATUS_SOCKET
+	struct json_object *port_mapping = fastd_port_mapping_status();
+	struct json_object *backends = json_get_object_required(port_mapping, "backends");
+	struct json_object *upnp = json_get_object_required(backends, "upnp_igd");
+	assert_false(json_get_bool_required(upnp, "discovery_in_flight"));
+	assert_int_equal(json_get_int_required(upnp, "retry_in"), 300000);
+	json_object_put(port_mapping);
+#endif
+
 	fastd_port_mapping_release_socket(&sock);
 	fastd_port_mapping_test_end();
 	ctx.port_mapping = old_port_mapping;
