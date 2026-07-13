@@ -71,6 +71,14 @@ test('nat-punch-restricted-netns',
 	timeout : 60,
 )
 
+test('nat-punch-port-restricted-netns',
+	bash,
+	args : [files('test-nat-punch-port-restricted-netns.sh'), fastd_exe.full_path()],
+	protocol : 'tap',
+	is_parallel : false,
+	timeout : 60,
+)
+
 test('nat-punch-iperf-netns',
 	bash,
 	args : [files('test-nat-punch-iperf-netns.sh'), fastd_exe.full_path()],
