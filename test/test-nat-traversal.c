@@ -179,6 +179,7 @@ static size_t test_send_count;
 static fastd_peer_t *test_send_peers[TEST_SEND_HISTORY];
 static size_t test_handshake_count;
 static fastd_peer_t *test_handshake_peer;
+static fastd_socket_t *test_handshake_sock;
 static fastd_peer_transport_t test_handshake_transport;
 static fastd_peer_address_t test_handshake_remote;
 static fastd_peer_t *test_control_send_peer;
@@ -223,6 +224,7 @@ static void test_protocol_handshake_init(
 	const fastd_peer_address_t *remote_addr, fastd_peer_t *peer, unsigned flags UNUSED) {
 	test_handshake_count++;
 	test_handshake_peer = peer;
+	test_handshake_sock = sock;
 	test_handshake_transport = fastd_socket_is_tcp(sock) ? TRANSPORT_TCP : TRANSPORT_UDP;
 	test_handshake_remote = *remote_addr;
 }
@@ -4511,6 +4513,7 @@ static void test_tcp_direct_handshake_reuses_unestablished_candidate_socket(void
 	conf.protocol = &test_protocol;
 	test_handshake_count = 0;
 	test_handshake_peer = NULL;
+	test_handshake_sock = NULL;
 	test_handshake_transport = TRANSPORT_UNSET;
 	test_handshake_remote = (fastd_peer_address_t){};
 	fastd_poll_init();
@@ -4561,6 +4564,7 @@ static void test_tcp_direct_handshake_reuses_unestablished_candidate_socket(void
 	assert_ptr_equal(tcp_sock->peer, &peer);
 	assert_int_equal(test_handshake_count, 1);
 	assert_ptr_equal(test_handshake_peer, &peer);
+	assert_ptr_equal(test_handshake_sock, tcp_sock);
 	assert_int_equal(test_handshake_transport, TRANSPORT_TCP);
 	assert_true(fastd_peer_address_equal(&test_handshake_remote, &endpoint));
 
@@ -4588,6 +4592,105 @@ static void test_tcp_direct_handshake_reuses_unestablished_candidate_socket(void
 	ctx.now = old_now;
 	test_handshake_count = 0;
 	test_handshake_peer = NULL;
+	test_handshake_sock = NULL;
+	test_handshake_transport = TRANSPORT_UNSET;
+	test_handshake_remote = (fastd_peer_address_t){};
+}
+
+static void test_tcp_direct_handshake_reuses_established_candidate_socket(void **state UNUSED) {
+	const fastd_protocol_t *old_protocol = conf.protocol;
+	fastd_peer_group_t *old_peer_group = conf.peer_group;
+	int old_epoll_fd = ctx.epoll_fd;
+	__typeof__(ctx.tcp_socks) old_tcp_socks = ctx.tcp_socks;
+	__typeof__(ctx.deferred_socks) old_deferred_socks = ctx.deferred_socks;
+	int64_t old_now = ctx.now;
+
+	ctx.now = 1000;
+	ctx.tcp_socks = (__typeof__(ctx.tcp_socks)){};
+	ctx.deferred_socks = (__typeof__(ctx.deferred_socks)){};
+	conf.protocol = &test_protocol;
+	test_handshake_count = 0;
+	test_handshake_peer = NULL;
+	test_handshake_sock = NULL;
+	test_handshake_transport = TRANSPORT_UNSET;
+	test_handshake_remote = (fastd_peer_address_t){};
+	fastd_poll_init();
+
+	fastd_peer_group_t group = {
+		.transport = TRANSPORT_TCP,
+		.hole_punch = HOLE_PUNCH_TCP,
+		.nat_traversal = FASTD_TRISTATE_TRUE,
+		.max_connections = -1,
+	};
+	conf.peer_group = &group;
+
+	fastd_peer_address_t active_addr = addr4(0xc6336407, 51000);
+	fastd_peer_address_t active_local = addr4(0x0a000001, 10000);
+	fastd_socket_t active_sock = {
+		.type = SOCKET_TYPE_UDP,
+		.bound_addr = &active_local,
+	};
+	fastd_peer_address_t endpoint = addr4(0xc6336408, 52000);
+	fastd_peer_t peer = {
+		.id = 20,
+		.group = &group,
+		.config_state = CONFIG_STATIC,
+		.name = "peer-b",
+		.state = STATE_ESTABLISHED,
+		.transport = TRANSPORT_TCP,
+		.hole_punch = HOLE_PUNCH_TCP,
+		.nat_traversal = FASTD_TRISTATE_TRUE,
+		.sock = &active_sock,
+		.local_address = active_local,
+		.address = active_addr,
+	};
+
+	int fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, IPPROTO_TCP);
+	assert_true(fd >= 0);
+
+	fastd_socket_t *tcp_sock = fastd_new0(fastd_socket_t);
+	tcp_sock->fd = FASTD_POLL_FD(POLL_TYPE_SOCKET, fd);
+	tcp_sock->type = SOCKET_TYPE_TCP_CONNECTION;
+	tcp_sock->peer = &peer;
+	tcp_sock->peer_addr = endpoint;
+	tcp_sock->bound_addr = fastd_new(fastd_peer_address_t);
+	*tcp_sock->bound_addr = addr4(0x0a000001, 10001);
+	VECTOR_ADD(ctx.tcp_socks, tcp_sock);
+	fastd_poll_fd_register(&tcp_sock->fd);
+
+	assert_true(fastd_peer_add_punch_control_candidate_transport(
+		&peer, &endpoint, 120, false, 0, 0, DIRECT_CANDIDATE_TRANSPORT_TCP));
+	assert_true(fastd_peer_send_direct_handshake_transport(&peer, &endpoint, TRANSPORT_TCP));
+	assert_true(fastd_peer_send_direct_handshake_transport(&peer, &endpoint, TRANSPORT_TCP));
+
+	assert_int_equal(VECTOR_LEN(ctx.tcp_socks), 1);
+	assert_ptr_equal(VECTOR_INDEX(ctx.tcp_socks, 0), tcp_sock);
+	assert_ptr_equal(peer.sock, &active_sock);
+	assert_ptr_equal(tcp_sock->peer, &peer);
+	assert_int_equal(test_handshake_count, 2);
+	assert_ptr_equal(test_handshake_peer, &peer);
+	assert_ptr_equal(test_handshake_sock, tcp_sock);
+	assert_int_equal(test_handshake_transport, TRANSPORT_TCP);
+	assert_true(fastd_peer_address_equal(&test_handshake_remote, &endpoint));
+
+	fastd_socket_close(tcp_sock);
+	fastd_socket_free_dynamic(tcp_sock);
+	fastd_socket_free_deferred();
+	fastd_poll_free();
+	VECTOR_FREE(ctx.tcp_socks);
+	VECTOR_FREE(ctx.deferred_socks);
+	VECTOR_FREE(peer.direct_candidates);
+	VECTOR_FREE(peer.punch_suppressions);
+	fastd_task_unschedule(&peer.task);
+	conf.protocol = old_protocol;
+	conf.peer_group = old_peer_group;
+	ctx.epoll_fd = old_epoll_fd;
+	ctx.tcp_socks = old_tcp_socks;
+	ctx.deferred_socks = old_deferred_socks;
+	ctx.now = old_now;
+	test_handshake_count = 0;
+	test_handshake_peer = NULL;
+	test_handshake_sock = NULL;
 	test_handshake_transport = TRANSPORT_UNSET;
 	test_handshake_remote = (fastd_peer_address_t){};
 }
@@ -7108,6 +7211,7 @@ int main(void) {
 		cmocka_unit_test(test_punch_task_manager_skips_unpunchable_tcp_only_metadata),
 		cmocka_unit_test(test_punch_send_tcp_preserves_multiple_received_endpoints),
 		cmocka_unit_test(test_tcp_direct_handshake_reuses_unestablished_candidate_socket),
+		cmocka_unit_test(test_tcp_direct_handshake_reuses_established_candidate_socket),
 		cmocka_unit_test(test_tcp_punch_candidate_binds_nat_source_port),
 		cmocka_unit_test(test_punch_maintenance_announces_unpunchable_tcp_nat_metadata),
 		cmocka_unit_test(test_punch_accepts_relayed_nat_metadata),

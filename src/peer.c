@@ -2534,8 +2534,11 @@ static bool send_handshake_address_transport(
 
 		if ((force_tcp_candidate || tcp_only_candidate) && fastd_peer_hole_punch_allows(peer, TRANSPORT_TCP) &&
 		    fastd_peer_transport_allows(fastd_peer_get_transport(peer), TRANSPORT_TCP)) {
-			const fastd_socket_t *base_sock = default_udp_socket_for_address(addr);
-			sock = fastd_socket_open_tcp(peer, base_sock, addr);
+			sock = fastd_socket_find_tcp_peer_connection(peer, addr);
+			if (!sock) {
+				const fastd_socket_t *base_sock = default_udp_socket_for_address(addr);
+				sock = fastd_socket_open_tcp(peer, base_sock, addr);
+			}
 		} else if (preferred_transport != TRANSPORT_TCP && (!sock || fastd_socket_is_tcp(sock)) &&
 			   direct_candidate_mask_allows(candidate_transports, TRANSPORT_UDP) &&
 			   fastd_peer_transport_allows(fastd_peer_get_transport(peer), TRANSPORT_UDP)) {

@@ -423,6 +423,25 @@ static fastd_socket_t *find_tcp_hole_punch_socket(fastd_peer_t *peer, const fast
 	return NULL;
 }
 
+/** Finds an open TCP connection already targeting an endpoint for a peer */
+fastd_socket_t *fastd_socket_find_tcp_peer_connection(
+	const fastd_peer_t *peer, const fastd_peer_address_t *remote_addr) {
+	size_t i;
+	for (i = 0; i < VECTOR_LEN(ctx.tcp_socks); i++) {
+		fastd_socket_t *sock = VECTOR_INDEX(ctx.tcp_socks, i);
+		if (sock->type != SOCKET_TYPE_TCP_CONNECTION || !fastd_socket_is_open(sock))
+			continue;
+
+		if (sock->peer != peer && sock->hole_punch_peer != peer)
+			continue;
+
+		if (fastd_peer_address_equal(&sock->peer_addr, remote_addr))
+			return sock;
+	}
+
+	return NULL;
+}
+
 /** Opens a TCP socket for active TCP hole punching */
 static fastd_socket_t *open_tcp_hole_punch_socket(fastd_peer_t *peer, const fastd_peer_address_t *remote_addr) {
 	if (VECTOR_LEN(ctx.tcp_socks) >= TCP_MAX_CONNECTIONS) {
