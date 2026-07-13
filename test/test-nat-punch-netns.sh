@@ -1038,18 +1038,20 @@ EOF
 }
 
 write_restricted_confs() {
+	local peer_port=$1 relay_port=$2
+
 	cat > "$WORK/a.conf" <<EOF
 mode multitap;
 interface "fda-%n";
 persist interface no;
 method "salsa2012+umac";
 secret "$SEC_A";
-bind 0.0.0.0:14001;
+bind 0.0.0.0:$peer_port;
 status socket "$WORK/a.status";
 stun server "10.52.0.1" port 3478;
 stun server "10.52.0.1" port 3479;
 $(punch_test_limits)
-peer "c" { key "$PUB_C"; remote 10.52.0.1 port 14000; transport udp; }
+peer "c" { key "$PUB_C"; remote 10.52.0.1 port $relay_port; transport udp; }
 peer "b" { key "$PUB_B"; nat traversal yes; }
 EOF
 
@@ -1059,12 +1061,12 @@ interface "fdb-%n";
 persist interface no;
 method "salsa2012+umac";
 secret "$SEC_B";
-bind 0.0.0.0:14001;
+bind 0.0.0.0:$peer_port;
 status socket "$WORK/b.status";
 stun server "10.52.0.1" port 3478;
 stun server "10.52.0.1" port 3479;
 $(punch_test_limits)
-peer "c" { key "$PUB_C"; remote 10.52.0.1 port 14000; transport udp; }
+peer "c" { key "$PUB_C"; remote 10.52.0.1 port $relay_port; transport udp; }
 peer "a" { key "$PUB_A"; nat traversal yes; }
 EOF
 
@@ -1074,7 +1076,7 @@ interface "fdc-%n";
 persist interface no;
 method "salsa2012+umac";
 secret "$SEC_C";
-bind 10.52.0.1:14000;
+bind 10.52.0.1:$relay_port;
 status socket "$WORK/c.status";
 forward no;
 peer discovery no;
@@ -1940,7 +1942,7 @@ run_restricted_nat_tests() {
 		run ip netns exec "$ns" nft add rule ip restricted forward iifname pub udp dport 14001 drop
 	done
 
-	write_restricted_confs
+	write_restricted_confs 14001 14000
 	start_fastds
 
 	ok=false
