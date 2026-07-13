@@ -43,7 +43,7 @@ OPTION_ARG(option_method, "--method", "<method>", "Sets the encryption method");
 OPTION_ARG(option_compression, "--compression", "none|zstd", "Sets the payload compression algorithm; default is none");
 OPTION_ARG(option_compression_level, "--compression-level", "1-22", "Sets the zstd compression level; default is 3");
 OPTION_ARG(
-	option_port_mapping, "--port-mapping", "off|nat-pmp|upnp-igd|auto",
+	option_port_mapping, "--port-mapping", "off|nat-pmp|upnp-igd|pcp|auto",
 	"Sets automatic UDP port mapping; default is off");
 OPTION(option_natpmp, "--nat-pmp", "Enables NAT-PMP port mapping for fixed IPv4 bind sockets");
 OPTION(option_forward, "--forward", "Enables forwarding of packets between peers; read the documentation before use!");

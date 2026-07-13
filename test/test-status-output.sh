@@ -88,9 +88,23 @@ done
 
 [[ -S "$WORK/status.sock" ]] || fail 'status socket did not become available'
 
-printf '1..2\n'
+printf '1..3\n'
 
 CURRENT_TEST=1
+"$FASTD" --help > "$WORK/help.txt" ||
+	fail 'help query failed'
+
+python3 - "$WORK/help.txt" <<'PY' || fail 'help output does not advertise PCP port mapping'
+import sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+if "--port-mapping" not in text or "off|nat-pmp|upnp-igd|pcp|auto" not in text:
+    raise SystemExit("missing PCP in port-mapping help")
+PY
+
+printf 'ok 1 - help advertises PCP port mapping\n'
+
+CURRENT_TEST=2
 "$FASTD" --status-socket "$WORK/status.sock" --status > "$WORK/human.status" ||
 	fail 'human status query failed'
 
@@ -116,9 +130,9 @@ if "Task manager runs" not in text or "Demand waiting" not in text:
     raise SystemExit("punch task-manager summary not rendered")
 PY
 
-printf 'ok 1 - human status uses libfort tables\n'
+printf 'ok 2 - human status uses libfort tables\n'
 
-CURRENT_TEST=2
+CURRENT_TEST=3
 "$FASTD" --status-socket "$WORK/status.sock" --status --json > "$WORK/status.json" ||
 	fail 'JSON status query failed'
 python3 -m json.tool "$WORK/status.json" >/dev/null || fail 'JSON status output is invalid'
@@ -135,4 +149,4 @@ if (doc.get("punch") or {}).get("data_relay_explicit") is not True:
     raise SystemExit("unexpected data_relay_explicit")
 PY
 
-printf 'ok 2 - JSON status output remains parseable\n'
+printf 'ok 3 - JSON status output remains parseable\n'
