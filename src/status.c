@@ -494,18 +494,35 @@ static void print_punch_table(json_object *punch) {
 
 	json_object *task_manager = get_object_member(punch, "task_manager");
 	if (task_manager) {
-		static const char *const names[] = {
-			"runs",		     "pairs",	      "collected",	 "launched",
-			"waiting",	     "in_flight",     "blacklisted",	 "suppressed",
-			"aborted",	     "recent_demand", "missing_metadata", "unpunchable",
-			"metadata_requests", "metadata_relays", "runtime_states", "history_count",
-			"outcome_success",   "outcome_failed", "outcome_busy",
+		static const struct {
+			const char *key;
+			const char *label;
+		} fields[] = {
+			{ "runs", "Task manager runs" },
+			{ "pairs", "Pairs considered" },
+			{ "collected", "Pairs collected" },
+			{ "launched", "Pairs launched" },
+			{ "waiting", "Pairs waiting" },
+			{ "demand_waiting", "Demand waiting" },
+			{ "in_flight", "In flight" },
+			{ "blacklisted", "Blacklisted" },
+			{ "suppressed", "Suppressed" },
+			{ "aborted", "Aborted" },
+			{ "recent_demand", "Recent demand" },
+			{ "missing_metadata", "Missing metadata" },
+			{ "unpunchable", "Unpunchable" },
+			{ "metadata_requests", "Metadata requests" },
+			{ "metadata_relays", "Metadata relays" },
+			{ "runtime_states", "Runtime states" },
+			{ "history_count", "Pair task history" },
+			{ "outcome_success", "Outcome success" },
+			{ "outcome_failed", "Outcome failed" },
+			{ "outcome_busy", "Outcome busy" },
 		};
 
-		size_t i;
-		for (i = 0; i < array_size(names); i++) {
-			format_counter(value, get_int_member(task_manager, names[i]));
-			add_key_value_row(table, names[i], value);
+		for (size_t i = 0; i < array_size(fields); i++) {
+			format_counter(value, get_int_member(task_manager, fields[i].key));
+			add_key_value_row(table, fields[i].label, value);
 		}
 	}
 
@@ -664,6 +681,50 @@ static void print_p2p_pair_table(json_object *punch) {
 	}
 
 	print_status_table("P2P Pairs", table);
+}
+
+/** Prints recent peer-pair punch task-manager lifecycle snapshots */
+static void print_p2p_task_table(json_object *punch) {
+	json_object *task_manager = get_object_member(punch, "task_manager");
+	json_object *history = get_array_member(task_manager, "history");
+	size_t len = history ? json_object_array_length(history) : 0;
+	if (!len)
+		return;
+
+	ft_table_t *table = create_status_table();
+	size_t row = ft_cur_row(table);
+	ft_write_ln(table, "ID", "Age", "Peer A", "Peer B", "Stage", "Subject", "Destination", "Sent", "Backoff", "Next");
+	mark_header_row(table, row);
+	ft_set_cell_prop(table, FT_ANY_ROW, 0, FT_CPROP_TEXT_ALIGN, FT_ALIGNED_RIGHT);
+	ft_set_cell_prop(table, FT_ANY_ROW, 7, FT_CPROP_TEXT_ALIGN, FT_ALIGNED_RIGHT);
+	ft_set_cell_prop(table, FT_ANY_ROW, 8, FT_CPROP_TEXT_ALIGN, FT_ALIGNED_RIGHT);
+
+	for (size_t i = 0; i < len; i++) {
+		json_object *task = json_object_array_get_idx(history, i);
+		if (!task || json_object_get_type(task) != json_type_object)
+			continue;
+
+		char id[32], age[64], sent[32], backoff[32], next[64];
+		format_counter(id, get_int_member(task, "id"));
+		format_duration(age, get_int_member(task, "updated_age"));
+		format_counter(sent, get_int_member(task, "candidates_sent"));
+		format_counter(backoff, get_int_member(task, "backoff_skipped"));
+
+		int64_t next_ms = get_int_member(task, "next_retry_ms");
+		if (next_ms)
+			format_duration(next, next_ms);
+		else
+			snprintf(next, sizeof(next), "-");
+
+		ft_write_ln(
+			table, id, age, value_or_dash(get_string_member(task, "peer_a")),
+			value_or_dash(get_string_member(task, "peer_b")),
+			value_or_dash(get_string_member(task, "stage")),
+			value_or_dash(get_string_member(task, "subject")),
+			value_or_dash(get_string_member(task, "destination")), sent, backoff, next);
+	}
+
+	print_status_table("P2P Tasks", table);
 }
 
 /** Adds one traffic statistics row */
@@ -837,6 +898,7 @@ static void print_status_human(json_object *json) {
 	print_connection_table(peers);
 	print_hole_punch_table(peers);
 	print_p2p_pair_table(get_object_member(json, "punch"));
+	print_p2p_task_table(get_object_member(json, "punch"));
 }
 
 /** Queries a status socket and prints its result */

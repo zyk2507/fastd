@@ -112,6 +112,8 @@ if "Max attempts" not in text:
     raise SystemExit("punch attempt limit not rendered")
 if "Data relay" not in text:
     raise SystemExit("punch data relay state not rendered")
+if "Task manager runs" not in text or "Demand waiting" not in text:
+    raise SystemExit("punch task-manager summary not rendered")
 PY
 
 printf 'ok 1 - human status uses libfort tables\n'
