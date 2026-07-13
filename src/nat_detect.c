@@ -1283,8 +1283,9 @@ static void start_worker(void) {
 	pthread_mutex_unlock(&ctx.nat_detect->mutex);
 
 	pthread_t thread;
-	if (pthread_create(&thread, &ctx.detached_thread, nat_worker_thread, work)) {
-		pr_error_errno("unable to create NAT detection worker");
+	int ret = pthread_create(&thread, &ctx.detached_thread, nat_worker_thread, work);
+	if (ret) {
+		pr_error("unable to create NAT detection worker: %s", strerror(ret));
 
 		pthread_mutex_lock(&ctx.nat_detect->mutex);
 		ctx.nat_detect->worker_running = false;
