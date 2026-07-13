@@ -13,6 +13,7 @@
 
 #include "async.h"
 #include "fastd.h"
+#include "port_mapping.h"
 #include "realm.h"
 
 #include <sys/uio.h>
@@ -85,6 +86,15 @@ static void handle_realm_candidate(const fastd_async_realm_candidate_t *candidat
 	fastd_realm_add_candidate(candidate->source_id, candidate->source_key, candidate->addr, candidate->n_addr);
 }
 
+#ifdef WITH_UPNP_IGD
+
+/** Applies a completed background UPnP IGD discovery in the main thread */
+static void handle_upnp_igd_result(const fastd_async_upnp_igd_result_t *result) {
+	fastd_port_mapping_handle_upnp_igd_result(result);
+}
+
+#endif
+
 
 /** Reads and handles a single notification from the async notification socket */
 void fastd_async_handle(void) {
@@ -125,6 +135,12 @@ void fastd_async_handle(void) {
 	case ASYNC_TYPE_REALM_CANDIDATE:
 		handle_realm_candidate((const fastd_async_realm_candidate_t *)buf);
 		break;
+
+#ifdef WITH_UPNP_IGD
+	case ASYNC_TYPE_UPNP_IGD_RESULT:
+		handle_upnp_igd_result((const fastd_async_upnp_igd_result_t *)buf);
+		break;
+#endif
 
 	default:
 		exit_bug("fastd_async_handle: unknown type");

@@ -136,6 +136,7 @@ typedef enum fastd_task_type {
 	TASK_TYPE_MAINTENANCE, /**< Scheduled maintenance */
 	TASK_TYPE_PEER,        /**< Peer maintenance (handshake, reset, keepalive) */
 	TASK_TYPE_NATPMP,      /**< NAT-PMP request retry or lease renewal */
+	TASK_TYPE_UPNP_IGD,    /**< UPnP IGD discovery retry */
 	TASK_TYPE_PCP,         /**< PCP request retry or lease renewal */
 	TASK_TYPE_TURN,        /**< TURN relay maintenance */
 	TASK_TYPE_REALM,       /**< Realm rendezvous maintenance */

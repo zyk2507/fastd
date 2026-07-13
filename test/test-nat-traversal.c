@@ -11,6 +11,8 @@
 #include "peer_hashtable.h"
 #include "hole_punch.h"
 #include "punch_rpc.h"
+#include "async.h"
+#include "port_mapping.h"
 
 #include <setjmp.h>
 #include <stdarg.h>
@@ -2508,6 +2510,90 @@ static void test_punch_data_relay_receive_path_bypasses_local_iface(void **state
 	test_send_count = 0;
 	assert_int_equal(close(pipefd[0]), 0);
 	assert_int_equal(close(pipefd[1]), 0);
+}
+
+static void test_forwarded_send_all_records_nat_traversal_demand(void **state UNUSED) {
+	__typeof__(ctx.peers) old_peers = ctx.peers;
+	__typeof__(ctx.punch_pair_states) old_pair_states = ctx.punch_pair_states;
+	const fastd_protocol_t *old_protocol = conf.protocol;
+	fastd_mode_t old_mode = conf.mode;
+	size_t old_encrypt_headroom = conf.encrypt_headroom;
+	size_t old_max_buffer = ctx.max_buffer;
+	fastd_timeout_t old_now = ctx.now;
+
+	ctx.peers = (__typeof__(ctx.peers)){};
+	ctx.punch_pair_states = (__typeof__(ctx.punch_pair_states)){};
+	conf.protocol = &test_protocol;
+	conf.mode = MODE_MULTITAP;
+	conf.encrypt_headroom = 0;
+	ctx.max_buffer = 2048;
+	ctx.now = 1000;
+	fastd_init_buffers();
+
+	fastd_peer_group_t nat_group = {
+		.nat_traversal = FASTD_TRISTATE_TRUE,
+	};
+	fastd_peer_group_t plain_group = {
+		.nat_traversal = FASTD_TRISTATE_FALSE,
+	};
+	fastd_peer_t source = {
+		.id = 10,
+		.name = "source",
+		.group = &nat_group,
+		.state = STATE_ESTABLISHED,
+	};
+	fastd_peer_t dest_nat = {
+		.id = 20,
+		.name = "dest-nat",
+		.group = &nat_group,
+		.state = STATE_ESTABLISHED,
+	};
+	fastd_peer_t dest_plain = {
+		.id = 30,
+		.name = "dest-plain",
+		.group = &plain_group,
+		.state = STATE_ESTABLISHED,
+	};
+	VECTOR_ADD(ctx.peers, &source);
+	VECTOR_ADD(ctx.peers, &dest_nat);
+	VECTOR_ADD(ctx.peers, &dest_plain);
+
+	fastd_eth_addr_t source_mac = { .data = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 } };
+	fastd_eth_addr_t multicast_mac = { .data = { 0x01, 0x00, 0x5e, 0x00, 0x00, 0xfb } };
+
+	test_send_peer = NULL;
+	test_send_count = 0;
+	memset(test_send_peers, 0, sizeof(test_send_peers));
+	fastd_send_data(test_eth_frame(multicast_mac, source_mac), &source, NULL);
+	assert_int_equal(test_send_count, 2);
+	assert_ptr_equal(test_send_peers[0], &dest_nat);
+	assert_ptr_equal(test_send_peers[1], &dest_plain);
+	assert_int_equal(VECTOR_LEN(ctx.punch_pair_states), 1);
+	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).peer_a_id, 10);
+	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).peer_b_id, 20);
+	assert_int_equal(VECTOR_INDEX(ctx.punch_pair_states, 0).demand_seq, 1);
+
+	VECTOR_FREE(ctx.punch_pair_states);
+	ctx.punch_pair_states = (__typeof__(ctx.punch_pair_states)){};
+	source.nat_traversal = FASTD_TRISTATE_FALSE;
+	test_send_count = 0;
+	memset(test_send_peers, 0, sizeof(test_send_peers));
+	fastd_send_data(test_eth_frame(multicast_mac, source_mac), &source, NULL);
+	assert_int_equal(test_send_count, 2);
+	assert_int_equal(VECTOR_LEN(ctx.punch_pair_states), 0);
+
+	fastd_cleanup_buffers();
+	VECTOR_FREE(ctx.peers);
+	VECTOR_FREE(ctx.punch_pair_states);
+	ctx.peers = old_peers;
+	ctx.punch_pair_states = old_pair_states;
+	conf.protocol = old_protocol;
+	conf.mode = old_mode;
+	conf.encrypt_headroom = old_encrypt_headroom;
+	ctx.max_buffer = old_max_buffer;
+	ctx.now = old_now;
+	test_send_peer = NULL;
+	test_send_count = 0;
 }
 
 static void test_punch_udp_command_suppressed_for_tcp_only_peer(void **state UNUSED) {
@@ -6774,6 +6860,45 @@ static void test_public_listener_port_mapping_lifecycle(void **state UNUSED) {
 	ctx.port_mapping = old_port_mapping;
 }
 
+#ifdef WITH_UPNP_IGD
+
+static void test_upnp_discovery_result_retries_and_rejects_stale_generation(void **state UNUSED) {
+	fastd_port_mapping_t *old_port_mapping = ctx.port_mapping;
+	fastd_timeout_t old_now = ctx.now;
+	ctx.port_mapping = NULL;
+	ctx.now = 1000;
+
+	fastd_port_mapping_test_begin(false, true, false);
+	uint64_t generation = fastd_port_mapping_test_upnp_generation();
+	assert_true(generation != 0);
+
+	fastd_peer_address_t bound = addr4(0x00000000, 40003);
+	fastd_socket_t sock = {
+		.type = SOCKET_TYPE_UDP,
+		.hole_punch = true,
+		.punch_public_listener = true,
+		.bound_addr = &bound,
+	};
+	assert_true(fastd_port_mapping_register_socket(&sock));
+
+	fastd_async_upnp_igd_result_t result = {
+		.generation = generation - 1,
+	};
+	fastd_port_mapping_handle_upnp_igd_result(&result);
+	assert_int_equal(fastd_port_mapping_test_upnp_retry_timeout(), FASTD_TIMEOUT_INV);
+
+	result.generation = generation;
+	fastd_port_mapping_handle_upnp_igd_result(&result);
+	assert_int_equal(fastd_port_mapping_test_upnp_retry_timeout(), 301000);
+
+	fastd_port_mapping_release_socket(&sock);
+	fastd_port_mapping_test_end();
+	ctx.port_mapping = old_port_mapping;
+	ctx.now = old_now;
+}
+
+#endif
+
 #ifdef WITH_PCP
 
 static void test_public_listener_pcp_mapping_response(void **state UNUSED) {
@@ -7192,6 +7317,7 @@ int main(void) {
 		cmocka_unit_test(test_punch_data_relay_only_for_learned_nat_unicast),
 		cmocka_unit_test(test_punch_data_relay_bootstraps_address_resolution),
 		cmocka_unit_test(test_punch_data_relay_receive_path_bypasses_local_iface),
+		cmocka_unit_test(test_forwarded_send_all_records_nat_traversal_demand),
 		cmocka_unit_test(test_punch_udp_command_suppressed_for_tcp_only_peer),
 		cmocka_unit_test(test_punch_nat_refresh_policy),
 		cmocka_unit_test(test_punch_tcp_metadata_wake_policy_ignores_unpunchable_churn),
@@ -7238,6 +7364,9 @@ int main(void) {
 		cmocka_unit_test(test_udp_punch_socket_counts_public_listeners_separately),
 		cmocka_unit_test(test_udp_punch_public_listener_selection_policy),
 		cmocka_unit_test(test_public_listener_port_mapping_lifecycle),
+#ifdef WITH_UPNP_IGD
+		cmocka_unit_test(test_upnp_discovery_result_retries_and_rejects_stale_generation),
+#endif
 #ifdef WITH_PCP
 		cmocka_unit_test(test_public_listener_pcp_mapping_response),
 #endif

@@ -12,6 +12,7 @@
 
 
 #include "port_mapping.h"
+#include "async.h"
 #include "peer.h"
 
 #include <arpa/inet.h>
@@ -60,6 +61,7 @@
 
 #define FASTD_NATPMP_RETRY_INTERVAL 300000
 #define FASTD_UPNP_DISCOVER_DELAY 2000
+#define FASTD_UPNP_RETRY_INTERVAL 300000
 #define FASTD_PCP_RETRY_INTERVAL 300000
 #define FASTD_PCP_REQUEST_TIMEOUT 1000
 #define FASTD_PCP_MAX_RETRIES 4
@@ -129,7 +131,12 @@ struct fastd_port_mapping {
 	struct IGDdatas upnp_data;               /**< UPnP IGD service metadata */
 	fastd_peer_address_t upnp_external_addr; /**< External address reported by the UPnP IGD */
 	char upnp_lanaddr[64];                   /**< LAN address selected by UPNP_GetValidIGD() */
+	pthread_mutex_t upnp_mutex;              /**< Synchronizes the background discovery worker lifecycle */
+	uint64_t upnp_generation;                /**< Rejects results produced for a replaced mapping state */
+	fastd_task_t upnp_task;                   /**< Schedules a retry after a failed discovery */
 	bool upnp_initialized;                   /**< Specifies if upnp_urls has been initialized */
+	bool upnp_worker_running;                /**< Specifies if a blocking discovery worker is active */
+	bool upnp_stopping;                      /**< Prevents a stopped mapping state from accepting results */
 #endif
 
 #ifdef WITH_PCP
@@ -644,6 +651,8 @@ static void cleanup_natpmp(fastd_port_mapping_t *mapping) {
 
 #ifdef WITH_UPNP_IGD
 
+static uint64_t next_upnp_generation;
+
 /** Returns a human-readable string for a miniupnpc return code */
 static const char *upnp_error(int ret) {
 	const char *error = strupnperror(ret);
@@ -724,26 +733,122 @@ static void add_upnp_mappings(fastd_port_mapping_t *mapping, const char *lanaddr
 	}
 }
 
-/** Initializes automatic UPnP IGD port mapping */
-static void init_upnp_igd(fastd_port_mapping_t *mapping) {
+/** Copies one miniupnpc result string into a fixed async message field */
+static void copy_upnp_result_field(char *dest, size_t len, const char *src) {
+	if (!len)
+		return;
+
+	snprintf(dest, len, "%s", src ? src : "");
+}
+
+typedef struct upnp_discovery_work {
+	fastd_port_mapping_t *mapping;
+	uint64_t generation;
+} upnp_discovery_work_t;
+
+/** Schedules another UPnP IGD discovery when the current one could not produce a usable result */
+static void schedule_upnp_retry(fastd_port_mapping_t *mapping) {
+	if (mapping->upnp_stopping || mapping->upnp_initialized || !mapping->use_upnp_igd)
+		return;
+
+	if (fastd_task_scheduled(&mapping->upnp_task))
+		fastd_task_unschedule(&mapping->upnp_task);
+	fastd_task_schedule(&mapping->upnp_task, TASK_TYPE_UPNP_IGD, ctx.now + FASTD_UPNP_RETRY_INTERVAL);
+}
+
+/** Marks a background UPnP discovery worker as finished */
+static void upnp_discovery_worker_done(fastd_port_mapping_t *mapping) {
+	pthread_mutex_lock(&mapping->upnp_mutex);
+	mapping->upnp_worker_running = false;
+	pthread_mutex_unlock(&mapping->upnp_mutex);
+}
+
+/** Performs the blocking miniupnpc discovery without blocking the event loop */
+static void *upnp_discovery_worker(void *arg) {
+	upnp_discovery_work_t *work = arg;
+	fastd_async_upnp_igd_result_t result = {
+		.generation = work->generation,
+	};
 	int discover_error = 0;
 	struct UPNPDev *devlist =
 		upnpDiscover(FASTD_UPNP_DISCOVER_DELAY, NULL, NULL, UPNP_LOCAL_PORT_ANY, 0, 2, &discover_error);
 	if (!devlist) {
-		pr_warn("unable to discover UPnP IGD devices: error %i", discover_error);
-		return;
+		result.discover_error = discover_error;
+		goto done;
 	}
+	result.discovered = true;
 
 	char lanaddr[64] = {};
 	char wanaddr[64] = {};
-	int ret = UPNP_GetValidIGD(
-		devlist, &mapping->upnp_urls, &mapping->upnp_data, lanaddr, sizeof(lanaddr), wanaddr, sizeof(wanaddr));
+	struct UPNPUrls urls = {};
+	struct IGDdatas data = {};
+	result.igd_result =
+		UPNP_GetValidIGD(devlist, &urls, &data, lanaddr, sizeof(lanaddr), wanaddr, sizeof(wanaddr));
 	freeUPNPDevlist(devlist);
 
-	switch (ret) {
+	if (result.igd_result != UPNP_NO_IGD) {
+		copy_upnp_result_field(result.control_url, sizeof(result.control_url), urls.controlURL);
+		copy_upnp_result_field(result.service_type, sizeof(result.service_type), data.first.servicetype);
+		copy_upnp_result_field(result.lanaddr, sizeof(result.lanaddr), lanaddr);
+		copy_upnp_result_field(result.wanaddr, sizeof(result.wanaddr), wanaddr);
+	}
+	FreeUPNPUrls(&urls);
+
+done:
+	fastd_async_enqueue(ASYNC_TYPE_UPNP_IGD_RESULT, &result, sizeof(result));
+	upnp_discovery_worker_done(work->mapping);
+	free(work);
+	return NULL;
+}
+
+/** Starts a background UPnP discovery worker when one is not already active */
+static void start_upnp_discovery(fastd_port_mapping_t *mapping) {
+	pthread_mutex_lock(&mapping->upnp_mutex);
+	if (!mapping->use_upnp_igd || mapping->upnp_initialized || mapping->upnp_worker_running || mapping->upnp_stopping) {
+		pthread_mutex_unlock(&mapping->upnp_mutex);
+		return;
+	}
+	mapping->upnp_worker_running = true;
+	pthread_mutex_unlock(&mapping->upnp_mutex);
+
+	upnp_discovery_work_t *work = fastd_new(upnp_discovery_work_t);
+	*work = (upnp_discovery_work_t){
+		.mapping = mapping,
+		.generation = mapping->upnp_generation,
+	};
+
+	pthread_t thread;
+	int ret = pthread_create(&thread, &ctx.detached_thread, upnp_discovery_worker, work);
+	if (ret) {
+		pr_warn("unable to create UPnP discovery worker: %s", strerror(ret));
+		upnp_discovery_worker_done(mapping);
+		free(work);
+		schedule_upnp_retry(mapping);
+	}
+}
+
+/** Applies a completed UPnP discovery result in the main thread */
+void fastd_port_mapping_handle_upnp_igd_result(const fastd_async_upnp_igd_result_t *result) {
+	fastd_port_mapping_t *mapping = ctx.port_mapping;
+	if (!mapping || !result)
+		return;
+
+	pthread_mutex_lock(&mapping->upnp_mutex);
+	bool accepted = !mapping->upnp_stopping && mapping->upnp_generation == result->generation;
+	pthread_mutex_unlock(&mapping->upnp_mutex);
+	if (!accepted)
+		return;
+
+	if (!result->discovered) {
+		pr_warn("unable to discover UPnP IGD devices: error %i", result->discover_error);
+		schedule_upnp_retry(mapping);
+		return;
+	}
+
+	switch (result->igd_result) {
 	case UPNP_CONNECTED_IGD:
-		pr_verbose("found UPnP IGD with external address %s", wanaddr);
-		set_upnp_external_address(mapping, wanaddr);
+		pr_verbose("found UPnP IGD with external address %s", result->wanaddr);
+		set_upnp_external_address(mapping, result->wanaddr);
 		break;
 
 	case UPNP_PRIVATEIP_IGD:
@@ -756,16 +861,26 @@ static void init_upnp_igd(fastd_port_mapping_t *mapping) {
 
 	case UPNP_NO_IGD:
 		pr_warn("no valid UPnP IGD found");
+		schedule_upnp_retry(mapping);
 		return;
 
 	default:
 		pr_warn("unable to use discovered UPnP device as IGD");
-		FreeUPNPUrls(&mapping->upnp_urls);
+		schedule_upnp_retry(mapping);
 		return;
 	}
 
+	if (!result->control_url[0] || !result->service_type[0] || !result->lanaddr[0]) {
+		pr_warn("UPnP IGD discovery returned incomplete mapping information");
+		schedule_upnp_retry(mapping);
+		return;
+	}
+
+	mapping->upnp_urls.controlURL = fastd_strdup(result->control_url);
+	copy_upnp_result_field(
+		mapping->upnp_data.first.servicetype, sizeof(mapping->upnp_data.first.servicetype), result->service_type);
 	mapping->upnp_initialized = true;
-	add_upnp_mappings(mapping, lanaddr);
+	add_upnp_mappings(mapping, result->lanaddr);
 }
 
 /** Sends best-effort deletion requests for active UPnP IGD mappings */
@@ -785,12 +900,26 @@ static void release_upnp_mappings(fastd_port_mapping_t *mapping) {
 
 /** Frees UPnP IGD state */
 static void cleanup_upnp_igd(fastd_port_mapping_t *mapping) {
+	if (fastd_task_scheduled(&mapping->upnp_task))
+		fastd_task_unschedule(&mapping->upnp_task);
+
+	pthread_mutex_lock(&mapping->upnp_mutex);
+	mapping->upnp_stopping = true;
+	while (mapping->upnp_worker_running) {
+		pthread_mutex_unlock(&mapping->upnp_mutex);
+		usleep(10000);
+		pthread_mutex_lock(&mapping->upnp_mutex);
+	}
+	pthread_mutex_unlock(&mapping->upnp_mutex);
+
 	release_upnp_mappings(mapping);
 
 	if (mapping->upnp_initialized) {
 		FreeUPNPUrls(&mapping->upnp_urls);
 		mapping->upnp_initialized = false;
 	}
+
+	pthread_mutex_destroy(&mapping->upnp_mutex);
 }
 
 #endif
@@ -1385,7 +1514,7 @@ static void activate_mapping_backends(fastd_port_mapping_t *mapping) {
 #ifdef WITH_UPNP_IGD
 	if (mapping->use_upnp_igd) {
 		if (!mapping->upnp_initialized)
-			init_upnp_igd(mapping);
+			start_upnp_discovery(mapping);
 		else {
 			size_t i;
 			for (i = 0; i < VECTOR_LEN(mapping->mappings); i++)
@@ -1706,8 +1835,20 @@ bool fastd_port_mapping_check(void) {
 void fastd_port_mapping_init(void) {
 	fastd_port_mapping_t *mapping = fastd_new0(fastd_port_mapping_t);
 
+#ifdef WITH_UPNP_IGD
+	if (pthread_mutex_init(&mapping->upnp_mutex, NULL))
+		exit_errno("pthread_mutex_init");
+	mapping->upnp_generation = ++next_upnp_generation;
+	if (!mapping->upnp_generation)
+		mapping->upnp_generation = ++next_upnp_generation;
+#endif
+
 	collect_enabled_backends(mapping);
 	if (!mapping->natpmp_requested && !mapping->upnp_igd_requested && !mapping->pcp_requested) {
+
+#ifdef WITH_UPNP_IGD
+		pthread_mutex_destroy(&mapping->upnp_mutex);
+#endif
 		free(mapping);
 		return;
 	}
@@ -1730,7 +1871,7 @@ void fastd_port_mapping_init(void) {
 
 #ifdef WITH_UPNP_IGD
 	if (mapping->use_upnp_igd)
-		init_upnp_igd(mapping);
+		start_upnp_discovery(mapping);
 #endif
 
 #ifdef WITH_PCP
@@ -1758,6 +1899,14 @@ void fastd_port_mapping_handle_task(void) {
 #ifdef WITH_NATPMP
 	if (ctx.port_mapping)
 		handle_pending_request(ctx.port_mapping);
+#endif
+}
+
+/** Handles a scheduled UPnP IGD discovery retry */
+void fastd_port_mapping_handle_upnp_task(void) {
+#ifdef WITH_UPNP_IGD
+	if (ctx.port_mapping)
+		start_upnp_discovery(ctx.port_mapping);
 #endif
 }
 
@@ -1893,6 +2042,14 @@ void fastd_port_mapping_test_begin(bool natpmp_requested, bool upnp_requested, b
 	ctx.port_mapping->upnp_igd_requested = upnp_requested;
 	ctx.port_mapping->pcp_requested = pcp_requested;
 	ctx.port_mapping->test_no_backend_activation = true;
+
+#ifdef WITH_UPNP_IGD
+	if (pthread_mutex_init(&ctx.port_mapping->upnp_mutex, NULL))
+		exit_errno("pthread_mutex_init");
+	ctx.port_mapping->upnp_generation = ++next_upnp_generation;
+	if (!ctx.port_mapping->upnp_generation)
+		ctx.port_mapping->upnp_generation = ++next_upnp_generation;
+#endif
 }
 
 /** Frees the isolated port mapping state created by fastd_port_mapping_test_begin() */
@@ -1900,10 +2057,32 @@ void fastd_port_mapping_test_end(void) {
 	if (!ctx.port_mapping)
 		return;
 
+#ifdef WITH_UPNP_IGD
+	if (fastd_task_scheduled(&ctx.port_mapping->upnp_task))
+		fastd_task_unschedule(&ctx.port_mapping->upnp_task);
+	pthread_mutex_destroy(&ctx.port_mapping->upnp_mutex);
+#endif
 	VECTOR_FREE(ctx.port_mapping->mappings);
 	free(ctx.port_mapping);
 	ctx.port_mapping = NULL;
 }
+
+#ifdef WITH_UPNP_IGD
+
+/** Returns the isolated test mapping generation used to validate an async result */
+uint64_t fastd_port_mapping_test_upnp_generation(void) {
+	return ctx.port_mapping ? ctx.port_mapping->upnp_generation : 0;
+}
+
+/** Returns the scheduled isolated UPnP retry timeout, if any */
+fastd_timeout_t fastd_port_mapping_test_upnp_retry_timeout(void) {
+	if (!ctx.port_mapping)
+		return FASTD_TIMEOUT_INV;
+
+	return fastd_task_timeout(&ctx.port_mapping->upnp_task);
+}
+
+#endif
 
 /** Returns the number of entries in the isolated test mapping state */
 size_t fastd_port_mapping_test_entry_count(void) {

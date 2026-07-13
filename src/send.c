@@ -227,6 +227,10 @@ static inline void send_all(fastd_buffer_t *buffer, fastd_peer_t *source) {
 		if (dest == source || !fastd_peer_is_established(dest))
 			continue;
 
+		if (source && fastd_peer_is_established(source) && fastd_peer_get_nat_traversal(source) &&
+		    fastd_peer_get_nat_traversal(dest))
+			fastd_punch_note_peer_pair_demand(source, dest);
+
 		/* optimization, primarily for TUN mode: don't duplicate the buffer for the last (or only) peer */
 		if (i == VECTOR_LEN(ctx.peers) - 1) {
 			conf.protocol->send(dest, buffer);

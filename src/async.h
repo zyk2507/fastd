@@ -23,6 +23,9 @@ typedef enum fastd_async_type {
 	ASYNC_TYPE_RESOLVE_RETURN, /**< A DNS resolver response */
 	ASYNC_TYPE_VERIFY_RETURN,  /**< A on-verify return */
 	ASYNC_TYPE_REALM_CANDIDATE, /**< A realm-discovered direct peer endpoint */
+#ifdef WITH_UPNP_IGD
+	ASYNC_TYPE_UPNP_IGD_RESULT, /**< A completed UPnP IGD discovery */
+#endif
 } fastd_async_type_t;
 
 
@@ -59,6 +62,26 @@ typedef struct fastd_async_realm_candidate {
 	size_t n_addr;                              /**< The number of discovered addresses */
 	fastd_peer_address_t addr[FASTD_REALM_MAX_ADDRESSES]; /**< The discovered addresses */
 } fastd_async_realm_candidate_t;
+
+#ifdef WITH_UPNP_IGD
+
+#define FASTD_UPNP_CONTROL_URL_MAX 1024
+#define FASTD_UPNP_SERVICE_TYPE_MAX 256
+#define FASTD_UPNP_ADDRESS_MAX 64
+
+/** A UPnP IGD discovery result produced by a background worker */
+typedef struct fastd_async_upnp_igd_result {
+	uint64_t generation; /**< Port-mapping generation that requested discovery */
+	int igd_result;      /**< UPNP_GetValidIGD() result */
+	int discover_error;  /**< upnpDiscover() error when discovery found no devices */
+	bool discovered;     /**< true when a device list was returned */
+	char control_url[FASTD_UPNP_CONTROL_URL_MAX];   /**< WAN IP connection control URL */
+	char service_type[FASTD_UPNP_SERVICE_TYPE_MAX]; /**< WAN IP connection service type */
+	char lanaddr[FASTD_UPNP_ADDRESS_MAX];           /**< LAN address chosen by miniupnpc */
+	char wanaddr[FASTD_UPNP_ADDRESS_MAX];           /**< WAN address reported by the IGD */
+} fastd_async_upnp_igd_result_t;
+
+#endif
 
 
 void fastd_async_init(void);

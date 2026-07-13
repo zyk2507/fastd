@@ -73,7 +73,7 @@ Command line options and config files are parsed in order they are specified, so
 --compression-level 1-22
   Sets the zstd compression level; default is 3.
 
---port-mapping off|nat-pmp|upnp-igd|auto
+--port-mapping off|nat-pmp|upnp-igd|pcp|auto
   Sets automatic UDP port mapping. Port mapping is disabled by default.
 
 --nat-pmp

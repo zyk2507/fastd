@@ -749,6 +749,7 @@ void fastd_port_mapping_init(void);
 void fastd_port_mapping_refresh(void);
 void fastd_port_mapping_handle(void);
 void fastd_port_mapping_handle_task(void);
+void fastd_port_mapping_handle_upnp_task(void);
 void fastd_port_mapping_handle_pcp(void);
 void fastd_port_mapping_handle_pcp_task(void);
 bool fastd_port_mapping_register_socket(fastd_socket_t *sock);
@@ -805,6 +806,10 @@ bool fastd_port_mapping_test_pcp_set_nonce(uint16_t port, const uint8_t nonce[12
 bool fastd_port_mapping_test_pcp_build_request(
 	uint16_t port, uint32_t lifetime, const fastd_peer_address_t *client_addr, uint8_t *buf, size_t *len);
 bool fastd_port_mapping_test_pcp_handle_response(const uint8_t *buf, size_t len);
+#ifdef WITH_UPNP_IGD
+uint64_t fastd_port_mapping_test_upnp_generation(void);
+fastd_timeout_t fastd_port_mapping_test_upnp_retry_timeout(void);
+#endif
 bool fastd_punch_probe_test_parse(
 	const uint8_t *data, size_t len, uint8_t *type, uint32_t *transaction, size_t *key_len);
 size_t fastd_punch_probe_test_build(uint8_t *out, size_t out_len, uint8_t type, uint32_t transaction, size_t key_len);

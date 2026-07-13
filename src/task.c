@@ -41,6 +41,10 @@ static void handle_task(void) {
 		fastd_port_mapping_handle_task();
 		break;
 
+	case TASK_TYPE_UPNP_IGD:
+		fastd_port_mapping_handle_upnp_task();
+		break;
+
 	case TASK_TYPE_PCP:
 		fastd_port_mapping_handle_pcp_task();
 		break;
