@@ -95,7 +95,7 @@ PING_TIMEOUT=0.4
 FAILOVER_WAIT_ATTEMPTS=18
 FAILOVER_WAIT_SLEEP=0.2
 HARD_FAIL_WAIT_ATTEMPTS=${FASTD_HARD_FAIL_WAIT_ATTEMPTS:-80}
-TEST_PUNCH_KEEPALIVE=2
+TEST_PUNCH_KEEPALIVE=${FASTD_TEST_PUNCH_KEEPALIVE:-2}
 IPERF_DURATION=${FASTD_IPERF_DURATION:-9}
 IPERF_ACTIVE_CUT_DURATION=${FASTD_IPERF_ACTIVE_CUT_DURATION:-9}
 IPERF_RECOVERY_DURATION=${FASTD_IPERF_RECOVERY_DURATION:-9}
@@ -1843,7 +1843,7 @@ run_iperf_tests() {
 		ip -n "$NS_A" addr show dev fda-b > "$WORK/a.ip" 2>&1 || true
 		ip -n "$NS_B" addr show dev fdb-a > "$WORK/b.ip" 2>&1 || true
 		wait_for_direct_ping 'easy-symmetric direct data path failed before iperf3'
-		run_direct_iperf_after_active_cut both-easy-after-cut 5204
+		run_direct_iperf_after_transient_cut both-easy-after-cut 5204
 		printf 'ok %s - easy-symmetric peers recover and carry bidirectional iperf3 traffic after active cut\n' "$CURRENT_TEST"
 
 		begin_iperf_case
