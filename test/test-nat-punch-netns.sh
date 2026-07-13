@@ -59,7 +59,8 @@ HARD_FAIL_MODE=${FASTD_NAT_PUNCH_HARD_FAIL:-0}
 RESTRICTED_MODE=${FASTD_NAT_PUNCH_RESTRICTED:-0}
 PORT_RESTRICTED_MODE=${FASTD_NAT_PUNCH_PORT_RESTRICTED:-0}
 IPV6_MODE=${FASTD_NAT_PUNCH_IPV6:-0}
-if [[ "$IPERF_MODE" == 1 ]]; then
+LIMITED_IPERF_MODE=${FASTD_NAT_PUNCH_LIMITED_IPERF:-0}
+if [[ "$IPERF_MODE" == 1 || "$LIMITED_IPERF_MODE" == 1 ]]; then
 	command -v iperf3 >/dev/null 2>&1 || skip 'iperf3 not available'
 fi
 
@@ -1975,7 +1976,7 @@ run_hard_symmetric_failure_tests() {
 }
 
 run_limited_nat_tests() {
-	local mode=$1 nat_type=$2 peer_port=$3 relay_port=$4 label=$5 table=$6
+	local mode=$1 nat_type=$2 peer_port=$3 relay_port=$4 label=$5 table=$6 iperf_port=$7
 	printf '1..1\n'
 	CURRENT_TEST=1
 
@@ -2024,6 +2025,9 @@ run_limited_nat_tests() {
 	done
 
 	[[ "$ok" == true ]] || fail "$label NAT direct path did not carry tunnel traffic"
+	if [[ "$LIMITED_IPERF_MODE" == 1 ]]; then
+		run_direct_iperf_after_transient_cut "$label-after-cut" "$iperf_port"
+	fi
 	printf 'ok 1 - %s NAT peers establish and use a direct UDP path\n' "$label"
 }
 
@@ -2112,12 +2116,12 @@ if [[ "$HARD_FAIL_MODE" == 1 ]]; then
 fi
 
 if [[ "$RESTRICTED_MODE" == 1 ]]; then
-	run_limited_nat_tests restricted restricted 14001 14000 restricted restricted
+	run_limited_nat_tests restricted restricted 14001 14000 restricted restricted 5207
 	exit 0
 fi
 
 if [[ "$PORT_RESTRICTED_MODE" == 1 ]]; then
-	run_limited_nat_tests port_restricted port-restricted 15001 15000 port-restricted portrestricted
+	run_limited_nat_tests port_restricted port-restricted 15001 15000 port-restricted portrestricted 5208
 	exit 0
 fi
 
