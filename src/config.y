@@ -111,6 +111,7 @@
 %token TOK_PACKET
 %token TOK_PACKETS
 %token TOK_PASSWORD
+%token TOK_PCP
 %token TOK_PEER
 %token TOK_PEERS
 %token TOK_PERSIST
@@ -877,6 +878,7 @@ port_mapping:
 	|	TOK_NONE	{ $$ = PORT_MAPPING_OFF; }
 	|	TOK_NAT_PMP	{ $$ = PORT_MAPPING_NATPMP; }
 	|	TOK_UPNP_IGD	{ $$ = PORT_MAPPING_UPNP_IGD; }
+	|	TOK_PCP		{ $$ = PORT_MAPPING_PCP; }
 	|	TOK_AUTO	{ $$ = PORT_MAPPING_AUTO; }
 	|	TOK_STRING	{ $$ = fastd_config_port_mapping_mode($1->str); }
 	;

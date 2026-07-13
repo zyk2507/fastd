@@ -189,8 +189,17 @@ bool fastd_config_port_mapping_supported(fastd_port_mapping_mode_t mode, UNUSED 
 		return false;
 #endif
 
+	case PORT_MAPPING_PCP:
+#ifdef WITH_PCP
+		return true;
+#else
+		if (error)
+			*error = "PCP port mapping is not supported by this build of fastd";
+		return false;
+#endif
+
 	case PORT_MAPPING_AUTO:
-#if defined(WITH_NATPMP) || defined(WITH_UPNP_IGD)
+#if defined(WITH_NATPMP) || defined(WITH_UPNP_IGD) || defined(WITH_PCP)
 		return true;
 #else
 		if (error)
@@ -214,6 +223,10 @@ fastd_port_mapping_mode_t fastd_config_port_mapping_mode(const char *name) {
 
 	if (!strcmp(name, "upnp-igd")) {
 		return PORT_MAPPING_UPNP_IGD;
+	}
+
+	if (!strcmp(name, "pcp")) {
+		return PORT_MAPPING_PCP;
 	}
 
 	if (!strcmp(name, "auto")) {

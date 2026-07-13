@@ -64,7 +64,7 @@ Example config:
   will use a random port for each outgoing connection both for IPv4 and IPv6.
 
 
-| ``port-mapping off|nat-pmp|upnp-igd|auto;``
+| ``port-mapping off|nat-pmp|upnp-igd|pcp|auto;``
 | ``nat-pmp yes|no;``
 
   Configures automatic UDP port mapping. This is disabled by default. This option may be set globally, in
@@ -73,10 +73,11 @@ Example config:
 
   ``nat-pmp`` asks the default gateway to map the UDP ports of fixed IPv4-compatible bind sockets, renews these
   mappings periodically, and removes them again during shutdown. ``upnp-igd`` uses UPnP IGD to add permanent UDP
-  mappings and removes them during shutdown. ``auto`` uses all automatic port mapping backends compiled into
+  mappings and removes them during shutdown. ``pcp`` uses PCP MAP requests against the IPv4 default gateway, renews
+  successful leases, and removes them during shutdown. ``auto`` uses all automatic port mapping backends compiled into
   fastd. ``nat-pmp yes|no`` is kept as a compatibility alias for ``port-mapping nat-pmp|off``.
 
-  NAT-PMP and UPnP IGD do not apply to IPv6-only sockets or sockets created dynamically for individual peer attempts.
+  NAT-PMP, UPnP IGD, and PCP do not apply to IPv6-only sockets or sockets created dynamically for individual peer attempts.
   Reusable public UDP punch listeners created by punch-control can request dynamic mappings when automatic port
   mapping is enabled; these leases are kept with the listener socket and released when the socket closes or during
   shutdown. If multiple peers share the same fixed bind socket, enabling port mapping for any of these peers maps the
@@ -90,8 +91,8 @@ Example config:
 
   ``nat traversal yes`` enables ``transport auto``, ``hole-punch auto``, symmetric NAT punching, punch-control
   relay on the root configuration, controlled data relay fallback, and NAT keepalives. If TURN servers are configured,
-  peers may also use TURN as a fallback while direct punching is unavailable. The switch does not enable NAT-PMP or
-  UPnP IGD by itself; configure ``port-mapping auto`` explicitly when external router port mappings should be
+  peers may also use TURN as a fallback while direct punching is unavailable. The switch does not enable NAT-PMP,
+  UPnP IGD, or PCP by itself; configure ``port-mapping auto`` explicitly when external router port mappings should be
   requested.
 
   ``nat traversal no`` disables inherited NAT traversal behavior for that scope. On a peer, it disables automatic

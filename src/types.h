@@ -91,6 +91,7 @@ typedef enum fastd_port_mapping_mode {
 	PORT_MAPPING_OFF,       /**< Port mapping disabled */
 	PORT_MAPPING_NATPMP,    /**< Use NAT-PMP */
 	PORT_MAPPING_UPNP_IGD,  /**< Use UPnP IGD */
+	PORT_MAPPING_PCP,       /**< Use Port Control Protocol */
 	PORT_MAPPING_AUTO,      /**< Use all available port mapping backends */
 } fastd_port_mapping_mode_t;
 
@@ -126,6 +127,7 @@ typedef enum fastd_poll_type {
 	POLL_TYPE_IFACE,      /**< A TUN/TAP interface */
 	POLL_TYPE_SOCKET,     /**< A network socket */
 	POLL_TYPE_NATPMP,     /**< A NAT-PMP control socket */
+	POLL_TYPE_PCP,        /**< A PCP control socket */
 } fastd_poll_type_t;
 
 /** Task types */
@@ -134,6 +136,7 @@ typedef enum fastd_task_type {
 	TASK_TYPE_MAINTENANCE, /**< Scheduled maintenance */
 	TASK_TYPE_PEER,        /**< Peer maintenance (handshake, reset, keepalive) */
 	TASK_TYPE_NATPMP,      /**< NAT-PMP request retry or lease renewal */
+	TASK_TYPE_PCP,         /**< PCP request retry or lease renewal */
 	TASK_TYPE_TURN,        /**< TURN relay maintenance */
 	TASK_TYPE_REALM,       /**< Realm rendezvous maintenance */
 	TASK_TYPE_NAT_DETECT,  /**< NAT type detection maintenance */

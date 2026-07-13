@@ -323,6 +323,46 @@ static uint16_t port4(const fastd_peer_address_t *addr) {
 	return ntohs(addr->in.sin_port);
 }
 
+#ifdef WITH_PCP
+
+static uint16_t test_read_be16(const uint8_t *buf, size_t offset) {
+	uint16_t be;
+	memcpy(&be, buf + offset, sizeof(be));
+	return ntohs(be);
+}
+
+static uint32_t test_read_be32(const uint8_t *buf, size_t offset) {
+	uint32_t be;
+	memcpy(&be, buf + offset, sizeof(be));
+	return be32toh(be);
+}
+
+static void test_write_be16(uint8_t *buf, size_t offset, uint16_t value) {
+	uint16_t be = htons(value);
+	memcpy(buf + offset, &be, sizeof(be));
+}
+
+static void test_write_be32(uint8_t *buf, size_t offset, uint32_t value) {
+	uint32_t be = htobe32(value);
+	memcpy(buf + offset, &be, sizeof(be));
+}
+
+static void test_write_ipv4_mapped(uint8_t out[16], uint32_t ip) {
+	memset(out, 0, 16);
+	out[10] = 0xff;
+	out[11] = 0xff;
+	uint32_t be = htonl(ip);
+	memcpy(out + 12, &be, sizeof(be));
+}
+
+static void test_assert_ipv4_mapped(const uint8_t in[16], uint32_t ip) {
+	uint8_t expected[16];
+	test_write_ipv4_mapped(expected, ip);
+	assert_memory_equal(in, expected, sizeof(expected));
+}
+
+#endif
+
 static uint16_t test_tcp_fd_port(int fd) {
 	struct sockaddr_in addr = {};
 	socklen_t len = sizeof(addr);
@@ -6550,18 +6590,21 @@ static void test_public_listener_port_mapping_lifecycle(void **state UNUSED) {
 	assert_false(fastd_port_mapping_register_socket(&sock));
 	assert_false(sock.punch_listener_mapping_registered);
 
-	fastd_port_mapping_test_begin(true, true);
+	fastd_port_mapping_test_begin(true, true, false);
 	assert_true(fastd_port_mapping_register_socket(&sock));
 	assert_true(sock.punch_listener_mapping_registered);
 
-	bool use_natpmp = false, use_upnp = false;
-	uint16_t natpmp_refs = 0, upnp_refs = 0;
+	bool use_natpmp = false, use_upnp = false, use_pcp = true;
+	uint16_t natpmp_refs = 0, upnp_refs = 0, pcp_refs = 1;
 	assert_true(
-		fastd_port_mapping_test_get_entry(40000, &use_natpmp, &use_upnp, &natpmp_refs, &upnp_refs));
+		fastd_port_mapping_test_get_entry(
+			40000, &use_natpmp, &use_upnp, &use_pcp, &natpmp_refs, &upnp_refs, &pcp_refs));
 	assert_true(use_natpmp);
 	assert_true(use_upnp);
+	assert_false(use_pcp);
 	assert_int_equal(natpmp_refs, 1);
 	assert_int_equal(upnp_refs, 1);
+	assert_int_equal(pcp_refs, 0);
 	assert_int_equal(fastd_port_mapping_test_entry_count(), 1);
 
 	fastd_hole_punch_claim_socket(&sock);
@@ -6595,6 +6638,90 @@ static void test_public_listener_port_mapping_lifecycle(void **state UNUSED) {
 	ctx.udp_punch_socks = old_udp_punch_socks;
 	ctx.port_mapping = old_port_mapping;
 }
+
+#ifdef WITH_PCP
+
+static void test_public_listener_pcp_mapping_response(void **state UNUSED) {
+	fastd_port_mapping_t *old_port_mapping = ctx.port_mapping;
+	ctx.port_mapping = NULL;
+
+	fastd_peer_address_t bound = addr4(0x00000000, 40002);
+	fastd_socket_t sock = {
+		.type = SOCKET_TYPE_UDP,
+		.hole_punch = true,
+		.punch_public_listener = true,
+		.bound_addr = &bound,
+	};
+
+	fastd_port_mapping_test_begin(false, false, true);
+	assert_true(fastd_port_mapping_register_socket(&sock));
+	assert_true(sock.punch_listener_mapping_registered);
+
+	bool use_natpmp = true, use_upnp = true, use_pcp = false;
+	uint16_t natpmp_refs = 1, upnp_refs = 1, pcp_refs = 0;
+	assert_true(
+		fastd_port_mapping_test_get_entry(
+			40002, &use_natpmp, &use_upnp, &use_pcp, &natpmp_refs, &upnp_refs, &pcp_refs));
+	assert_false(use_natpmp);
+	assert_false(use_upnp);
+	assert_true(use_pcp);
+	assert_int_equal(natpmp_refs, 0);
+	assert_int_equal(upnp_refs, 0);
+	assert_int_equal(pcp_refs, 1);
+
+	const uint8_t nonce[12] = {
+		0x10, 0x11, 0x12, 0x13,
+		0x20, 0x21, 0x22, 0x23,
+		0x30, 0x31, 0x32, 0x33,
+	};
+	assert_true(fastd_port_mapping_test_pcp_set_nonce(40002, nonce));
+
+	uint8_t request[60];
+	size_t request_len = sizeof(request);
+	fastd_peer_address_t client = addr4(0x0a000002, 0);
+	assert_true(fastd_port_mapping_test_pcp_build_request(
+		40002, 3600, &client, request, &request_len));
+	assert_int_equal(request_len, sizeof(request));
+	assert_int_equal(request[0], 2);
+	assert_int_equal(request[1], 1);
+	assert_int_equal(test_read_be32(request, 4), 3600);
+	test_assert_ipv4_mapped(request + 8, 0x0a000002);
+	assert_memory_equal(request + 24, nonce, sizeof(nonce));
+	assert_int_equal(request[36], 17);
+	assert_int_equal(test_read_be16(request, 40), 40002);
+	assert_int_equal(test_read_be16(request, 42), 40002);
+
+	uint8_t response[60] = {};
+	response[0] = 2;
+	response[1] = 0x81;
+	response[3] = 0;
+	test_write_be32(response, 4, 1800);
+	memcpy(response + 24, nonce, sizeof(nonce));
+	response[36] = 17;
+	test_write_be16(response, 40, 40002);
+	test_write_be16(response, 42, 45555);
+	test_write_ipv4_mapped(response + 44, 0xcb007109);
+
+	assert_true(fastd_port_mapping_test_pcp_handle_response(response, sizeof(response)));
+
+	fastd_peer_address_t mapped = {};
+	assert_true(fastd_port_mapping_get_external_address(&sock, &mapped));
+	assert_int_equal(mapped.sa.sa_family, AF_INET);
+	assert_int_equal(mapped.in.sin_addr.s_addr, htonl(0xcb007109));
+	assert_int_equal(port4(&mapped), 45555);
+
+	response[24] ^= 0x55;
+	assert_false(fastd_port_mapping_test_pcp_handle_response(response, sizeof(response)));
+
+	fastd_port_mapping_release_socket(&sock);
+	assert_false(sock.punch_listener_mapping_registered);
+	assert_int_equal(fastd_port_mapping_test_entry_count(), 0);
+	fastd_port_mapping_test_end();
+
+	ctx.port_mapping = old_port_mapping;
+}
+
+#endif
 
 static void test_punch_socket_count_policy(void **state UNUSED) {
 	fastd_peer_t peer = {};
@@ -6933,6 +7060,9 @@ int main(void) {
 		cmocka_unit_test(test_udp_punch_socket_counts_public_listeners_separately),
 		cmocka_unit_test(test_udp_punch_public_listener_selection_policy),
 		cmocka_unit_test(test_public_listener_port_mapping_lifecycle),
+#ifdef WITH_PCP
+		cmocka_unit_test(test_public_listener_pcp_mapping_response),
+#endif
 		cmocka_unit_test(test_punch_socket_count_policy),
 		cmocka_unit_test(test_punch_hard_symmetric_uses_easytier_grade_defaults),
 		cmocka_unit_test(test_punch_socket_count_honors_explicit_request),

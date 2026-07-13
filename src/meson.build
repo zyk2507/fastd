@@ -144,6 +144,16 @@ if not get_option('upnp').disabled()
 	endif
 endif
 
+with_pcp = false
+if get_option('pcp').enabled()
+	if not (is_linux or is_android)
+		error('PCP support is currently available only on Linux and Android')
+	endif
+	with_pcp = true
+elif get_option('pcp').auto() and (is_linux or is_android)
+	with_pcp = true
+endif
+
 with_turn = false
 if not get_option('turn').disabled()
 	turn_dep = dependency('nice', required : get_option('turn'))
@@ -308,6 +318,7 @@ conf_data.set('WITH_SYSTEMD', with_systemd)
 conf_data.set('WITH_ZSTD', with_zstd)
 conf_data.set('WITH_NATPMP', with_natpmp)
 conf_data.set('WITH_UPNP_IGD', with_upnp_igd)
+conf_data.set('WITH_PCP', with_pcp)
 conf_data.set('WITH_TURN', with_turn)
 conf_data.set('WITH_REALM', with_realm)
 conf_data.set('WITH_NAT_DETECT', with_nat_detect)

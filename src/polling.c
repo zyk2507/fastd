@@ -86,6 +86,12 @@ static inline void handle_fd(fastd_poll_fd_t *fd, bool input, bool output, bool 
 		error = false;
 		break;
 
+	case POLL_TYPE_PCP:
+		if (input || error)
+			fastd_port_mapping_handle_pcp();
+		error = false;
+		break;
+
 	default:
 		exit_bug("unknown FD type");
 	}

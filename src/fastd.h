@@ -747,6 +747,8 @@ void fastd_port_mapping_init(void);
 void fastd_port_mapping_refresh(void);
 void fastd_port_mapping_handle(void);
 void fastd_port_mapping_handle_task(void);
+void fastd_port_mapping_handle_pcp(void);
+void fastd_port_mapping_handle_pcp_task(void);
 bool fastd_port_mapping_register_socket(fastd_socket_t *sock);
 bool fastd_port_mapping_get_external_address(const fastd_socket_t *sock, fastd_peer_address_t *addr);
 void fastd_port_mapping_release_socket(fastd_socket_t *sock);
@@ -785,12 +787,16 @@ bool fastd_socket_test_udp_punch_should_create_public_listener(
 	size_t current_listener_count, bool has_reusable_listener, bool has_port_mapping_listener, bool force_new,
 	bool prefer_port_mapping);
 uint32_t fastd_socket_test_udp_punch_select_public_listener_id(sa_family_t family, bool prefer_port_mapping);
-void fastd_port_mapping_test_begin(bool natpmp_requested, bool upnp_requested);
+void fastd_port_mapping_test_begin(bool natpmp_requested, bool upnp_requested, bool pcp_requested);
 void fastd_port_mapping_test_end(void);
 size_t fastd_port_mapping_test_entry_count(void);
 bool fastd_port_mapping_test_get_entry(
-	uint16_t port, bool *use_natpmp, bool *use_upnp_igd, uint16_t *dynamic_natpmp_refs,
-	uint16_t *dynamic_upnp_igd_refs);
+	uint16_t port, bool *use_natpmp, bool *use_upnp_igd, bool *use_pcp, uint16_t *dynamic_natpmp_refs,
+	uint16_t *dynamic_upnp_igd_refs, uint16_t *dynamic_pcp_refs);
+bool fastd_port_mapping_test_pcp_set_nonce(uint16_t port, const uint8_t nonce[12]);
+bool fastd_port_mapping_test_pcp_build_request(
+	uint16_t port, uint32_t lifetime, const fastd_peer_address_t *client_addr, uint8_t *buf, size_t *len);
+bool fastd_port_mapping_test_pcp_handle_response(const uint8_t *buf, size_t len);
 bool fastd_punch_probe_test_parse(
 	const uint8_t *data, size_t len, uint8_t *type, uint32_t *transaction, size_t *key_len);
 size_t fastd_punch_probe_test_build(uint8_t *out, size_t out_len, uint8_t type, uint32_t transaction, size_t key_len);
@@ -1027,12 +1033,29 @@ static inline bool fastd_use_offload_l2tp(void) {
 
 /** Returns true if a port mapping mode uses NAT-PMP */
 static inline bool fastd_port_mapping_uses_natpmp(fastd_port_mapping_mode_t mode) {
+#ifdef WITH_NATPMP
 	return mode == PORT_MAPPING_NATPMP || mode == PORT_MAPPING_AUTO;
+#else
+	return mode == PORT_MAPPING_NATPMP;
+#endif
 }
 
 /** Returns true if a port mapping mode uses UPnP IGD */
 static inline bool fastd_port_mapping_uses_upnp_igd(fastd_port_mapping_mode_t mode) {
+#ifdef WITH_UPNP_IGD
 	return mode == PORT_MAPPING_UPNP_IGD || mode == PORT_MAPPING_AUTO;
+#else
+	return mode == PORT_MAPPING_UPNP_IGD;
+#endif
+}
+
+/** Returns true if a port mapping mode uses PCP */
+static inline bool fastd_port_mapping_uses_pcp(fastd_port_mapping_mode_t mode) {
+#ifdef WITH_PCP
+	return mode == PORT_MAPPING_PCP || mode == PORT_MAPPING_AUTO;
+#else
+	return mode == PORT_MAPPING_PCP;
+#endif
 }
 
 /** Returns true if android integration is enabled */

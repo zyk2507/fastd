@@ -267,7 +267,7 @@ include peers from "<dir>";
 ```conf
 transport udp|tcp|auto;
 
-port-mapping off|nat-pmp|upnp-igd|auto;
+port-mapping off|nat-pmp|upnp-igd|pcp|auto;
 nat-pmp yes|no;
 
 hole-punch off|tcp|udp|auto;
@@ -291,7 +291,7 @@ turn server "<address>" port <port> user "<username>" password "<password>";
 - `transport udp`：默认 UDP 数据传输。
 - `transport tcp`：通过 TCP stream 传输 fastd packet。
 - `transport auto`：先探测 TCP，失败后回退 UDP。握手中会校验双方实际 transport 一致。
-- `port-mapping`：自动映射固定 IPv4 UDP bind 端口。
+- `port-mapping`：自动映射固定 IPv4 UDP bind 端口。`nat-pmp` 和 `pcp` 会向 IPv4 默认网关申请可续租映射；`upnp-igd` 会通过 UPnP IGD 添加 UDP 映射；`auto` 使用当前构建中可用的所有后端。PCP/NAT-PMP/UPnP IGD 不处理 IPv6-only socket，也不映射每次 peer 尝试用的临时 socket；punch-control 创建的可复用 public UDP listener 可以申请动态映射。
 - `nat-pmp yes|no`：兼容别名，等价于 `port-mapping nat-pmp|off`。
 - `hole-punch tcp|udp|auto`：启用确定性 IPv4 打洞；默认关闭。双方需要知道彼此公网 IPv4 endpoint；在 TAP relay 转发网络中，`peer discovery yes` 可以由可信 relay 提供这个 endpoint。
 - `stun server`、`punch control relay`、`punch data relay`、`punch max sockets`、`punch max packet(s)` 只能写在主配置中；`punch symmetric` 可写在主配置或 peer 配置中。
@@ -436,7 +436,7 @@ mtu <576-65535>;
 
 transport udp|tcp|auto;
 
-port-mapping off|nat-pmp|upnp-igd|auto;
+port-mapping off|nat-pmp|upnp-igd|pcp|auto;
 nat-pmp yes|no;
 
 hole-punch off|tcp|udp|auto;
@@ -484,7 +484,7 @@ secret "本机私钥";
 include peers from "peers";
 ```
 
-### 2. 启用 NAT-PMP/UPnP、打洞和 TURN fallback
+### 2. 启用 NAT-PMP/UPnP/PCP、打洞和 TURN fallback
 
 ```conf
 log level info;

@@ -18,3 +18,6 @@
 
 /** The interval after which successful NAT-PMP mappings are renewed */
 #define FASTD_NATPMP_LIFETIME 3600
+
+/** The interval after which successful PCP mappings are renewed */
+#define FASTD_PCP_LIFETIME 3600

@@ -95,6 +95,9 @@
 /** Defined if UPnP IGD port mapping support is enabled */
 #mesondefine WITH_UPNP_IGD
 
+/** Defined if PCP port mapping support is enabled */
+#mesondefine WITH_PCP
+
 /** Defined if TURN relay support is enabled */
 #mesondefine WITH_TURN
 

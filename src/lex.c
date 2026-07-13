@@ -109,6 +109,7 @@ static const keyword_t keywords[] = {
 	{ "packet", TOK_PACKET },
 	{ "packets", TOK_PACKETS },
 	{ "password", TOK_PASSWORD },
+	{ "pcp", TOK_PCP },
 	{ "peer", TOK_PEER },
 	{ "peers", TOK_PEERS },
 	{ "persist", TOK_PERSIST },
