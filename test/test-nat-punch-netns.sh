@@ -58,6 +58,7 @@ TCP_MODE=${FASTD_NAT_PUNCH_TCP:-0}
 HARD_FAIL_MODE=${FASTD_NAT_PUNCH_HARD_FAIL:-0}
 RESTRICTED_MODE=${FASTD_NAT_PUNCH_RESTRICTED:-0}
 PORT_RESTRICTED_MODE=${FASTD_NAT_PUNCH_PORT_RESTRICTED:-0}
+IPV6_MODE=${FASTD_NAT_PUNCH_IPV6:-0}
 if [[ "$IPERF_MODE" == 1 ]]; then
 	command -v iperf3 >/dev/null 2>&1 || skip 'iperf3 not available'
 fi
@@ -1089,6 +1090,50 @@ peer "b" { key "$PUB_B"; nat traversal yes; }
 EOF
 }
 
+write_ipv6_punch_confs() {
+	cat > "$WORK/a.conf" <<EOF
+mode multitap;
+interface "fda-%n";
+persist interface no;
+method "salsa2012+umac";
+secret "$SEC_A";
+bind [fd52:1::2]:16001;
+status socket "$WORK/a.status";
+$(punch_test_limits)
+peer "c" { key "$PUB_C"; remote [fd52::1]:16000; transport udp; }
+peer "b" { key "$PUB_B"; nat traversal yes; }
+EOF
+
+	cat > "$WORK/b.conf" <<EOF
+mode multitap;
+interface "fdb-%n";
+persist interface no;
+method "salsa2012+umac";
+secret "$SEC_B";
+bind [fd52:2::2]:16001;
+status socket "$WORK/b.status";
+$(punch_test_limits)
+peer "c" { key "$PUB_C"; remote [fd52::1]:16000; transport udp; }
+peer "a" { key "$PUB_A"; nat traversal yes; }
+EOF
+
+	cat > "$WORK/c.conf" <<EOF
+mode multitap;
+interface "fdc-%n";
+persist interface no;
+method "salsa2012+umac";
+secret "$SEC_C";
+bind [fd52::1]:16000;
+status socket "$WORK/c.status";
+forward no;
+peer discovery no;
+nat traversal yes;
+$(punch_test_limits)
+peer "a" { key "$PUB_A"; nat traversal yes; }
+peer "b" { key "$PUB_B"; nat traversal yes; }
+EOF
+}
+
 write_both_easy_symmetric_confs() {
 	cat > "$WORK/a.conf" <<EOF
 mode multitap;
@@ -1982,6 +2027,61 @@ run_limited_nat_tests() {
 	printf 'ok 1 - %s NAT peers establish and use a direct UDP path\n' "$label"
 }
 
+run_ipv6_punch_tests() {
+	printf '1..1\n'
+	CURRENT_TEST=1
+
+	run ip -n "$NS_C" addr add fd52::1/64 dev pub
+	run ip -n "$NS_RA" addr add fd52::2/64 dev pub
+	run ip -n "$NS_RB" addr add fd52::3/64 dev pub
+	run ip -n "$NS_RA" addr add fd52:1::1/64 dev priv
+	run ip -n "$NS_RB" addr add fd52:2::1/64 dev priv
+	run ip -n "$NS_A" addr add fd52:1::2/64 dev eth0
+	run ip -n "$NS_B" addr add fd52:2::2/64 dev eth0
+	run ip -n "$NS_A" route add default via fd52:1::1
+	run ip -n "$NS_B" route add default via fd52:2::1
+	run ip netns exec "$NS_RA" sysctl -qw net.ipv6.conf.all.forwarding=1
+	run ip netns exec "$NS_RB" sysctl -qw net.ipv6.conf.all.forwarding=1
+	run ip -n "$NS_C" route add fd52:1::/64 via fd52::2
+	run ip -n "$NS_C" route add fd52:2::/64 via fd52::3
+	run ip -n "$NS_RA" route add fd52:2::/64 via fd52::3
+	run ip -n "$NS_RB" route add fd52:1::/64 via fd52::2
+
+	write_ipv6_punch_confs
+	start_fastds
+
+	ok=false
+	for _ in $(seq 1 "$FAST_WAIT_ATTEMPTS"); do
+		sleep "$FAST_WAIT_SLEEP"
+		check_fastds_alive
+		dump_statuses
+		if [[ -f "$WORK/a.json" && -f "$WORK/b.json" && -f "$WORK/c.json" ]] &&
+			direct_hole_punched && punch_results_seen; then
+			ok=true
+			break
+		fi
+	done
+
+	[[ "$ok" == true ]] || fail 'IPv6 peers did not establish a direct UDP path'
+
+	run ip -n "$NS_A" addr add 10.52.10.1/30 dev fda-b
+	run ip -n "$NS_B" addr add 10.52.10.2/30 dev fdb-a
+	run ip -n "$NS_A" link set fda-b up
+	run ip -n "$NS_B" link set fdb-a up
+
+	ok=false
+	for _ in $(seq 1 "$PING_WAIT_ATTEMPTS"); do
+		if ping_direct; then
+			ok=true
+			break
+		fi
+		sleep "$PING_WAIT_SLEEP"
+	done
+
+	[[ "$ok" == true ]] || fail 'IPv6 direct path did not carry tunnel traffic'
+	printf 'ok 1 - IPv6 peers establish and use a direct UDP path\n'
+}
+
 if [[ "$HARD_FAIL_MODE" == 1 ]]; then
 	run_hard_symmetric_failure_tests
 	exit 0
@@ -1994,6 +2094,11 @@ fi
 
 if [[ "$PORT_RESTRICTED_MODE" == 1 ]]; then
 	run_limited_nat_tests port_restricted port-restricted 15001 15000 port-restricted portrestricted
+	exit 0
+fi
+
+if [[ "$IPV6_MODE" == 1 ]]; then
+	run_ipv6_punch_tests
 	exit 0
 fi
 
