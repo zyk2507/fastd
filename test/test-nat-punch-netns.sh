@@ -56,6 +56,7 @@ done
 IPERF_MODE=${FASTD_NAT_PUNCH_IPERF:-0}
 TCP_MODE=${FASTD_NAT_PUNCH_TCP:-0}
 HARD_FAIL_MODE=${FASTD_NAT_PUNCH_HARD_FAIL:-0}
+RESTRICTED_MODE=${FASTD_NAT_PUNCH_RESTRICTED:-0}
 if [[ "$IPERF_MODE" == 1 ]]; then
 	command -v iperf3 >/dev/null 2>&1 || skip 'iperf3 not available'
 fi
@@ -666,6 +667,21 @@ sys.exit(0)
 PY
 }
 
+restricted_nat_types_seen() {
+	python3 - "$WORK/a.json" "$WORK/b.json" <<'PY'
+import json
+import sys
+
+try:
+    a = json.load(open(sys.argv[1]))
+    b = json.load(open(sys.argv[2]))
+except Exception:
+    sys.exit(1)
+
+sys.exit(0 if all((doc.get("nat") or {}).get("type") == "restricted" for doc in (a, b)) else 1)
+PY
+}
+
 both_easy_nat_types_seen() {
 	python3 - "$WORK/a.json" "$WORK/b.json" <<'PY'
 import json
@@ -1021,6 +1037,54 @@ peer "b" { key "$PUB_B"; nat traversal yes; }
 EOF
 }
 
+write_restricted_confs() {
+	cat > "$WORK/a.conf" <<EOF
+mode multitap;
+interface "fda-%n";
+persist interface no;
+method "salsa2012+umac";
+secret "$SEC_A";
+bind 0.0.0.0:14001;
+status socket "$WORK/a.status";
+stun server "10.52.0.1" port 3478;
+stun server "10.52.0.1" port 3479;
+$(punch_test_limits)
+peer "c" { key "$PUB_C"; remote 10.52.0.1 port 14000; transport udp; }
+peer "b" { key "$PUB_B"; nat traversal yes; }
+EOF
+
+	cat > "$WORK/b.conf" <<EOF
+mode multitap;
+interface "fdb-%n";
+persist interface no;
+method "salsa2012+umac";
+secret "$SEC_B";
+bind 0.0.0.0:14001;
+status socket "$WORK/b.status";
+stun server "10.52.0.1" port 3478;
+stun server "10.52.0.1" port 3479;
+$(punch_test_limits)
+peer "c" { key "$PUB_C"; remote 10.52.0.1 port 14000; transport udp; }
+peer "a" { key "$PUB_A"; nat traversal yes; }
+EOF
+
+	cat > "$WORK/c.conf" <<EOF
+mode multitap;
+interface "fdc-%n";
+persist interface no;
+method "salsa2012+umac";
+secret "$SEC_C";
+bind 10.52.0.1:14000;
+status socket "$WORK/c.status";
+forward no;
+peer discovery no;
+nat traversal yes;
+$(punch_test_limits)
+peer "a" { key "$PUB_A"; nat traversal yes; }
+peer "b" { key "$PUB_B"; nat traversal yes; }
+EOF
+}
+
 write_both_easy_symmetric_confs() {
 	cat > "$WORK/a.conf" <<EOF
 mode multitap;
@@ -1198,6 +1262,9 @@ def mapped_endpoint(source):
     if MODE == "tcp":
         return ip, port
 
+    if MODE == "restricted" and ip in ("10.52.0.2", "10.52.0.3"):
+        return ip, 14001
+
     if MODE == "hard_both" and ip == "10.52.0.2":
         sequence = (43100, 43250, 43180, 43320, 43140, 43290)
         counter = easy_counters.get(ip, 0)
@@ -1310,7 +1377,9 @@ while running:
             response = result[0] if result else None
             if response:
                 change_request = result[1]
-                if change_request & 0x04:
+                if MODE == "restricted" and change_request & 0x04:
+                    response_sock = sock
+                elif change_request & 0x04:
                     response_sock = udp_sockets[(ALTERNATE_SERVER_IP, 3479)]
                 elif change_request & 0x02:
                     response_sock = udp_sockets[(SERVER_IP, 3479)]
@@ -1854,8 +1923,65 @@ run_hard_symmetric_failure_tests() {
 	printf 'ok 1 - hard-symmetric failure remains bounded when direct UDP is unreachable\n'
 }
 
+run_restricted_nat_tests() {
+	printf '1..1\n'
+	CURRENT_TEST=1
+
+	start_fake_stun restricted
+	run ip netns exec "$NS_RA" nft add rule ip nat prerouting iifname pub udp dport 14001 dnat to 10.52.1.2:14001
+	run ip netns exec "$NS_RB" nft add rule ip nat prerouting iifname pub udp dport 14001 dnat to 10.52.2.2:14001
+	run ip netns exec "$NS_RA" nft insert rule ip nat postrouting ip saddr 10.52.1.2 udp sport 14001 snat to 10.52.0.2:14001
+	run ip netns exec "$NS_RB" nft insert rule ip nat postrouting ip saddr 10.52.2.2 udp sport 14001 snat to 10.52.0.3:14001
+
+	for ns in "$NS_RA" "$NS_RB"; do
+		run ip netns exec "$ns" nft add table ip restricted
+		run ip netns exec "$ns" nft 'add chain ip restricted forward { type filter hook forward priority 0; policy accept; }'
+		run ip netns exec "$ns" nft add rule ip restricted forward ct state established,related accept
+		run ip netns exec "$ns" nft add rule ip restricted forward iifname pub udp dport 14001 drop
+	done
+
+	write_restricted_confs
+	start_fastds
+
+	ok=false
+	for _ in $(seq 1 "$FAST_WAIT_ATTEMPTS"); do
+		sleep "$FAST_WAIT_SLEEP"
+		check_fastds_alive
+		dump_statuses
+		if [[ -f "$WORK/a.json" && -f "$WORK/b.json" && -f "$WORK/c.json" ]] &&
+			direct_hole_punched && punch_results_seen && restricted_nat_types_seen; then
+			ok=true
+			break
+		fi
+	done
+
+	[[ "$ok" == true ]] || fail 'restricted NAT peers did not establish a direct UDP path'
+
+	run ip -n "$NS_A" addr add 10.52.10.1/30 dev fda-b
+	run ip -n "$NS_B" addr add 10.52.10.2/30 dev fdb-a
+	run ip -n "$NS_A" link set fda-b up
+	run ip -n "$NS_B" link set fdb-a up
+
+	ok=false
+	for _ in $(seq 1 "$PING_WAIT_ATTEMPTS"); do
+		if ping_direct; then
+			ok=true
+			break
+		fi
+		sleep "$PING_WAIT_SLEEP"
+	done
+
+	[[ "$ok" == true ]] || fail 'restricted NAT direct path did not carry tunnel traffic'
+	printf 'ok 1 - restricted NAT peers establish and use a direct UDP path\n'
+}
+
 if [[ "$HARD_FAIL_MODE" == 1 ]]; then
 	run_hard_symmetric_failure_tests
+	exit 0
+fi
+
+if [[ "$RESTRICTED_MODE" == 1 ]]; then
+	run_restricted_nat_tests
 	exit 0
 fi
 
