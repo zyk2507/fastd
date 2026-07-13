@@ -2027,6 +2027,30 @@ run_limited_nat_tests() {
 	printf 'ok 1 - %s NAT peers establish and use a direct UDP path\n' "$label"
 }
 
+ipv6_control_relay_seen() {
+	python3 - "$WORK/a.json" "$WORK/b.json" "$WORK/c.json" <<'PY'
+import json
+import sys
+
+try:
+    a, b, c = (json.load(open(path)) for path in sys.argv[1:])
+except Exception:
+    sys.exit(1)
+
+def peer(doc, name):
+    return next((item for item in doc.get("peers", {}).values() if item.get("name") == name), {})
+
+def punched_ipv6(doc, name):
+    hole = peer(doc, name).get("hole_punch") or {}
+    address = peer(doc, name).get("address") or ""
+    return hole.get("established") and hole.get("punch_control_candidates", 0) >= 1 and address.startswith("[")
+
+manager = (c.get("punch") or {}).get("task_manager") or {}
+valid_manager = manager.get("pairs", 0) >= 1 and manager.get("launched", 0) >= 1 and manager.get("outcome_handshake", 0) >= 2
+sys.exit(0 if punched_ipv6(a, "b") and punched_ipv6(b, "a") and valid_manager else 1)
+PY
+}
+
 run_ipv6_punch_tests() {
 	printf '1..1\n'
 	CURRENT_TEST=1
@@ -2056,7 +2080,7 @@ run_ipv6_punch_tests() {
 		check_fastds_alive
 		dump_statuses
 		if [[ -f "$WORK/a.json" && -f "$WORK/b.json" && -f "$WORK/c.json" ]] &&
-			direct_hole_punched && punch_results_seen; then
+			direct_hole_punched && punch_results_seen && ipv6_control_relay_seen; then
 			ok=true
 			break
 		fi
