@@ -3900,6 +3900,8 @@ static void handle_send_endpoint_command(fastd_peer_t *sender, const fastd_punch
 			NULL, 0, false);
 		return;
 	}
+	if (fastd_peer_is_remote_passive(peer))
+		return;
 
 	if (!fastd_peer_hole_punch_allows(peer, TRANSPORT_UDP) ||
 	    !fastd_peer_transport_allows(fastd_peer_get_transport(peer), TRANSPORT_UDP)) {
@@ -4010,6 +4012,8 @@ static void handle_send_tcp_endpoint_command(fastd_peer_t *sender, const fastd_p
 			0, NULL, 0, false);
 		return;
 	}
+	if (fastd_peer_is_remote_passive(peer))
+		return;
 
 	if (fastd_peer_has_verified_backup_path(peer) && fastd_peer_active_path_proven(peer) &&
 	    peer->backup_payload_proven) {
@@ -4094,6 +4098,8 @@ static void handle_result(fastd_peer_t *sender, const fastd_punch_endpoint_t *pa
 
 	const uint8_t *key = endpoint_message_key(type, payload);
 	fastd_peer_t *subject = find_peer_by_key(key, key_len);
+	if (fastd_peer_is_remote_passive(subject))
+		return;
 	uint64_t subject_key_hash = punch_result_subject_key_hash(key, key_len);
 
 	fastd_peer_address_t endpoint;
@@ -4250,6 +4256,8 @@ bool fastd_punch_handle_control(fastd_peer_t *peer, fastd_buffer_t *buffer) {
 
 	if (!punch_control_supported())
 		goto end_free;
+	if (fastd_peer_is_remote_passive(peer))
+		goto end_free;
 
 	uint8_t type = 0;
 	const fastd_punch_endpoint_t *payload = NULL;
@@ -4319,7 +4327,7 @@ void fastd_punch_maintenance(void) {
 	size_t i;
 	for (i = 0; i < VECTOR_LEN(ctx.peers); i++) {
 		fastd_peer_t *peer = VECTOR_INDEX(ctx.peers, i);
-		if (!fastd_peer_is_established(peer))
+		if (fastd_peer_is_remote_passive(peer) || !fastd_peer_is_established(peer))
 			continue;
 
 		bool announced = send_local_nat_info(peer);

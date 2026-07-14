@@ -1836,6 +1836,45 @@ static void test_nat_traversal_inherits_and_overrides(void **state UNUSED) {
 	assert_false(fastd_peer_get_turn_relay(&peer));
 }
 
+static void test_remote_passive_disables_outbound_nat_traversal(void **state UNUSED) {
+	fastd_peer_group_t group = {
+		.nat_traversal = FASTD_TRISTATE_TRUE,
+		.port_mapping = PORT_MAPPING_PCP,
+		.hole_punch = HOLE_PUNCH_AUTO,
+		.turn_relay = FASTD_TRISTATE_TRUE,
+		.turn_servers = (fastd_turn_server_t *)0x1,
+	};
+	fastd_peer_t peer = {
+		.group = &group,
+		.remote_passive = true,
+		.port_mapping = PORT_MAPPING_PCP,
+		.hole_punch = HOLE_PUNCH_AUTO,
+		.nat_traversal = FASTD_TRISTATE_TRUE,
+		.punch_symmetric = FASTD_TRISTATE_TRUE,
+		.turn_relay = FASTD_TRISTATE_TRUE,
+	};
+	fastd_remote_t remote = { .address = addr4(0xc0000201, 10000) };
+	fastd_peer_address_t candidate = addr4(0xc0000202, 10001);
+
+	VECTOR_ADD(peer.remotes, remote);
+	peer.next_remote = 0;
+
+	assert_true(fastd_peer_is_floating(&peer));
+	assert_null(fastd_peer_get_next_remote(&peer));
+	assert_int_equal(fastd_peer_get_port_mapping_mode(&peer), PORT_MAPPING_OFF);
+	assert_int_equal(fastd_peer_get_hole_punch(&peer), HOLE_PUNCH_OFF);
+	assert_false(fastd_peer_get_nat_traversal(&peer));
+	assert_false(fastd_peer_get_punch_symmetric(&peer));
+	assert_false(fastd_peer_get_turn_relay(&peer));
+	assert_false(fastd_peer_nat_traversal_keepalive_enabled(&peer));
+
+	fastd_peer_add_direct_candidate(&peer, NULL, &candidate, NULL, 0);
+	assert_int_equal(VECTOR_LEN(peer.direct_candidates), 0);
+	assert_false(fastd_peer_send_direct_handshake(&peer, &candidate));
+
+	VECTOR_FREE(peer.remotes);
+}
+
 static void test_tcp_direct_loss_preserves_nat_session_and_schedules_reconnect(void **state UNUSED) {
 	fastd_pqueue_t *old_task_queue = ctx.task_queue;
 	int64_t old_now = ctx.now;
@@ -7333,6 +7372,7 @@ int main(void) {
 		cmocka_unit_test(test_punch_relay_backoff_is_bounded),
 		cmocka_unit_test(test_peer_punch_symmetric_inherits_and_overrides),
 		cmocka_unit_test(test_nat_traversal_inherits_and_overrides),
+		cmocka_unit_test(test_remote_passive_disables_outbound_nat_traversal),
 		cmocka_unit_test(test_tcp_direct_loss_preserves_nat_session_and_schedules_reconnect),
 		cmocka_unit_test(test_ec25519_simultaneous_responder_yield_is_deterministic),
 		cmocka_unit_test(test_ec25519_same_active_simultaneous_responder_requires_unproven_path),

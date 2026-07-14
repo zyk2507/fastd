@@ -588,9 +588,18 @@ Example config:
 | ``remote <IPv4 address> port <port>;``
 | ``remote <IPv6 address> port <port>;``
 | ``remote [ ipv4|ipv6 ] "<hostname>" port <port>;``
+| ``remote passive;``
 
   Sets the IP address or host name to connect to. If a peer doesn't have a remote address configured,
   incoming connections are accepted, but no own connection attempts will be made.
+
+  ``remote passive`` explicitly makes the peer inbound-only. It suppresses DNS resolution and all outgoing
+  handshakes for that peer, even when other ``remote`` entries are present. The peer behaves as floating for
+  incoming authentication, and the accepted UDP or TCP connection becomes the tunnel path.
+  It also overrides inherited and peer-specific NAT traversal helpers: NAT traversal, hole punching, port mapping,
+  symmetric-punch scans, TURN relay, NAT keepalives, realm candidates, discovery candidates, and punch-control
+  messages are disabled for this peer. Use it for a peer that must wait for the remote side to connect; do not use
+  it for a peer that needs normal ``remote`` dialing or realm rendezvous.
 
   The ipv4 or ipv6 options can be used to force fastd to resolve the host name for the
   specified protocol version only.

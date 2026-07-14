@@ -933,7 +933,8 @@ static realm_worker_t *create_worker(void) {
 
 	for (i = 0; i < VECTOR_LEN(ctx.peers); i++) {
 		fastd_peer_t *peer = VECTOR_INDEX(ctx.peers, i);
-		if (!peer->realm || !fastd_peer_is_enabled(peer) || fastd_peer_is_established(peer))
+		if (!peer->realm || fastd_peer_is_remote_passive(peer) || !fastd_peer_is_enabled(peer) ||
+		    fastd_peer_is_established(peer))
 			continue;
 
 		work->peers = fastd_realloc_array(work->peers, work->n_peers + 1, sizeof(realm_peer_snapshot_t));
@@ -1004,7 +1005,7 @@ static void start_events_worker(void) {
 static bool realm_has_peers(void) {
 	size_t i;
 	for (i = 0; i < VECTOR_LEN(ctx.peers); i++) {
-		if (VECTOR_INDEX(ctx.peers, i)->realm)
+		if (VECTOR_INDEX(ctx.peers, i)->realm && !fastd_peer_is_remote_passive(VECTOR_INDEX(ctx.peers, i)))
 			return true;
 	}
 
@@ -1019,7 +1020,7 @@ static fastd_peer_t *find_peer_by_realm(const char *realm) {
 	size_t i;
 	for (i = 0; i < VECTOR_LEN(ctx.peers); i++) {
 		fastd_peer_t *peer = VECTOR_INDEX(ctx.peers, i);
-		if (strequal(peer->realm, realm))
+		if (!fastd_peer_is_remote_passive(peer) && strequal(peer->realm, realm))
 			return peer;
 	}
 
@@ -1050,7 +1051,8 @@ void fastd_realm_add_candidate(
 		size_t peer_idx;
 		for (peer_idx = 0; peer_idx < VECTOR_LEN(ctx.peers); peer_idx++) {
 			fastd_peer_t *peer = VECTOR_INDEX(ctx.peers, peer_idx);
-			if (!peer->realm || !fastd_peer_is_enabled(peer) || fastd_peer_is_established(peer))
+			if (!peer->realm || fastd_peer_is_remote_passive(peer) || !fastd_peer_is_enabled(peer) ||
+			    fastd_peer_is_established(peer))
 				continue;
 
 			size_t addr_idx;
@@ -1065,7 +1067,7 @@ void fastd_realm_add_candidate(
 	if (!peer)
 		peer = find_peer_by_realm(source_id);
 
-	if (!peer || !fastd_peer_is_enabled(peer))
+	if (!peer || fastd_peer_is_remote_passive(peer) || !fastd_peer_is_enabled(peer))
 		return;
 
 	size_t i;

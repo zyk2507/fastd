@@ -101,7 +101,7 @@ static fastd_peer_t *find_probe_peer(const uint8_t *key, size_t key_len) {
 		return NULL;
 
 	fastd_peer_t *peer = conf.protocol->find_peer_by_key_data(key, key_len);
-	if (!peer || !fastd_peer_is_enabled(peer))
+	if (!peer || fastd_peer_is_remote_passive(peer) || !fastd_peer_is_enabled(peer))
 		return NULL;
 
 	return peer;

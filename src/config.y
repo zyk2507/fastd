@@ -110,6 +110,7 @@
 %token TOK_ON
 %token TOK_PACKET
 %token TOK_PACKETS
+%token TOK_PASSIVE
 %token TOK_PASSWORD
 %token TOK_PCP
 %token TOK_PEER
@@ -758,6 +759,9 @@ peer_remote:	maybe_ipv4 TOK_ADDR4 port {
 			remote.address.in.sin_port = htons($3);
 
 			VECTOR_ADD(state->peer->remotes, remote);
+		}
+	|	TOK_PASSIVE {
+			state->peer->remote_passive = true;
 		}
 	;
 

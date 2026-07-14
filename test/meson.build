@@ -39,6 +39,14 @@ test('status-output',
 	timeout : 30,
 )
 
+test('remote-passive',
+	bash,
+	args : [files('test-remote-passive.sh'), fastd_exe.full_path()],
+	protocol : 'tap',
+	is_parallel : false,
+	timeout : 15,
+)
+
 test('nat-punch-netns',
 	bash,
 	args : [files('test-nat-punch-netns.sh'), fastd_exe.full_path()],

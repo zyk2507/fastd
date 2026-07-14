@@ -463,6 +463,7 @@ remote [ipv4|ipv6] "<hostname>":<port>;
 remote <IPv4> port <port>;
 remote <IPv6> port <port>;
 remote [ipv4|ipv6] "<hostname>" port <port>;
+remote passive;
 realm "<remote-id>";
 float yes|no;
 include "<file>";
@@ -470,6 +471,7 @@ include "<file>";
 
 - `key`：peer 公钥，必填。
 - `remote`：主动连接的对端地址，可配置多条。hostname 前可加 `ipv4` 或 `ipv6` 限制解析地址族。
+- `remote passive`：将 peer 固定为纯被动模式。fastd 不解析或拨号该 peer 的 `remote`，不会从 realm/discovery/punch-control 接收候选，也不会创建 hole-punch socket、申请该 peer 的端口映射、发送 NAT metadata、使用 TURN 或 NAT traversal keepalive。它会像传统的无 `remote` floating peer 一样等待对端入站握手，并使用这条通过认证的入站 UDP/TCP 连接建立隧道。该设置优先于该 peer、peer group 和全局的 `nat traversal`、`hole-punch`、`port-mapping`、`turn relay` 和 `punch symmetric` 设置；不要把它用于需要主动连接或 realm rendezvous 的 peer。
 - 未配置 `remote` 的 peer 总是 floating，只接受入站连接，不主动连接。
 - `realm`：该 peer 在外部 rendezvous server 上的 realm ID。全局配置了 `realm server` 后，即使该 peer 未配置 `remote`，fastd 也会通过 realm 控制面获取临时 endpoint 并主动试探 UDP handshake；匿名 punch 事件会先投递给本机配置了 `realm` 的 peer，由认证握手消歧。通常配合 `transport udp` 和 `hole-punch udp|auto` 使用；它是机会式 NAT traversal，不能保证穿透 symmetric NAT 或严格防火墙。
 - `float yes`：允许该 peer 从任意地址/端口建立连接。

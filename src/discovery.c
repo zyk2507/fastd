@@ -210,7 +210,8 @@ void fastd_discovery_maybe_announce(fastd_peer_t *source, fastd_eth_addr_t sourc
 	if (!conf.peer_discovery || !conf.forward || conf.mode != MODE_TAP)
 		return;
 
-	if (!fastd_peer_is_established(source) || source->address.sa.sa_family == AF_UNSPEC)
+	if (fastd_peer_is_remote_passive(source) || !fastd_peer_is_established(source) ||
+	    source->address.sa.sa_family == AF_UNSPEC)
 		return;
 
 	if (!fastd_timed_out(source->next_discovery_announce))
@@ -225,7 +226,7 @@ void fastd_discovery_maybe_announce(fastd_peer_t *source, fastd_eth_addr_t sourc
 	for (i = 0; i < VECTOR_LEN(ctx.peers); i++) {
 		fastd_peer_t *dest = VECTOR_INDEX(ctx.peers, i);
 
-		if (dest == source || !fastd_peer_is_established(dest))
+		if (dest == source || fastd_peer_is_remote_passive(dest) || !fastd_peer_is_established(dest))
 			continue;
 
 		send_endpoint_announce(dest, source, macs, n_macs);
@@ -245,7 +246,7 @@ static bool key_is_self_or_relay(fastd_peer_t *relay, const void *key, size_t ke
 
 /** Handles a relay endpoint announcement received from an established peer */
 void fastd_discovery_handle_control(fastd_peer_t *relay, fastd_buffer_t *buffer) {
-	if (!conf.peer_discovery)
+	if (!conf.peer_discovery || fastd_peer_is_remote_passive(relay))
 		goto end_free;
 
 	if (buffer->len < sizeof(fastd_discovery_endpoint_t))

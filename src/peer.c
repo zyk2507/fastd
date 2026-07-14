@@ -209,6 +209,9 @@ static inline bool socket_ref_dynamic(const fastd_socket_t *sock) {
 
 /** Checks whether a peer should send periodic NAT traversal keepalives */
 bool fastd_peer_nat_traversal_keepalive_enabled(const fastd_peer_t *peer) {
+	if (fastd_peer_is_remote_passive(peer))
+		return false;
+
 	if (!conf.punch_keepalive)
 		return false;
 
@@ -596,7 +599,7 @@ void fastd_peer_handle_resolve(
 
 /** Initializes a peer */
 static void setup_peer(fastd_peer_t *peer) {
-	if (VECTOR_LEN(peer->remotes) == 0) {
+	if (peer->remote_passive || VECTOR_LEN(peer->remotes) == 0) {
 		peer->next_remote = -1;
 	} else {
 		size_t i;
@@ -1620,6 +1623,9 @@ void fastd_peer_add_punch_relay_backoff(fastd_peer_t *peer, const fastd_peer_add
 void fastd_peer_add_direct_candidate_source_transport(
 	fastd_peer_t *peer, fastd_peer_t *relay, const fastd_peer_address_t *remote_addr, const fastd_eth_addr_t *macs,
 	size_t n_macs, fastd_peer_direct_candidate_source_t source, uint8_t priority, uint8_t transports) {
+	if (fastd_peer_is_remote_passive(peer))
+		return;
+
 	if (relay && source == DIRECT_CANDIDATE_DISCOVERY && !conf.peer_discovery)
 		return;
 
@@ -2345,6 +2351,9 @@ static inline bool peer_configs_equal(const fastd_peer_t *peer1, const fastd_pee
 	if (peer1->floating != peer2->floating)
 		return false;
 
+	if (peer1->remote_passive != peer2->remote_passive)
+		return false;
+
 	if (!strequal(peer1->realm, peer2->realm))
 		return false;
 
@@ -2623,7 +2632,7 @@ static bool send_handshake_address(fastd_peer_t *peer, const fastd_peer_address_
 /** Sends an immediate direct punch handshake to a candidate endpoint */
 bool fastd_peer_send_direct_handshake_transport(
 	fastd_peer_t *peer, const fastd_peer_address_t *addr, fastd_peer_transport_t transport) {
-	if (!peer || !fastd_peer_is_enabled(peer))
+	if (!peer || fastd_peer_is_remote_passive(peer) || !fastd_peer_is_enabled(peer))
 		return false;
 
 	if (!fastd_peer_may_connect(peer))

@@ -172,6 +172,7 @@ struct fastd_peer {
 
 	VECTOR(fastd_remote_t) remotes; /**< The vector of the peer's remotes */
 	bool floating;                  /**< Specifies if the peer has any floating remotes */
+	bool remote_passive;            /**< Suppresses all outbound connection and NAT traversal activity for this peer */
 	char *realm;                    /**< Optional realm ID used for rendezvous-assisted direct attempts */
 
 	fastd_peer_config_state_t config_state; /**< Specifies the way this peer was configured and if it is enabled */
@@ -495,7 +496,12 @@ static inline bool fastd_peer_handshake_scheduled(fastd_peer_t *peer) {
 
 /** Checks if a peer is floating (is has at least one floating remote or no remotes at all) */
 static inline bool fastd_peer_is_floating(const fastd_peer_t *peer) {
-	return (!VECTOR_LEN(peer->remotes) || peer->floating);
+	return (peer->remote_passive || !VECTOR_LEN(peer->remotes) || peer->floating);
+}
+
+/** Checks whether a peer only accepts inbound connections and must not use traversal helpers */
+static inline bool fastd_peer_is_remote_passive(const fastd_peer_t *peer) {
+	return peer && peer->remote_passive;
 }
 
 /** Checks if a peer is not statically configured, but added after a on-verify run */
@@ -522,7 +528,7 @@ static inline bool fastd_peer_is_enabled(const fastd_peer_t *peer) {
 
 /** Returns the currently active remote entry */
 static inline fastd_remote_t *fastd_peer_get_next_remote(fastd_peer_t *peer) {
-	if (peer->next_remote < 0)
+	if (peer->remote_passive || peer->next_remote < 0)
 		return NULL;
 
 	return &VECTOR_INDEX(peer->remotes, peer->next_remote);
@@ -551,6 +557,9 @@ static inline bool fastd_peer_is_socket_dynamic(const fastd_peer_t *peer) {
 
 /** Returns the effective automatic port mapping mode for a peer */
 static inline fastd_port_mapping_mode_t fastd_peer_get_port_mapping_mode(const fastd_peer_t *peer) {
+	if (fastd_peer_is_remote_passive(peer))
+		return PORT_MAPPING_OFF;
+
 	if (peer && peer->port_mapping)
 		return peer->port_mapping;
 
@@ -572,6 +581,9 @@ static inline bool fastd_peer_transport_allows(fastd_peer_transport_t configured
 
 /** Returns the effective hole punching mode for a peer */
 static inline fastd_hole_punch_mode_t fastd_peer_get_hole_punch(const fastd_peer_t *peer) {
+	if (fastd_peer_is_remote_passive(peer))
+		return HOLE_PUNCH_OFF;
+
 	if (peer && peer->hole_punch)
 		return peer->hole_punch;
 
@@ -580,6 +592,9 @@ static inline fastd_hole_punch_mode_t fastd_peer_get_hole_punch(const fastd_peer
 
 /** Returns the effective NAT traversal setting for a peer */
 static inline bool fastd_peer_get_nat_traversal(const fastd_peer_t *peer) {
+	if (fastd_peer_is_remote_passive(peer))
+		return false;
+
 	if (peer && peer->nat_traversal.set)
 		return peer->nat_traversal.state;
 
@@ -615,6 +630,9 @@ static inline bool fastd_peer_hole_punch_allows(const fastd_peer_t *peer, fastd_
 
 /** Returns whether symmetric NAT punching strategies are enabled for a peer */
 static inline bool fastd_peer_get_punch_symmetric(const fastd_peer_t *peer) {
+	if (fastd_peer_is_remote_passive(peer))
+		return false;
+
 	if (peer && peer->punch_symmetric.set)
 		return peer->punch_symmetric.state;
 
@@ -631,6 +649,9 @@ static inline const fastd_turn_server_t *fastd_peer_get_turn_servers(const fastd
 
 /** Returns the effective TURN relay setting for a peer */
 static inline bool fastd_peer_get_turn_relay(const fastd_peer_t *peer) {
+	if (fastd_peer_is_remote_passive(peer))
+		return false;
+
 	if (peer && peer->turn_relay.set)
 		return peer->turn_relay.state;
 
