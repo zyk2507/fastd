@@ -1,6 +1,30 @@
-# fastd 配置说明
+# fastd 完整配置教程与指令参考
 
-本文根据 `src/config.y`、`src/config.c` 和相关源码整理，覆盖 fastd 配置文件支持的指令。命令行选项不是本文重点；很多命令行选项只是配置文件指令的等价入口。
+本文根据 `src/config.y`、`src/config.c` 和相关源码整理，覆盖 fastd 当前配置文件支持的指令，并给出从最小双节点到 NAT 穿透、TURN、realm rendezvous、systemd 运行和排障的部署路径。命令行选项不是配置语法的一部分，但本文也列出日常运维所需的命令。
+
+> 示例中的域名、IP、用户名和密钥均为占位符。不要把真实 `secret`、TURN 密码或 realm token 提交到版本库；配置文件和 peer 目录应仅对运行账户及管理员可读。
+
+## 阅读路径
+
+如果是首次部署，按以下顺序阅读即可：
+
+1. 生成密钥，选择 `tap`、`multitap` 或 `tun`，并完成“最小示例”。
+2. 使用“部署工作流”把虚拟接口接入路由或二层网络，再验证实际流量。
+3. 按需启用“端口映射、打洞和 TURN”；公网固定节点不需要为了“看起来高级”而开启 NAT traversal。
+4. 上线后通过 status socket 和“排障顺序”观察运行态，而不是仅凭进程仍在运行判断成功。
+
+## 配置作用域速查
+
+| 指令族 | 主配置 | peer group | peer / peer 文件 | 说明 |
+| --- | :---: | :---: | :---: | --- |
+| 身份、日志、接口、绑定、`mode`、`secret`、status socket | ✓ | — | — | 进程或本地接口级设置 |
+| `method`、peer 生命周期 hook、`include` | ✓ | ✓ | 部分 `include` | group 会继承；peer 文件只能使用 peer 语法 |
+| `transport`、`port-mapping`、`hole-punch`、`nat traversal`、TURN | ✓ | ✓ | ✓ | 由更具体的 peer 覆盖继承值 |
+| `punch symmetric` / `punch hard-symmetric` | ✓ | — | ✓ | 后者是兼容别名；只改变该 peer 的 symmetric 策略 |
+| STUN、realm、punch-control/data relay、punch 时序和预算 | ✓ | — | — | 这些是本机全局控制面设置 |
+| `remote`、`key`、`float`、`realm`、peer 专属接口和 MTU | — | — | ✓ | 仅描述一个对端 |
+
+`peer group` 可以嵌套。未被子 group 或 peer 覆盖的设置向下继承；一旦 peer 配置了自己的 TURN server 列表，它使用自己的列表而非追加父级列表。
 
 ## 基本语法
 
@@ -31,8 +55,14 @@
 | `punch control relay` | `no` |
 | `punch data relay` | `auto` |
 | `punch symmetric` | `yes` |
+| `punch keepalive` / `punch keepalive interval` | `yes` / `25` 秒 |
+| `punch maintenance interval` | `10` 秒 |
+| `punch announce interval` | `15` 秒 |
+| `punch relay interval` | `10` 秒 |
 | `punch max sockets` | `84` |
 | `punch max packets` | `800` |
+| `punch max attempts` | `1` |
+| `punch max backups` | `25` |
 | `peer limit` | unlimited |
 | `method` | 未配置时回退到 `null` 并打印警告 |
 
@@ -179,10 +209,19 @@ realm server "<url>" token "<token>" id "<local-id>" [stun server "<host>" port 
 stun server "<host>":<port>;
 stun server "<host>" port <port>;
 punch control relay yes|no;
+punch data relay auto|yes|no;
 punch symmetric yes|no;
+punch hard-symmetric yes|no;
+punch keepalive yes|no;
+punch keepalive interval <seconds>;
+punch maintenance interval <seconds>;
+punch announce interval <seconds>;
+punch relay interval <seconds>;
 punch max sockets <1-256>;
 punch max packet <1-4096>;
 punch max packets <1-4096>;
+punch max attempts <1-64>;
+punch max backups <1-256>;
 ```
 
 - `interface`：设置 TUN/TAP 接口名。名称不能包含 `/`。可使用 `%n`（peer 名称）或 `%k`（peer key 前 16 位）为多接口模式生成唯一名称。
@@ -203,8 +242,16 @@ punch max packets <1-4096>;
 - `punch control relay yes`：允许一个已连接的可信节点在 peer 之间转发 punch control 包，转发控制面 endpoint/NAT 信息。它可用于 A/B 都只与公网节点 C 建立普通连接、但 A/B 之间希望直接打洞的拓扑；A/B 仍需要互相配置 peer 公钥，通常配合全局 `stun server`、`transport udp|auto` 和 `hole-punch udp|auto`。
 - `punch data relay auto|yes|no`：控制 NAT traversal 数据 fallback。默认 `auto`，在启用 `nat traversal yes` 或 `punch control relay yes` 时生效；显式 `no` 可关闭。该 fallback 不等于 `forward yes`：它在 TAP/Multitap 模式下转发已学习目的 MAC 的单播包，并且只对 ARP 与 IPv6 Neighbor Discovery 做受限地址解析 relay，帮助首包建立 MAC 学习；其它未知 MAC、广播和组播不会被泛洪。源 peer 和目的 peer 都必须已认证建立并启用 NAT traversal。
 - `punch symmetric yes|no`：控制是否启用 symmetric NAT 打洞策略。全局默认 `yes`，peer 可覆盖；开启后，easy-symmetric NAT 使用端口步进预测，普通 symmetric NAT 使用 `punch max sockets` 限制内的有界端口扫描。关闭后，fastd 只使用精确 endpoint / cone 风格打洞，不做 symmetric 端口预测或扫描。
+- `punch hard-symmetric yes|no`：已弃用的兼容别名，语义等同于 `punch symmetric yes|no`；新配置请只使用后者。
+- `punch keepalive yes|no`：是否在 NAT traversal 路径上定期发送空 payload 保活。默认开启；位于 NAT 后的节点通常不应关闭，否则路由器映射和备用直连路径可能在空闲时失效。
+- `punch keepalive interval <seconds>`：保活间隔，默认 25 秒。必须为大于 0 的秒数。
+- `punch maintenance interval <seconds>`：打洞任务、临时 socket 与状态的维护周期，默认 10 秒。降低间隔会更快重试，但增加控制面和 socket 开销。
+- `punch announce interval <seconds>`：本机 NAT 元数据向已建立 peer 公告的最小间隔，默认 15 秒。
+- `punch relay interval <seconds>`：协调节点为同一任务生成 punch 命令的最小间隔，默认 10 秒。
 - `punch max sockets`：限制单次 punch 命令可使用的预测/探测 UDP socket 数，默认 `84`，最大 `256`。hard-symmetric NAT 使用该上限；easy-symmetric 预测仍使用 25 端口窗口。
 - `punch max packet` / `punch max packets`：限制每轮维护周期内 relay 节点转发的 punch control 包数量，默认 `800`，最大 `4096`；两个写法等价。`punch data relay` 的 ARP/IPv6 ND 自举转发也使用该预算，避免一次向过多 peer 发送地址解析包。
+- `punch max attempts`：一个 punch-control endpoint 的认证 handshake 尝试次数上限，默认 1，最大 64。它不是应用流量的重传次数；提高它会增加短时间探测流量。
+- `punch max backups`：每个 peer 保持保活的非活动 direct candidate 上限，默认 25，最大 256。有效备用路径可在活动路径失效时被提升；资源受限设备可下调这个值。
 
 ### 状态 socket
 
@@ -295,7 +342,7 @@ turn server "<address>" port <port> user "<username>" password "<password>";
 - `nat-pmp yes|no`：兼容别名，等价于 `port-mapping nat-pmp|off`。
 - `hole-punch tcp|udp|auto`：启用确定性 IPv4 打洞；默认关闭。双方需要知道彼此公网 IPv4 endpoint；在 TAP relay 转发网络中，`peer discovery yes` 可以由可信 relay 提供这个 endpoint。
 - `nat traversal yes`：一键启用 `transport auto`、`hole-punch auto`、`port-mapping auto`（构建支持时）、symmetric NAT 策略、root 上的 punch-control relay、受控 data relay fallback 和 NAT keepalive。需要关闭自动端口映射时，在其后写 `port-mapping off`。
-- `stun server`、`punch control relay`、`punch data relay`、`punch max sockets`、`punch max packet(s)` 只能写在主配置中；`punch symmetric` 可写在主配置或 peer 配置中。
+- `stun server`、`punch control relay`、`punch data relay`、所有 `punch … interval`、`punch keepalive`、`punch max sockets`、`punch max packet(s)`、`punch max attempts` 与 `punch max backups` 只能写在主配置中；`punch symmetric` 可写在主配置或 peer 配置中。
 - `stun server`：启用全局 NAT 类型识别，结果用于 status 输出和 punch control NAT 元数据交换。该指令不同于 `realm server ... stun server ...`；realm 内嵌 STUN 只用于向 realm server 通告当前 UDP endpoint。
 - `punch control relay yes`：启用控制面 endpoint/NAT 信息转发，可在 `forward no` 的可信公网节点上帮助两个已配置彼此公钥的 NAT 后 peer 发起直接 UDP 打洞。
 - `punch data relay auto|yes|no`：启用受控数据 fallback。开启后，可信公网节点即使保持 `forward no`，也能在 A/B 直连尚未建立或暂时不可用时中继已学习目的 MAC 的单播数据；同时会 relay ARP/IPv6 ND 来完成初始 MAC 学习，但不会泛洪其它未知目的 MAC 或广播/组播。
@@ -579,6 +626,143 @@ peer "site-b" {
 ```
 
 注意：L2TP offload 要求 Linux L2TP 支持、编译时启用 `offload_l2tp`，且不能启用 payload compression。
+
+## 部署工作流：从空目录到可验证隧道
+
+以下流程适用于两个可互访节点。它故意先不启用 NAT traversal、TURN 或 realm：先证明密钥、监听、路由和 MTU 正确，再增加复杂性。
+
+### 1. 创建目录和密钥
+
+```sh
+install -d -m 0750 /etc/fastd/mesh/peers
+umask 077
+fastd --generate-key
+```
+
+在每个节点保存该节点输出的 `Secret`；仅把 `Public` 复制给对端。不要将两台节点的 `Secret` 写成同一个值。可用以下命令从配置中的私钥重新确认公钥：
+
+```sh
+fastd --machine-readable --show-key --config /etc/fastd/mesh/fastd.conf
+```
+
+### 2. 选择接口模式和地址规划
+
+| 目标 | 推荐模式 | 地址和路由工作 |
+| --- | --- | --- |
+| 两端或 mesh 的二层网桥 | `tap` | 将一个共享接口接入 bridge，或使用 hook 配置 IP/bridge |
+| 每个 peer 都要独立二层接口 | `multitap` | 使用 `interface "fastd-%n";`，每个 peer 分别接入 VLAN、bridge 或策略 |
+| 三层点到点 / 路由 VPN | `tun` | 在 hook 或系统网络配置中为 TUN 配置地址和静态路由 |
+
+fastd 只创建和承载 TUN/TAP，不会自动替你分配虚拟 IP、添加路由、启用 Linux 转发或配置防火墙。`tap` 中广播域的环路由网络拓扑负责避免；`forward yes` 也必须谨慎使用。
+
+### 3. 写主配置与 peer 文件
+
+`/etc/fastd/mesh/fastd.conf`：
+
+```conf
+mode tun;
+interface "fastd0";
+bind 0.0.0.0:10000 default ipv4;
+log level info;
+status socket "/run/fastd/mesh.sock";
+
+method "salsa2012+umac";
+secret "<LOCAL_SECRET>";
+
+on up sync "ip addr replace 10.70.0.1/30 dev $INTERFACE; ip link set $INTERFACE up";
+on down sync "ip link set $INTERFACE down";
+
+include peers from "peers";
+```
+
+`/etc/fastd/mesh/peers/site-b`：
+
+```conf
+key "<SITE_B_PUBLIC_KEY>";
+remote ipv4 "vpn-b.example.net" port 10000;
+float no;
+```
+
+对端使用镜像配置和不同的 TUN 地址（例如 `10.70.0.2/30`）。如果使用 shell hook，请为包含空格、分号或变量展开的命令正确加引号，并将脚本改为受版本控制、可单独测试的文件；复杂逻辑不应堆在一行 hook 中。
+
+### 4. 放行外部端口并接入业务网络
+
+至少放行与 `bind` 相同的 UDP 端口；若使用 TCP transport 或 TURN，还要按实际 listener / TURN server 放行相应 TCP/UDP 流量。示例（请按自身防火墙框架调整）：
+
+```sh
+nft add rule inet filter input udp dport 10000 accept
+sysctl -w net.ipv4.ip_forward=1       # 只有本机要转发三层 VPN 流量时才需要
+```
+
+在路由器或远端主机增加到 VPN 子网的路由。例如，远端 LAN `10.80.0.0/24` 经由 site-b 时，需要在本地添加指向 fastd 对端隧道地址的路由。不要用 `forward yes` 代替操作系统三层路由。
+
+### 5. 验证配置、启动与验收
+
+```sh
+fastd --verify-config --config /etc/fastd/mesh/fastd.conf
+fastd --config /etc/fastd/mesh/fastd.conf --log-level verbose
+
+# 另一个终端：不重启 daemon，只查询运行态
+fastd --status-socket /run/fastd/mesh.sock --status
+fastd --status-socket /run/fastd/mesh.sock --status --json
+ip link show fastd0
+ping -I fastd0 10.70.0.2
+```
+
+验收应至少包括：两侧 status 显示 established peer、虚拟接口已 UP、双向 ping 或真实业务端口可达、重启其中一端后能重新建立 session。对于 `tap`，还应检查 ARP/MAC 学习及广播域没有环路；对于 `tun`，还应检查返回路由，避免只有单向流量。
+
+## 命令行、重载与 systemd
+
+配置文件和命令行按出现顺序解析：放在后面的设置覆盖前面的设置。日常只需记住下列命令；完整参数可使用 `fastd --help` 查看。
+
+| 目的 | 命令或选项 |
+| --- | --- |
+| 前台调试 | `fastd --config /etc/fastd/mesh/fastd.conf --log-level debug` |
+| 后台运行 | `fastd --daemon --pid-file /run/fastd/mesh.pid --config …` |
+| 只校验语法与构建支持 | `fastd --verify-config --config …` |
+| 生成 / 查看密钥 | `--generate-key`；`--show-key --config …`；配合 `--machine-readable` |
+| 加载一个 peer 或 peer 目录 | `--config-peer FILE`；`--config-peer-dir DIR` |
+| 查询 status socket | `--status-socket PATH --status [--json]` |
+| 重新读取 peer 目录 | 向主进程发送 `SIGHUP` |
+
+可使用仓库提供的 [systemd 模板](doc/examples/fastd@.service)：
+
+```ini
+[Service]
+Type=notify
+ExecStart=/usr/bin/fastd --syslog-level info --syslog-ident fastd@%I -c /etc/fastd/%I/fastd.conf
+ExecReload=/bin/kill -HUP $MAINPID
+```
+
+安装为 `/etc/systemd/system/fastd@.service` 后：
+
+```sh
+systemctl daemon-reload
+systemctl enable --now fastd@mesh
+systemctl reload fastd@mesh
+journalctl -u fastd@mesh -f
+```
+
+`SIGHUP` 的主要用途是重载 `include peers from` 目录；对主配置结构、接口模式、bind 或全局密钥的变更，使用受控重启并重新验证状态，不要假设 reload 会无中断应用所有设置。
+
+## 安全与生产配置清单
+
+- 每个节点使用独立私钥，目录权限建议为 `0750`，包含私钥的文件为 `0640` 或更严格；避免把私钥、TURN 密码和 realm token 写进日志、镜像或 CI 输出。
+- 使用真实的认证加密 `method`。`null` 和 `null@l2tp` 只适合非常明确的测试 / offload 场景，不能用于不可信网络，也不承载 discovery 控制包。
+- 对固定公网 peer 设置 `float no` 与明确 `remote`；只有需要地址漂移、动态接入或 realm rendezvous 的 peer 才使用 `float yes` 或不配置 `remote`。
+- `on verify` 接受未知 peer 时相当于把接入控制交给外部程序。脚本必须校验输入、设置超时并记录审计信息；默认的显式 `peer` 白名单更易审计。
+- 仅在需要 peer-to-peer 转发时启用 `forward yes`，并设计无环 topology。把 `punch data relay` 视为受限 NAT fallback，而不是通用二层交换机。
+- 启用 `port-mapping auto` 前确认你愿意让进程向本地网关申请映射；在受管企业网络中常应显式设为 `off`，只使用管理员配置的防火墙/NAT 规则。
+- 运行 fastd 的账户需要创建或操作 TUN/TAP 所需权限。先在 staging 测试 `drop capabilities early|force`；不能确认时保留默认 `yes`，不要为了省事设为 `no`。
+
+## 排障顺序
+
+1. **无法启动**：先运行 `--verify-config`；再检查所选的 `zstd`、TURN、NAT-PMP/UPnP/PCP、L2TP 是否被当前构建启用。配置解析器会拒绝未编译支持的后端。
+2. **接口没有出现**：检查 `mode`、`persist interface`、`on pre-up` / `on up` 日志和 `/dev/net/tun`。`multitap` 且 `persist interface no` 时，peer 未建立前看不到对应接口是预期行为。
+3. **有 session 但业务不通**：区分 TUN 路由问题与 TAP bridge/MAC 问题；检查双向路由、rp_filter、防火墙、MTU，以及远端是否允许回程流量。先用小 ping，再用实际 TCP/UDP 业务验证。
+4. **NAT 后无法直连**：确认 A/B 都有对方公钥、STUN 可访问、`Hole Punch` 状态有 endpoint/NAT metadata，并保留 C 或 TURN fallback。不要把 `punch control relay` 当作流量 relay；若必须保证业务，配置 `forward yes` 的可信 relay 或 TURN。
+5. **直连偶发失效**：查看 keepalive、活动/备用路径、路由器 UDP 超时和 `punch max backups`。在明确资源预算后再调整 socket/packet/interval 上限，避免盲目把所有值设到最大。
+6. **status 自动化失败**：用 `--status --json`，检查 JSON 字段而非依赖人类表格字符；确认查询的是运行中 daemon 创建的同一个 UNIX socket。
 
 ## 验证配置
 
